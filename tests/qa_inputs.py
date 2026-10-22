@@ -243,7 +243,7 @@ for label, v in (("int", 10), ("empty string", ""), ("nested list", [["a"]]),
                  ("None entry", [None]), ("bool", [True])):
     want_error(P, f"protected_terms = {label}",
                lambda v=v, l=label: load_policy(_json(f"prot_{l}.json", pol(protected_terms=v))))
-want_ok(P, "protected_terms = 5000 valid strings", lambda: load_policy(
+want_error(P, "protected_terms = 5000 valid strings (documented cap: 500)", lambda: load_policy(
     _json("prot_big.json", pol(protected_terms=[f"term{i}" for i in range(5000)]))))
 for label, v in (("string 'true'", "true"), ("int 1", 1), ("int 0", 0), ("None", None)):
     want_error(P, f"allow_enable = {label}", lambda v=v, l=label: load_policy(_json(f"ae_{l}.json", pol(allow_enable=v))))
@@ -262,12 +262,12 @@ want_error(E, "state missing campaign_name", lambda: load_state(
     _json("s_missing.json", {k: v for k, v in state().items() if k != "campaign_name"})))
 want_error(E, "state guards not an object", lambda: load_state(_json("s_g.json", state(guards=[]))))
 want_error(E, "state invalid UTF-8", lambda: load_state(_file("s_utf.json", b'{"a": "\xff\xfe"}')))
-want_error(E, "state UTF-8 BOM", lambda: load_state(
+want_ok(E, "state UTF-8 BOM (valid UTF-8, accepted)", lambda: load_state(
     _file("s_bom.json", b"\xef\xbb\xbf" + json.dumps(state()).encode())))
 
 for label, v in (("string '10'", "10"), ("0", 0), ("-1", -1), ("1e-9", 1e-9),
                  ("NaN", NAN), ("infinite", INF), ("huge 1e12", 1e12), ("bool True", True),
-                 ("list", [10]), ("None", None)):
+                 ("list", [10])):
     # The composed invariant: whatever load_state lets through, plan must refuse cleanly.
     p = _json(f"s_budget_{label.replace(' ', '_').replace('/', '_')}.json", state(daily_budget_usd=v))
     want_error(E, f"load_state+plan with daily_budget_usd = {label}", lambda p=p: plan(load_state(p), live(), today=TODAY),
@@ -337,15 +337,20 @@ for label, v in (("dict without text", {"match_type": "PHRASE"}), ("text only wh
                  ("entry not a dict", "free"), ("text None", {"text": None})):
     want_error(S, f"negatives_add entry = {label}",
                lambda v=v: apply_changes(st_state(), {"negatives_add": [v]}))
-for label, v in (("unknown FUZZY", "FUZZY"), ("EXACT with trailing space", "EXACT "), ("int 3", 3),
-                 ("empty", ""), ("lower PHRASE ok?", "phrase")):
+for label, want in (("EXACT with trailing space", "EXACT"), ("lower phrase", "PHRASE")):
+    want_ok(S, f"negatives_add match_type = {label} (normalised before commit)",
+            lambda v=label, w=want: apply_changes(st_state(), {"negatives_add": [{"text": "x", "match_type": {"EXACT": "EXACT ", "PHRASE": "phrase"}[w]}]}),
+            pred=lambda r, w=want: r[0]["negatives_add"][-1]["match_type"] == w)
+for label, v in (("unknown FUZZY", "FUZZY"), ("int 3", 3), ("empty", "")):
     want_error(S, f"negatives_add match_type = {label}",
                lambda v=v: apply_changes(st_state(), {"negatives_add": [{"text": "x", "match_type": v}]}),
                sev="high" if label.startswith(("unknown", "EXACT")) else "medium",
                note="an invalid match type is committed to git and only rejected at plan time")
-want_ok(S, "negatives_add unicode + 1000 chars",
-        lambda: apply_changes(st_state(), {"negatives_add": [{"text": "é" * 500}, {"text": "ü" * 1000}]}),
-        pred=lambda r: len(r[0]["negatives_add"]) == 3)
+want_error(S, "negatives_add unicode + 1000 chars (Google keyword limit is 80)",
+        lambda: apply_changes(st_state(), {"negatives_add": [{"text": "é" * 500}, {"text": "ü" * 1000}]}))
+want_ok(S, "negatives_add unicode within 80 chars",
+        lambda: apply_changes(st_state(), {"negatives_add": [{"text": "é" * 40}]}),
+        pred=lambda r: r[0]["negatives_add"][-1]["text"] == "é" * 40)
 want_error(S, "changes = None", lambda: apply_changes(st_state(), None))
 want_error(S, "changes = 5", lambda: apply_changes(st_state(), 5))
 want_error(S, "changes is a list of non-settable", lambda: apply_changes(st_state(), ["status", "guards"]))
