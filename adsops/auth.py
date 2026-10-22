@@ -50,13 +50,60 @@ class StaticToken(TokenProvider):
         return "StaticToken(token=[REDACTED])"
 
 
+def _openssl_refresher(info, scope, runner=subprocess.run, http=None, now=time.time):
+    """Zero-dependency service-account flow: RS256-sign a JWT with the system `openssl`, exchange it at
+    Google's token endpoint over urllib. Used when google-auth is not installed (e.g. MCPB bundles)."""
+    import base64, json as _json, os as _os, tempfile, urllib.parse, urllib.request
+    b64 = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b"=")
+    for k in ("client_email", "private_key"):
+        if not info.get(k):
+            raise ToolError(f"service-account JSON is missing '{k}'")
+    uri = info.get("token_uri") or "https://oauth2.googleapis.com/token"
+    t = int(now())
+    claims = {"iss": info["client_email"], "scope": scope, "aud": uri, "iat": t, "exp": t + 3600}
+    signing_input = b64(b'{"alg":"RS256","typ":"JWT"}') + b"." + b64(_json.dumps(claims).encode())
+    fd, key_path = tempfile.mkstemp(prefix="adsops-", suffix=".pem")
+    try:
+        _os.chmod(key_path, 0o600)
+        with _os.fdopen(fd, "w") as fh:
+            fh.write(info["private_key"])
+        r = runner(["openssl", "dgst", "-sha256", "-sign", key_path], input=signing_input, capture_output=True)
+    except FileNotFoundError:
+        raise ToolError("neither google-auth nor openssl is available to sign the service-account token")
+    finally:
+        try:
+            _os.unlink(key_path)
+        except OSError:
+            pass
+    if r.returncode != 0 or not r.stdout:
+        raise ToolError("openssl could not sign the service-account token")
+    assertion = (signing_input + b"." + b64(r.stdout)).decode()
+    body = urllib.parse.urlencode({"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                                   "assertion": assertion}).encode()
+    try:
+        if http:
+            data = http(uri, body)
+        else:
+            req = urllib.request.Request(uri, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read())
+    except Exception as e:
+        raise ToolError("service-account token exchange failed: " + _hide(e))
+    if not data.get("access_token"):
+        raise ToolError("service-account token exchange returned no access_token")
+    return data["access_token"], t + int(data.get("expires_in", 3600))
+
+
 def _google_refresher(info, scope):
-    """Default refresher. The ONLY optional third-party import in adsops, done lazily here."""
+    """Default refresher: google-auth when installed, else the zero-dependency openssl flow."""
     try:
         from google.oauth2 import service_account
+    except Exception:
+        return _openssl_refresher(info, scope)
+    try:
         from google.auth.transport.requests import Request
-    except Exception as e:  # pragma: no cover - depends on the host
-        raise ToolError("google-auth is not installed: " + _hide(e))
+    except Exception:  # no `requests`: google-auth's stdlib http.client transport keeps bundles pure-Python
+        from google.auth.transport._http_client import Request
     try:
         creds = service_account.Credentials.from_service_account_info(info, scopes=[scope])
         creds.refresh(Request())
@@ -389,4 +436,26 @@ def selftest():
                                 "sources": [{"kind": "telepathy"}]}), needle="not supported")
     raises(lambda: from_config({"type": "magic", "token": "x"}), needle="not supported")
     raises(lambda: from_config({"token": "x"}), needle="type is required")
+    # zero-dependency openssl flow (mocked runner + http): JWT shape, key file removed, token returned
+    seen = {}
+    class _R:
+        returncode, stdout = 0, b"sig"
+    def _run(cmd, input=None, capture_output=None):
+        seen["cmd"], seen["input"], seen["keyfile"] = cmd, input, cmd[-1]
+        seen["mode"] = oct(os.stat(cmd[-1]).st_mode & 0o777)
+        return _R()
+    def _http(uri, body):
+        seen["body"] = body
+        return {"access_token": "tok123", "expires_in": 3599}
+    tok, exp = _openssl_refresher({"client_email": "a@b", "private_key": "KEY"}, "s", runner=_run, http=_http, now=lambda: 1000)
+    check(tok == "tok123" and exp == 1000 + 3599, "openssl flow returns token + expiry")
+    check(seen["cmd"][:4] == ["openssl", "dgst", "-sha256", "-sign"] and seen["mode"] == "0o600", "key file 0600 for openssl")
+    check(not os.path.exists(seen["keyfile"]), "temp key file removed")
+    check(b"jwt-bearer" in seen["body"] and seen["input"].count(b".") == 1, "jwt-bearer grant with header.claims signing input")
+    try:
+        _openssl_refresher({"client_email": "a@b"}, "s", runner=_run, http=_http)
+        check(False, "missing private_key refused")
+    except ToolError:
+        check(True, "missing private_key refused")
+
     return n

@@ -44,12 +44,14 @@ Read this before pointing it at a live account.
 **1. Install.**
 
 ```bash
-pipx install adsops-mcp          # console script: adsops-mcp
+# from GitHub (PyPI release coming soon)
+pipx install git+https://github.com/antonioac1/adrails     # console script: adsops-mcp
 # or run without installing:
-uvx --from adsops-mcp adsops-mcp --config /absolute/path/config.json
-# service-account tokens need the google-auth extra:
-pipx install "adsops-mcp[google]"
+uvx --from git+https://github.com/antonioac1/adrails adsops-mcp --config /absolute/path/config.json
 ```
+
+No other dependencies. Service-account tokens are signed with your system `openssl`
+when `google-auth` isn't installed (install `google-auth` if you prefer it).
 
 The core is stdlib-only. Check it offline (everything mocked, no network):
 
