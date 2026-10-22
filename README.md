@@ -19,6 +19,17 @@ Three things it does differently:
 - **Pay per call in sats.** Optional hosted add-ons, Lightning-first, metered per call in sats —
   coming soon. Nothing in this release contacts any hosted service.
 
+## Testing
+
+```bash
+python3 -m adsops --selftest           # 430 unit checks, everything mocked
+python3 tests/qa_invariants.py         # 200 random sequences against a simulated Google Ads account
+python3 tests/qa_inputs.py             # hostile policy/state/config inputs (NaN, Infinity, bad dates, bad UTF-8, ...)
+python3 tests/qa_secrets.py            # canary tokens injected everywhere; none may reach output or logs
+```
+The QA suites were written adversarially by a separate agent with no write access to `adsops/`, and every finding was fixed
+or documented as intended behaviour.
+
 ## What AdRails cannot guarantee
 
 Read this before pointing it at a live account.

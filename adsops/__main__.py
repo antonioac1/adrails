@@ -8,7 +8,7 @@ import sys
 def _selftest():
     import importlib
     total = 0
-    for name in ("errors", "protocol", "meter", "auth", "platforms.google_ads", "engine", "config", "statestore", "policy", "safety", "tools"):
+    for name in ("errors", "protocol", "meter", "auth", "platforms.google_ads", "engine", "config", "statestore", "policy", "safety", "strict", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
         print(f"  {name:22s} {n} checks", file=sys.stderr)

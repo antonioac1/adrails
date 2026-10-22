@@ -7,11 +7,12 @@ and commit additionally needs commit_policy.allow_commit and, by default, a clea
 import datetime as dt
 import json
 import os
+import re
 import secrets
 import time
 
 from adsops import __version__, auth, config, engine, meter as meter_mod, policy as policy_mod, protocol, safety, statestore
-from adsops.errors import RailViolation, ToolError
+from adsops.errors import RailViolation, ToolError, scrub
 from adsops.platforms import google_ads
 
 KEY = {"type": "object", "properties": {"campaign": {"type": "string", "description": "campaign key from adsops_campaigns"}},
@@ -136,8 +137,8 @@ def _commit(ctx, account, key, camp, eff, pol, client, live, ops, given_pid):
             rec = safety.reconcile(ops, engine.plan(eff, live2, end_field=ctx.end_field())[0])
         except Exception as e2:   # noqa: BLE001 — reconciliation is best-effort; say so
             rec = {"error": f"could not reconcile: {type(e2).__name__}"}
-        ctx.audit({"tool": "commit_failed", "campaign": key, "error": str(e)[:300], "reconcile": rec})
-        raise ToolError(f"commit failed: {e}. Reconciled against live, NOT retried: {json.dumps(rec)}")
+        ctx.audit({"tool": "commit_failed", "campaign": key, "error": scrub(str(e), 300), "reconcile": rec})
+        raise ToolError(f"commit failed: {scrub(str(e), 300)}. Reconciled against live, NOT retried: {json.dumps(rec)}") from None
 
 
 def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter=None):
@@ -263,7 +264,8 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
                 _preflight(ctx, new_eff, pol, live, ops)
             msg = f"adsops_set {key}: {'; '.join(summary)} — {reason} [via adsops]"
             kw = {"runner": ctx.git_runner} if ctx.git_runner else {}
-            out["commit"] = statestore.write_and_commit(camp["state_file"], new_raw, msg, **kw)
+            sha = statestore.write_and_commit(camp["state_file"], new_raw, msg, **kw)
+            out["commit"] = sha if re.fullmatch(r"[0-9a-f]{7,64}", str(sha or "")) else "unknown"
             if args.get("apply") and ops:
                 out["res"] = _commit(ctx, account, key, camp, new_eff, pol, client, live, ops, args.get("plan_id"))
                 out["applied"] = True

@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 
+from . import strict
 from .errors import ToolError, scrub
 
 PLATFORMS = {"google_ads"}
@@ -66,14 +67,10 @@ def _load_credentials(cfg):
 
 def load_config(path):
     """Read, validate and normalise a deployment config. Returns the dict."""
+    if not isinstance(path, str):
+        raise ToolError("config: path must be a string")
     p = _expand(path)
-    try:
-        with open(p, "r", encoding="utf-8") as fh:
-            cfg = json.load(fh)
-    except FileNotFoundError:
-        raise ToolError(f"config file not found: {p}")
-    except (OSError, ValueError) as e:
-        raise ToolError(f"config file unreadable: {p}: {scrub(e, 300)}")
+    cfg = strict.load_json_file(p, "config file")
     if not isinstance(cfg, dict):
         raise ToolError("config: top level must be a JSON object")
 
@@ -86,11 +83,14 @@ def load_config(path):
     accounts = cfg.get("accounts")
     if not isinstance(accounts, list) or not accounts:
         raise ToolError("config: 'accounts' must be a non-empty list")
-    seen = {}
+    seen, seen_accounts = {}, set()
     for i, acct in enumerate(accounts):
         if not isinstance(acct, dict):
             raise ToolError(f"config: accounts[{i}] must be an object")
         akey = _need_str(acct, "key", f"accounts[{i}]: ")
+        if akey in seen_accounts:
+            raise ToolError(f"config: duplicate account key: '{akey}'")
+        seen_accounts.add(akey)
         plat = _need_str(acct, "platform", f"account '{akey}': ")
         if plat not in PLATFORMS:
             raise ToolError(

@@ -10,6 +10,7 @@ import re
 import subprocess
 import time
 
+from adsops import strict
 from adsops.errors import RailViolation, ToolError
 
 SETTABLE = ("daily_budget_usd", "status", "end_date", "negatives_add")
@@ -18,15 +19,17 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 def apply_changes(state, changes):
     """Return (new_state, summary list). Pure. Refuses guard edits and malformed values."""
+    if not isinstance(changes, dict):
+        raise ToolError("changes must be an object")
     bad = sorted(set(changes) - set(SETTABLE))
     if bad:
         raise RailViolation(f"not settable: {', '.join(bad)} (only {', '.join(SETTABLE)})")
     new, summary = copy.deepcopy(state), []
     if "daily_budget_usd" in changes:
-        b = changes["daily_budget_usd"]
-        if isinstance(b, bool) or not isinstance(b, (int, float)) or b <= 0:
-            raise ToolError("daily_budget_usd must be a positive number")
+        b = strict.finite_number(changes["daily_budget_usd"], "daily_budget_usd", 0, allow_equal_min=False)
         b = round(float(b), 2)
+        if b < 0.01:
+            raise ToolError("daily_budget_usd must be at least 0.01")
         if b != state.get("daily_budget_usd"):
             summary.append(f"budget {state.get('daily_budget_usd')} -> {b}")
         new["daily_budget_usd"] = b
@@ -39,8 +42,7 @@ def apply_changes(state, changes):
         new["status"] = s
     if "end_date" in changes:
         e = changes["end_date"]
-        if not isinstance(e, str) or not _DATE.match(e):
-            raise ToolError("end_date must be YYYY-MM-DD")
+        strict.iso_date(e, "end_date")
         if e != state.get("end_date"):
             summary.append(f"end {state.get('end_date')} -> {e}")
         new["end_date"] = e
@@ -48,10 +50,8 @@ def apply_changes(state, changes):
         have = {(n["text"].strip().lower(), n.get("match_type", "PHRASE").upper())
                 for n in state.get("negatives_add", [])}
         added = []
-        for n in changes["negatives_add"]:
-            if not isinstance(n, dict) or not isinstance(n.get("text"), str) or not n["text"].strip():
-                raise ToolError(f"bad negative {n!r}")
-            key = (n["text"].strip().lower(), str(n.get("match_type", "PHRASE")).upper())
+        for n in strict.negatives_list(changes["negatives_add"]):
+            key = (n["text"], n["match_type"])
             if key not in have:
                 have.add(key)
                 added.append({"text": key[0], "match_type": key[1]})

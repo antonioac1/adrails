@@ -40,7 +40,7 @@ class StaticToken(TokenProvider):
 
     def __init__(self, token):
         if not isinstance(token, str) or not token.strip():
-            raise ToolError("static token must be a non-empty string")
+            raise ToolError("static token must be a non-empty string") from None
         self._token = token.strip()
 
     def access_token(self):
@@ -57,7 +57,7 @@ def _openssl_refresher(info, scope, runner=subprocess.run, http=None, now=time.t
     b64 = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b"=")
     for k in ("client_email", "private_key"):
         if not info.get(k):
-            raise ToolError(f"service-account JSON is missing '{k}'")
+            raise ToolError(f"service-account JSON is missing '{k}'") from None
     uri = info.get("token_uri") or "https://oauth2.googleapis.com/token"
     t = int(now())
     claims = {"iss": info["client_email"], "scope": scope, "aud": uri, "iat": t, "exp": t + 3600}
@@ -69,14 +69,14 @@ def _openssl_refresher(info, scope, runner=subprocess.run, http=None, now=time.t
             fh.write(info["private_key"])
         r = runner(["openssl", "dgst", "-sha256", "-sign", key_path], input=signing_input, capture_output=True)
     except FileNotFoundError:
-        raise ToolError("neither google-auth nor openssl is available to sign the service-account token")
+        raise ToolError("neither google-auth nor openssl is available to sign the service-account token") from None
     finally:
         try:
             _os.unlink(key_path)
         except OSError:
             pass
     if r.returncode != 0 or not r.stdout:
-        raise ToolError("openssl could not sign the service-account token")
+        raise ToolError("openssl could not sign the service-account token") from None
     assertion = (signing_input + b"." + b64(r.stdout)).decode()
     body = urllib.parse.urlencode({"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                                    "assertion": assertion}).encode()
@@ -88,9 +88,9 @@ def _openssl_refresher(info, scope, runner=subprocess.run, http=None, now=time.t
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = _json.loads(resp.read())
     except Exception as e:
-        raise ToolError("service-account token exchange failed: " + _hide(e))
+        raise ToolError("service-account token exchange failed: " + _hide(e)) from None
     if not data.get("access_token"):
-        raise ToolError("service-account token exchange returned no access_token")
+        raise ToolError("service-account token exchange returned no access_token") from None
     return data["access_token"], t + int(data.get("expires_in", 3600))
 
 
@@ -108,7 +108,7 @@ def _google_refresher(info, scope):
         creds = service_account.Credentials.from_service_account_info(info, scopes=[scope])
         creds.refresh(Request())
     except Exception as e:
-        raise ToolError("service-account token refresh failed: " + _hide(e))
+        raise ToolError("service-account token refresh failed: " + _hide(e)) from None
     token = getattr(creds, "token", None)
     expiry = getattr(creds, "expiry", None)
     try:
@@ -123,7 +123,7 @@ class ServiceAccount(TokenProvider):
 
     def __init__(self, info_loader, scope=SCOPE_GOOGLE_ADS, now=time.time, refresher=None):
         if not callable(info_loader):
-            raise ToolError("ServiceAccount needs a callable info_loader")
+            raise ToolError("ServiceAccount needs a callable info_loader") from None
         self.info_loader = info_loader
         self.scope = scope
         self.now = now
@@ -136,19 +136,19 @@ class ServiceAccount(TokenProvider):
             return self._token
         info = self.info_loader()  # a ToolError from a loader propagates untouched
         if not isinstance(info, dict) or not info:
-            raise ToolError("service-account info loader returned no credential object")
+            raise ToolError("service-account info loader returned no credential object") from None
         try:
             pair = self.refresher(info, self.scope)
         except ToolError:
             raise
         except Exception as e:
-            raise ToolError("service-account token refresh failed: " + _hide(e))
+            raise ToolError("service-account token refresh failed: " + _hide(e)) from None
         try:
             token, expiry = pair
         except Exception:
-            raise ToolError("service-account refresher returned a malformed (token, expiry) pair")
+            raise ToolError("service-account refresher returned a malformed (token, expiry) pair") from None
         if not token:
-            raise ToolError("service-account refresher returned no token")
+            raise ToolError("service-account refresher returned no token") from None
         try:
             self._expiry = float(expiry)
         except (TypeError, ValueError):
@@ -165,18 +165,18 @@ def sa_file_loader(path):
     """Return a loader that reads a service-account JSON file (path expanded, read lazily)."""
     p = os.path.expanduser(str(path))
     if not p:
-        raise ToolError("service-account file path is empty")
+        raise ToolError("service-account file path is empty") from None
 
     def load():
         if not os.path.isfile(p):
-            raise ToolError("service-account file not found: %s" % p)
+            raise ToolError("service-account file not found: %s" % p) from None
         try:
             with open(p, encoding="utf-8") as fh:
                 info = json.load(fh)
         except Exception as e:
-            raise ToolError("service-account file is not valid JSON: " + _hide(e))
+            raise ToolError("service-account file is not valid JSON: " + _hide(e)) from None
         if not isinstance(info, dict) or not info:
-            raise ToolError("service-account file does not contain a JSON object")
+            raise ToolError("service-account file does not contain a JSON object") from None
         return info
 
     load.kind = "file"
@@ -191,7 +191,7 @@ def onepassword_loader(ref, token_file, op_bin="/opt/homebrew/bin/op", runner=su
     hint = "check the token/vault pair"
 
     def _fail(why):
-        raise ToolError("1Password read of %s failed: %s - %s" % (ref_s, why, hint))
+        raise ToolError("1Password read of %s failed: %s - %s" % (ref_s, why, hint)) from None
 
     def load():
         try:
@@ -199,10 +199,10 @@ def onepassword_loader(ref, token_file, op_bin="/opt/homebrew/bin/op", runner=su
                 token = fh.read().strip()
         except Exception as e:
             raise ToolError("1Password token file for %s is unreadable (%s) - %s: %s"
-                            % (ref_s, token_path, hint, _hide(e)))
+                            % (ref_s, token_path, hint, _hide(e))) from None
         if not token:
             raise ToolError("1Password token file for %s is empty (%s) - %s"
-                            % (ref_s, token_path, hint))
+                            % (ref_s, token_path, hint)) from None
         env = dict(os.environ)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = token
         try:
@@ -219,9 +219,9 @@ def onepassword_loader(ref, token_file, op_bin="/opt/homebrew/bin/op", runner=su
         try:
             info = json.loads(out)
         except Exception:
-            raise ToolError("1Password value for %s is not valid JSON - %s" % (ref_s, hint))
+            raise ToolError("1Password value for %s is not valid JSON - %s" % (ref_s, hint)) from None
         if not isinstance(info, dict) or not info:
-            raise ToolError("1Password value for %s is not a JSON object - %s" % (ref_s, hint))
+            raise ToolError("1Password value for %s is not a JSON object - %s" % (ref_s, hint)) from None
         return info
 
     load.kind = "1password"
@@ -243,7 +243,7 @@ def chain_loader(*loaders):
                 continue
             if isinstance(info, dict) and info:
                 return info
-        raise ToolError("no credential source worked (tried: %s)" % ", ".join(tried or ["none"]))
+        raise ToolError("no credential source worked (tried: %s)" % ", ".join(tried or ["none"])) from None
 
     load.kind = "chain"
     return load
@@ -252,44 +252,44 @@ def chain_loader(*loaders):
 def from_config(cred):
     """Build a TokenProvider from a config `credentials.google_ads` block."""
     if not isinstance(cred, dict):
-        raise ToolError("credentials must be a JSON object with a 'type'")
+        raise ToolError("credentials must be a JSON object with a 'type'") from None
     kind = str(cred.get("type") or "").strip()
     if kind == "static":
         token = cred.get("token")
         if not isinstance(token, str) or not token.strip():
             raise ToolError("credentials.token is required and must be a non-empty string "
-                            "for type 'static'")
+                            "for type 'static'") from None
         return StaticToken(token)
     if kind == "service_account":
         sources = cred.get("sources")
         if not isinstance(sources, list) or not sources:
             raise ToolError("credentials.sources must be a non-empty list for type "
-                            "'service_account'")
+                            "'service_account'") from None
         loaders = []
         for i, src in enumerate(sources):
             if not isinstance(src, dict):
-                raise ToolError("credentials.sources[%d] must be an object" % i)
+                raise ToolError("credentials.sources[%d] must be an object" % i) from None
             skind = str(src.get("kind") or "").strip()
             if skind == "file":
                 path = src.get("path")
                 if not isinstance(path, str) or not path.strip():
-                    raise ToolError("credentials.sources[%d].path is required for kind 'file'" % i)
+                    raise ToolError("credentials.sources[%d].path is required for kind 'file'" % i) from None
                 loaders.append(sa_file_loader(path))
             elif skind == "1password":
                 ref, tok = src.get("ref"), src.get("token_file")
                 if not isinstance(ref, str) or not ref.strip():
-                    raise ToolError("credentials.sources[%d].ref is required for kind '1password'" % i)
+                    raise ToolError("credentials.sources[%d].ref is required for kind '1password'" % i) from None
                 if not isinstance(tok, str) or not tok.strip():
                     raise ToolError("credentials.sources[%d].token_file is required for kind "
-                                    "'1password'" % i)
+                                    "'1password'" % i) from None
                 loaders.append(onepassword_loader(ref, tok))
             else:
                 raise ToolError("credentials.sources[%d].kind %r is not supported "
-                                "(file|1password)" % (i, skind))
+                                "(file|1password)" % (i, skind)) from None
         return ServiceAccount(chain_loader(*loaders))
     if not kind:
-        raise ToolError("credentials.type is required (static|service_account)")
-    raise ToolError("credentials.type %r is not supported (static|service_account)" % (kind,))
+        raise ToolError("credentials.type is required (static|service_account)") from None
+    raise ToolError("credentials.type %r is not supported (static|service_account)" % (kind,)) from None
 
 
 # -- selftest ----------------------------------------------------------------------------------
@@ -409,7 +409,7 @@ def selftest():
 
     # chain_loader
     def first():
-        raise ToolError("nope")
+        raise ToolError("nope") from None
 
     def second():
         return {"client_email": "second@example"}

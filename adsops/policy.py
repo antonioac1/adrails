@@ -13,6 +13,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from . import strict
 from .errors import RailViolation, ToolError, scrub
 
 REQUIRED_GUARDS = ("max_daily_budget_usd", "max_end_date", "lifetime_spend_pause_usd",
@@ -75,13 +76,13 @@ def _validate(raw):
         if key not in guards:
             raise ToolError(f"policy: guards['{key}'] is required")
     for key in _NUMERIC_GUARDS:
-        if key in guards and (not _is_num(guards[key]) or guards[key] < 0):
-            raise ToolError(f"policy: guards['{key}'] must be a number >= 0")
+        if key in guards:
+            strict.finite_number(guards[key], f"policy: guards['{key}']", 0)
+    strict.finite_number(guards["max_daily_budget_usd"], "policy: guards['max_daily_budget_usd']", 0, allow_equal_min=False)
     ops = guards["max_ops_per_run"]
     if isinstance(ops, bool) or not isinstance(ops, int) or ops < 0:
         raise ToolError("policy: guards['max_ops_per_run'] must be an integer >= 0")
-    if not _is_date(guards["max_end_date"]):
-        raise ToolError("policy: guards['max_end_date'] must be 'YYYY-MM-DD'")
+    strict.iso_date(guards["max_end_date"], "policy: guards['max_end_date']")
     if ("min_daily_budget_usd" in guards
             and guards["min_daily_budget_usd"] > guards["max_daily_budget_usd"]):
         raise ToolError("policy: guards['min_daily_budget_usd'] must not exceed "
@@ -96,7 +97,7 @@ def _validate(raw):
     if not isinstance(require_pid, bool):
         raise ToolError("policy: 'require_plan_id' must be a boolean")
     prot = pol.get("protected_terms", [])
-    if not isinstance(prot, list) or not all(isinstance(t, str) and t.strip() for t in prot):
+    if not isinstance(prot, list) or len(prot) > 500 or not all(isinstance(t, str) and t.strip() and len(t) <= 200 for t in prot):
         raise ToolError("policy: 'protected_terms' must be a list of non-empty strings")
     pol["protected_terms"] = [t.strip().lower() for t in prot]
     ttl = pol.get("plan_ttl_s", DEFAULT_PLAN_TTL_S)
@@ -111,17 +112,9 @@ def _validate(raw):
 
 def load_policy(path):
     """Read + validate a policy JSON file. Any problem raises ToolError."""
-    path = _expand(path)
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-    except FileNotFoundError:
-        raise ToolError(f"policy: file not found: {path}")
-    except json.JSONDecodeError as e:
-        raise ToolError(f"policy: invalid JSON in {path}: {scrub(e)}")
-    except OSError as e:
-        raise ToolError(f"policy: cannot read {path}: {scrub(e)}")
-    return _validate(raw)
+    if not isinstance(path, str):
+        raise ToolError("policy: path must be a string")
+    return _validate(strict.load_json_file(_expand(path), "policy file"))
 
 def effective_state(state, policy):
     """Deep copy of state with guards/allow_enable taken from policy only."""

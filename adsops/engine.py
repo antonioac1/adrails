@@ -10,6 +10,7 @@ Pure: no network, no subprocess, no file I/O outside load_state().
 import datetime as dt
 import json
 
+from . import strict
 from .errors import RailViolation, ToolError, scrub
 
 MATCH = {"BROAD", "PHRASE", "EXACT"}
@@ -38,21 +39,24 @@ def _require(obj, keys, what):
 # ── state ─────────────────────────────────────────────────────────────────────────────────────
 def load_state(path):
     """Read + validate a desired-state JSON file. Unreadable/malformed -> ToolError."""
-    try:
-        with open(path) as fh:
-            state = json.load(fh)
-    except FileNotFoundError:
-        raise ToolError(f"state file not found: {path}") from None
-    except OSError as e:
-        raise ToolError(f"cannot read state file {path}: {scrub(str(e))}") from None
-    except ValueError as e:
-        raise ToolError(f"state file {path} is not valid JSON: {scrub(str(e))}") from None
+    state = strict.load_json_file(path, "state file")
     if not isinstance(state, dict):
         raise ToolError("state must be a JSON object")
     for k in _REQUIRED_STATE:
         if k not in state:
             raise ToolError(f"state missing '{k}'")
     _require(state["guards"], _REQUIRED_GUARDS, "state.guards")
+    if state.get("daily_budget_usd") is not None:
+        strict.finite_number(state["daily_budget_usd"], "state.daily_budget_usd", 0, allow_equal_min=False)
+    if state.get("end_date") is not None:
+        strict.iso_date(state["end_date"], "state.end_date")
+    if state.get("status") not in (None, "ENABLED", "PAUSED"):
+        raise ToolError("state.status must be ENABLED or PAUSED")
+    if "negatives_add" in state:
+        strict.negatives_list(state["negatives_add"], "state.negatives_add")
+    for k in ("max_daily_budget_usd", "lifetime_spend_pause_usd", "daily_spend_pause_usd", "min_daily_budget_usd"):
+        if k in state["guards"]:
+            strict.finite_number(state["guards"][k], f"state.guards.{k}", 0)
     return state
 
 
