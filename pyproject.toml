@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adsops-mcp"
+version = "0.2.0"
+description = "Guarded ad-operations MCP server: agents read freely, write only through a reviewed desired-state file."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "adsops contributors" }]
+keywords = ["mcp", "advertising", "google-ads", "agents", "guardrails"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.optional-dependencies]
+google = ["google-auth>=2.0"]
+
+[project.scripts]
+adsops-mcp = "adsops.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["adsops*"]

@@ -1,0 +1,22 @@
+# adsops unattended guard - cron entry.
+#
+# This file is a TEMPLATE. Replace every placeholder before installing:
+#   __PYTHON__  absolute path to the python interpreter (e.g. /usr/bin/python3)
+#   __CONFIG__  absolute path to the adsops config JSON
+#   __PKG__     absolute path to the directory containing the adsops package
+#   __LOGDIR__  absolute path to a writable log directory
+#
+# Install by rendering the file and reviewing it before it goes live:
+#   sed -e "s|__PYTHON__|$PY|g" -e "s|__CONFIG__|$CFG|g" \
+#       -e "s|__PKG__|$PKG|g" -e "s|__LOGDIR__|$LOGDIR|g" \
+#       deploy/cron/adsops-guard.cron > /tmp/adsops-guard.cron
+#   cat /tmp/adsops-guard.cron
+#   crontab /tmp/adsops-guard.cron
+#
+# cron does not inherit your shell environment, so PYTHONPATH has to be set
+# explicitly for `python -m adsops` to find the package. That is the same
+# instruction as the launchd and systemd variants, only expressed as VAR=value.
+#
+# Nothing in this repository installs this crontab for you.
+PYTHONPATH=__PKG__
+*/15 * * * * __PYTHON__ -m adsops --config __CONFIG__ guard-all >> __LOGDIR__/adsops-guard.log 2>&1

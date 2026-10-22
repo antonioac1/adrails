@@ -1,0 +1,36 @@
+# adsops unattended guard - systemd service (Linux).
+#
+# This file is a TEMPLATE. Replace every placeholder before installing:
+#   __PYTHON__  absolute path to the python interpreter (e.g. /usr/bin/python3)
+#   __CONFIG__  absolute path to the adsops config JSON
+#   __PKG__     absolute path to the directory containing the adsops package
+#   __LOGDIR__  absolute path to a writable log directory
+#
+# Suggested rendering (privileged steps marked sudo), from the repo root:
+#   sudo sed -e "s|__PYTHON__|$PY|g" -e "s|__CONFIG__|$CFG|g" \
+#              -e "s|__PKG__|$PKG|g" -e "s|__LOGDIR__|$LOGDIR|g" \
+#              deploy/systemd/adsops-guard.service \
+#              > /etc/systemd/system/adsops-guard.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now adsops-guard.timer
+#
+# The service runs once and exits; adsops-guard.timer is what schedules it.
+# Nothing in this repository enables or starts it for you.
+
+[Unit]
+Description=adsops unattended guard (pause-only spend checks)
+Documentation=file://__PKG__/deploy/GUARD.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__PKG__
+Environment=PYTHONPATH=__PKG__
+ExecStart=__PYTHON__ -m adsops --config __CONFIG__ guard-all
+StandardOutput=append:__LOGDIR__/adsops-guard.log
+StandardError=append:__LOGDIR__/adsops-guard.log
+# The guard is a safety net, not a latency-critical job: keep it from
+# competing with interactive work, and give a slow API a bounded window.
+Nice=10
+TimeoutStartSec=600

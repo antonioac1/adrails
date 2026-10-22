@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  adsops unattended guard - launchd template (macOS).
+
+  This file is a TEMPLATE. Replace every placeholder before installing:
+    __PYTHON__  absolute path to the python interpreter (e.g. /usr/bin/python3)
+    __CONFIG__  absolute path to the adsops config JSON
+    __PKG__     absolute path to the directory containing the adsops package
+    __LOGDIR__  absolute path to a writable log directory
+
+  Suggested rendering (writes the real plist into ~/Library/LaunchAgents):
+    sed -e "s|__PYTHON__|$PY|g" -e "s|__CONFIG__|$CFG|g" \
+        -e "s|__PKG__|$PKG|g" -e "s|__LOGDIR__|$LOGDIR|g" \
+        deploy/launchd/com.adsops.guard.plist.template \
+        > ~/Library/LaunchAgents/com.adsops.guard.plist
+
+  Installing (see deploy/GUARD.md for the full walkthrough):
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.adsops.guard.plist
+
+  Nothing in this repository loads, enables or schedules the guard for you.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adsops.guard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>-m</string>
+        <string>adsops</string>
+        <string>--config</string>
+        <string>__CONFIG__</string>
+        <string>guard-all</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>__PKG__</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOGDIR__/adsops-guard.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__LOGDIR__/adsops-guard.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>__PKG__</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

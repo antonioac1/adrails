@@ -1,0 +1,7 @@
+AdRails (adsops)
+Copyright 2026 The AdRails authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It is provided AS IS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. Operating
+advertising accounts with automated agents can spend real money; see
+deploy/GUARD.md for what the spend guard can and cannot do.

@@ -1,0 +1,11 @@
+{
+  "tenant": "example-agency",
+  "meter_log": "~/.adsops/meter.jsonl",
+  "audit_log": "~/.adsops/audit.jsonl",
+  "credentials": {"google_ads": {"type": "service_account",
+      "sources": [{"kind": "file", "path": "~/.adsops/sa.json"}]}},
+  "google_ads": {"api_version": "v24", "end_field": "end_date_time", "login_customer_id": null},
+  "commit_policy": {"require_clean_git": true, "allow_commit": true},
+  "accounts": [{"key": "acme", "platform": "google_ads", "customer_id": "123-456-7890",
+      "campaigns": [{"key": "acme_search", "state_file": "~/ads/acme_search.json"}]}]
+}

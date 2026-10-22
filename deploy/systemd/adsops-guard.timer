@@ -1,0 +1,21 @@
+# adsops unattended guard - systemd timer (Linux).
+#
+# Copy this unit into /etc/systemd/system/ next to adsops-guard.service.
+# It contains no placeholders: scheduling does not depend on any path.
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now adsops-guard.timer
+#   systemctl list-timers adsops-guard.timer
+#
+# Nothing in this repository enables or starts it for you.
+
+[Unit]
+Description=Run the adsops unattended guard every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=adsops-guard.service
+
+[Install]
+WantedBy=timers.target
