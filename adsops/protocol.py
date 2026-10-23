@@ -4,6 +4,7 @@ Dispatch is pure (:meth:`Server.handle`); the only I/O lives in :meth:`Server.se
 """
 import io
 import json
+import math
 import sys
 import time
 
@@ -93,10 +94,17 @@ class Server:
     def handle(self, msg):
         if not isinstance(msg, dict):
             return _error(None, -32600, "Invalid Request")
-        method = msg.get("method") or ""
+        method = msg.get("method")
+        mid = msg.get("id")
+        valid_id = _valid_id(mid)
+        if not isinstance(method, str):
+            if "id" not in msg:
+                return None
+            return _error(mid if valid_id else None, -32600, "Invalid Request")
         if "id" not in msg or method.startswith("notifications/"):
             return None  # notifications are never answered
-        mid = msg.get("id")
+        if not valid_id:
+            return _error(None, -32600, "Invalid Request")
         params = msg.get("params")
         if not isinstance(params, dict):
             params = {}
@@ -167,14 +175,34 @@ class Server:
             if not line:
                 continue
             try:
-                msg = json.loads(line)
-            except ValueError:
+                msg = json.loads(line, parse_constant=_reject_constant)
+            except (ValueError, RecursionError):
                 resp = _error(None, -32700, "Parse error")
             else:
-                resp = self.handle(msg)
+                try:
+                    resp = self.handle(msg)
+                except Exception:  # a malformed request must never end the session
+                    resp = _error(None, -32603, "Internal error")
             if resp is not None:
-                stdout.write(json.dumps(resp, default=str) + "\n")
+                try:
+                    out = json.dumps(resp, default=str, allow_nan=False)
+                except ValueError:
+                    out = json.dumps(_error(resp.get("id"), -32603, "Internal error"))
+                stdout.write(out + "\n")
                 stdout.flush()
+
+
+def _valid_id(mid):
+    """JSON-RPC 2.0: a request id is a string, a finite number or null."""
+    if mid is None or isinstance(mid, str):
+        return True
+    if isinstance(mid, bool) or not isinstance(mid, (int, float)):
+        return False
+    return math.isfinite(mid)
+
+
+def _reject_constant(name):
+    raise ValueError("non-JSON constant %s" % name)
 
 
 def selftest():
