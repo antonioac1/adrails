@@ -1,6 +1,8 @@
-# AdRails
+# AdRails (adrails.dev)
 
-**Guardrails for AI agents running your ads.**
+**Guardrails for AI agents running your ads: an open-source, self-hosted Google Ads MCP server.**
+
+Website and docs: https://adrails.dev · MCP Registry: `dev.adrails/adrails` · plain-text summary for agents: https://adrails.dev/llms.txt
 
 AdRails is a local MCP server for Google Ads. An agent may read campaigns, status and search
 terms as often as it likes; every write has to land in a reviewed desired-state file on disk,
@@ -129,6 +131,28 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.adsops.guard.plist
 ```
 
 The command all three units run is `PYTHONPATH=$PKG $PY -m adsops --config $CFG guard-all`.
+
+## Use it from Grok, Claude Code, Cursor or any MCP client
+
+AdRails is a local stdio server, so every client registers the same command. There is no hosted URL, by design.
+
+```bash
+pip install git+https://github.com/antonioac1/adrails@v0.2.2
+
+# Claude Code
+claude mcp add adrails -- python3 -m adsops --config /absolute/path/config.json
+# Grok CLI (it also reads ~/.claude.json, .cursor/mcp.json and .mcp.json)
+grok mcp add adrails -- python3 -m adsops --config /absolute/path/config.json
+```
+
+Cursor or a project `.mcp.json`:
+
+```json
+{"mcpServers":{"adrails":{"command":"python3","args":["-m","adsops","--config","/absolute/path/config.json"]}}}
+```
+
+Claude Desktop: install the `.mcpb` bundle from the [latest release](https://github.com/antonioac1/adrails/releases/latest).
+More: https://adrails.dev/docs/mcp-clients/
 
 ## Tools
 
