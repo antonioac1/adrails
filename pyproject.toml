@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "adrails"
 version = "0.2.3"
-description = "AdRails: open-source Google Ads MCP server with hard spend guardrails. Agents read freely and write only through a reviewed desired-state file."
+description = "AdRails: open-source Google Ads MCP server with spend guardrails. Agents read freely and write only through a reviewed desired-state file."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
