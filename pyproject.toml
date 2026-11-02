@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "adsops-mcp"
-version = "0.2.2"
-description = "Guarded ad-operations MCP server: agents read freely, write only through a reviewed desired-state file."
+name = "adrails"
+version = "0.2.3"
+description = "AdRails: open-source Google Ads MCP server with hard spend guardrails. Agents read freely and write only through a reviewed desired-state file."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -22,7 +22,12 @@ dependencies = []
 [project.optional-dependencies]
 google = ["google-auth>=2.0"]
 
+[project.urls]
+Homepage = "https://adrails.dev"
+Source = "https://github.com/antonioac1/adrails"
+
 [project.scripts]
+adrails = "adsops.__main__:main"
 adsops-mcp = "adsops.__main__:main"
 
 [tool.setuptools.packages.find]
