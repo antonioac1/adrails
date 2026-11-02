@@ -57,10 +57,10 @@ Read this before pointing it at a live account.
 **1. Install.**
 
 ```bash
-# from PyPI
-pipx install adrails          # console scripts: adrails (and adsops-mcp)
+# from PyPI (https://pypi.org/project/adrails/)
+pipx install adrails     # console script: adsops-mcp
 # or run without installing:
-uvx adrails --config /absolute/path/config.json
+uvx --from adrails adsops-mcp --config /absolute/path/config.json
 ```
 
 No other dependencies. Service-account tokens are signed with your system `openssl`
