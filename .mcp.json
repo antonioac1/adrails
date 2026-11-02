@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "adrails": {
-      "command": "python3",
-      "args": ["-m", "adsops", "--config", "/absolute/path/config.json"]
+      "command": "uvx",
+      "args": [
+        "adrails",
+        "--config",
+        "/absolute/path/config.json"
+      ]
     }
   }
 }

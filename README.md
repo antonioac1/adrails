@@ -57,10 +57,10 @@ Read this before pointing it at a live account.
 **1. Install.**
 
 ```bash
-# from GitHub (PyPI release coming soon)
-pipx install git+https://github.com/antonioac1/adrails     # console script: adsops-mcp
+# from PyPI
+pipx install adrails          # console scripts: adrails (and adsops-mcp)
 # or run without installing:
-uvx --from git+https://github.com/antonioac1/adrails adsops-mcp --config /absolute/path/config.json
+uvx adrails --config /absolute/path/config.json
 ```
 
 No other dependencies. Service-account tokens are signed with your system `openssl`
@@ -137,7 +137,7 @@ The command all three units run is `PYTHONPATH=$PKG $PY -m adsops --config $CFG 
 AdRails is a local stdio server, so every client registers the same command. There is no hosted URL, by design.
 
 ```bash
-pip install git+https://github.com/antonioac1/adrails@v0.2.2
+pip install adrails
 
 # Claude Code
 claude mcp add adrails -- python3 -m adsops --config /absolute/path/config.json
