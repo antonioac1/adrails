@@ -207,7 +207,7 @@ def register(srv, ctx, cfg):
             if not url:
                 raise ToolError(f"deliver=true but env {env} is empty")
             out["delivery"] = monitors.deliver(monitors.brief(snap, new, "AdRails alerts"),
-                                               monitors.webhook_notifier(url, google_ads.urllib_http))
+                                               monitors.webhook_notifier(url, __import__('adsops.aeo_tools', fromlist=['raw_http']).raw_http))
         return out
 
     @srv.tool("adsops_brief", "Read-only. A short markdown brief across every configured campaign: spend today, conversions, "

@@ -26,6 +26,26 @@ UA = "AdRails-AEO/1.0 (+https://adrails.dev; read-only site audit)"
 MAX_BODY = 3_000_000
 
 
+def raw_http(method, url, headers, body):
+    """(method, url, headers, body bytes|str|None) -> (status:int, body:str). Never raises on HTTP status (callers interpret it).
+
+    The contract IndexNow and the monitor webhooks expect. google_ads.urllib_http is a JSON client (dict in, parsed JSON out),
+    and passing it raw bytes broke both in 0.4.0 (found by dogfooding on the live site, 2026-11-05; fixed in 0.4.1)."""
+    data = body.encode("utf-8") if isinstance(body, str) else body
+    req = urllib.request.Request(str(url), method=str(method).upper(), data=data, headers=dict(headers or {}))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read(65536).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            text = e.read(65536).decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        return e.code, text
+    except urllib.error.URLError as e:
+        raise ToolError("network error: %s" % (getattr(e, "reason", None) or "connection failed")) from None
+
+
 def _check_host(host, resolver=socket.getaddrinfo):
     if not host or host.lower() in ("localhost",) or host.lower().endswith((".local", ".internal", ".localhost")):
         raise ToolError("refusing to fetch a local host")
@@ -218,7 +238,7 @@ def register(srv, ctx, cfg, fetch=None):
         if args.get("submit"):
             if not keyfile.get("ok"):
                 raise ToolError("key file check failed; IndexNow would reject the submission")
-            out.update(indexnow.submit_indexnow(host, key, body["urlList"], google_ads.urllib_http))
+            out.update(indexnow.submit_indexnow(host, key, body["urlList"], raw_http))
             out["submitted"] = True
         return out
 
