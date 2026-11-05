@@ -1,0 +1,21 @@
+name: Docker image smoke test
+# Builds the image and proves it starts with zero setup and serves every tool over stdio.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t adrails:ci .
+      - name: Selftest inside the image
+        run: docker run --rm --entrypoint adrails adrails:ci --selftest | tee /tmp/st.txt && grep -q "ALL PASS" /tmp/st.txt
+      - name: stdio initialize + tools/list
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+                        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | docker run -i --rm adrails:ci > /tmp/out.jsonl
+          python3 -c "import json;L=[json.loads(l) for l in open('/tmp/out.jsonl')];n=len(L[1]['result']['tools']);print('tools',n);assert n>=50"
