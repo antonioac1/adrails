@@ -11,7 +11,7 @@ import re
 import secrets
 import time
 
-from adsops import __version__, auth, config, engine, meter as meter_mod, policy as policy_mod, protocol, safety, statestore
+from adsops import __version__, auth, config, engine, meter as meter_mod, policy as policy_mod, protocol, safety, statestore, playbook_tools, urls
 from adsops.errors import RailViolation, ToolError, scrub
 from adsops.platforms import google_ads
 
@@ -60,8 +60,22 @@ class Context:
         pol = None
         if camp.get("policy_file"):
             pol = policy_mod.load_policy(self.path(camp["policy_file"]))
-        eff = policy_mod.effective_state(raw, pol) if pol else raw
-        return account, camp, raw, eff, pol, self.client_factory(account)
+        return account, camp, raw, self.effective(raw, pol, camp), pol, self.client_factory(account)
+
+    @staticmethod
+    def effective(raw, pol, camp):
+        """State the engine plans from: caps from the policy file (when configured) and the URL domain
+        allowlist from the deployment config only. A `url_domains` written in the state file is ignored."""
+        eff = policy_mod.effective_state(raw, pol) if pol else dict(raw)
+        eff["url_domains"] = list(camp.get("url_domains") or [])
+        return eff
+
+    def live(self, client, eff):
+        """Live campaign state; plus the URL fields when the state file manages any (read-only)."""
+        live = google_ads.live_state(client, eff["campaign_id"], self.end_field())
+        if urls.manages_urls(eff):
+            live["urls"] = google_ads.live_urls(client, eff["campaign_id"])
+        return live
 
     @staticmethod
     def path(p):
@@ -133,7 +147,7 @@ def _commit(ctx, account, key, camp, eff, pol, client, live, ops, given_pid):
         return engine.execute(client, ops, True)
     except ToolError as e:
         try:
-            live2 = google_ads.live_state(client, eff["campaign_id"], ctx.end_field())
+            live2 = ctx.live(client, eff)
             rec = safety.reconcile(ops, engine.plan(eff, live2, end_field=ctx.end_field())[0])
         except Exception as e2:   # noqa: BLE001 — reconciliation is best-effort; say so
             rec = {"error": f"could not reconcile: {type(e2).__name__}"}
@@ -151,10 +165,11 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     def campaigns(args):
         return {"campaigns": config.list_campaigns(cfg), "commit_policy": cfg.get("commit_policy", {})}
 
-    @srv.tool("adsops_status", "Live read: status, end date, daily budget, spend today/lifetime, negative count.", KEY)
+    @srv.tool("adsops_status", "Live read: status, end date, daily budget, spend today/lifetime, negative count; "
+              "plus URL fields (campaign suffix, ad-group custom parameters, ad final URLs) when the state file manages them.", KEY)
     def status(args):
         _, camp, raw, eff, pol, client = ctx.open(args["campaign"])
-        live = google_ads.live_state(client, eff["campaign_id"], ctx.end_field())
+        live = ctx.live(client, eff)
         out = {k: (len(v) if k == "negatives" else v) for k, v in live.items() if k != "budget_rn"}
         out["caps_from"] = "policy" if pol else "state file (legacy)"
         if pol and "guards" in raw and raw["guards"] != pol["guards"]:
@@ -181,11 +196,12 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
             out.update(plan_id=pid, plan_expires=ent["expires"])
         return out
 
-    @srv.tool("adsops_plan", "Diff the committed desired-state file against live. No writes. Returns a plan_id "
+    @srv.tool("adsops_plan", "Diff the committed desired-state file against live (budget, status, end date, negatives, "
+              "and URL fields: ad-group url_custom_parameters, ad final_urls, final_url_suffix). No writes. Returns a plan_id "
               "that adsops_apply commit=true must quote (single use, expires).", KEY)
     def plan(args):
         account, camp, _, eff, pol, client = ctx.open(args["campaign"])
-        live = google_ads.live_state(client, eff["campaign_id"], ctx.end_field())
+        live = ctx.live(client, eff)
         ops, notes = engine.plan(eff, live, end_field=ctx.end_field())
         return _issue(account, args["campaign"], camp, pol, live, ops,
                       {"campaign": args["campaign"], "ops": ops, "notes": notes, "ops_count": engine.ops_count(ops)})
@@ -198,14 +214,14 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
         commit = bool(args.get("commit", False))
         account, camp, _, eff, pol, client = ctx.open(args["campaign"])
         if not commit:
-            live = google_ads.live_state(client, eff["campaign_id"], ctx.end_field())
+            live = ctx.live(client, eff)
             ops, notes = engine.plan(eff, live, end_field=ctx.end_field())
             n = engine.ops_count(ops)
             res = engine.execute(client, ops, False) if n else {}
         else:
             _commit_gate(ctx, camp)
             with ctx.lock(account):
-                live = google_ads.live_state(client, eff["campaign_id"], ctx.end_field())
+                live = ctx.live(client, eff)
                 ops, notes = engine.plan(eff, live, end_field=ctx.end_field())
                 n = engine.ops_count(ops)
                 res = _commit(ctx, account, args["campaign"], camp, eff, pol, client, live, ops,
@@ -240,8 +256,8 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
         new_raw, summary = statestore.apply_changes(raw, changes)          # the file we write: never gains caps
         if not summary:
             return {"campaign": key, "changed": False, "summary": [], "ops_count": 0}
-        new_eff = policy_mod.effective_state(new_raw, pol) if pol else new_raw
-        live = google_ads.live_state(client, eff["campaign_id"], ctx.end_field())
+        new_eff = ctx.effective(new_raw, pol, camp)
+        live = ctx.live(client, new_eff)
         ops, notes = engine.plan(new_eff, live, end_field=ctx.end_field())  # caps enforced here, before any write
         out = {"campaign": key, "changed": True, "summary": summary, "notes": notes,
                "ops_count": engine.ops_count(ops), "dry_run": bool(args.get("dry_run"))}
@@ -253,8 +269,8 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
             # re-read everything under the lock: another writer may have committed since we planned
             account, camp, raw, eff, pol, client = ctx.open(key)
             new_raw, summary = statestore.apply_changes(raw, changes)
-            new_eff = policy_mod.effective_state(new_raw, pol) if pol else new_raw
-            live = google_ads.live_state(client, eff["campaign_id"], ctx.end_field())
+            new_eff = ctx.effective(new_raw, pol, camp)
+            live = ctx.live(client, new_eff)
             ops, notes = engine.plan(new_eff, live, end_field=ctx.end_field())
             out.update(summary=summary, notes=notes, ops_count=engine.ops_count(ops))
             if not summary:
@@ -297,6 +313,13 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     def usage(args):
         return meter.summary(args.get("since"))
 
+    playbook_tools.register(srv, ctx, cfg)   # negatives_suggest, competitors_report, auction_insights_import, lp_diagnose
+    from adsops import aeo_tools, enterprise_tools
+    enterprise_tools.register(srv, ctx, cfg)  # diagnostics, conv audit, rules, monitors, approvals, rollback, fleet, audit chain
+    aeo_tools.register(srv, ctx, cfg)         # AEO: crawler/page/schema audits, llms.txt, share of answer, IndexNow, AI traffic
+    from adsops import mail_tools
+    mail_tools.register(srv, ctx, cfg)        # direct mail: list hygiene, codes, QR, labels, scans, response, cross-channel CAC
+    enterprise_tools.harden(srv, ctx, cfg)    # LAST: wrap every tool with RBAC -> approval gate -> tamper-evident audit chain
     return srv
 
 
@@ -313,6 +336,7 @@ def selftest():
     sp = os.path.join(tmp, "c42.json")
     json.dump(state, open(sp, "w"))
     cfg_d = {"tenant": "t1", "meter_log": os.path.join(tmp, "m.jsonl"), "audit_log": os.path.join(tmp, "a.jsonl"),
+             "audit_chain": os.path.join(tmp, "chain.jsonl"), "mail": {"workdir": os.path.join(tmp, "mail")},
              "plan_ledger": os.path.join(tmp, "plans.jsonl"), "lock_dir": os.path.join(tmp, "locks"),
              "guard_heartbeat": os.path.join(tmp, "guard.hb"),
              "credentials": {"google_ads": {"type": "static", "token": "x"}},
@@ -369,8 +393,10 @@ def selftest():
         return r["result"]
 
     names = [t["name"] for t in srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]]
-    assert names == ["adsops_campaigns", "adsops_status", "adsops_terms", "adsops_plan", "adsops_apply",
-                     "adsops_set", "adsops_guard", "adsops_usage"], names; n += 1
+    assert names[:12] == ["adsops_campaigns", "adsops_status", "adsops_terms", "adsops_plan", "adsops_apply",
+                     "adsops_set", "adsops_guard", "adsops_usage", "adsops_negatives_suggest", "adsops_competitors_report",
+                     "adsops_auction_insights_import", "adsops_lp_diagnose"], names; n += 1
+    assert len(names) == 50 and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
     assert call("adsops_campaigns")["structuredContent"]["campaigns"][0]["key"] == "c42"; n += 1
     assert call("adsops_status", {"campaign": "nope"})["isError"]; n += 1
     st = call("adsops_status", {"campaign": "c42"})["structuredContent"]
@@ -541,5 +567,87 @@ def selftest():
     p5 = call2("adsops_plan", {"campaign": "c42"})["structuredContent"]
     r = call2("adsops_apply", {"campaign": "c42", "commit": True, "plan_id": p5["plan_id"]})
     assert r["isError"] and "future" in r["content"][0]["text"]; n += 1
+
+    # ── URL fields: committed state -> plan (plan_id) -> validate -> commit -> status read-back ───
+    json.dump(pol, open(pp, "w"))
+    url_live = {"params": {}, "final": ["https://example.com/owners/"], "suffix": "utm_content={_ag}"}
+
+    class UrlClient(FakeClient):
+        def search(self, q):
+            if "campaign.final_url_suffix" in q:
+                calls.append(("search", q))
+                return [{"campaign": {"id": "42", "finalUrlSuffix": url_live["suffix"]}}]
+            if "FROM ad_group_ad" in q:
+                calls.append(("search", q))
+                return [{"adGroup": {"resourceName": "customers/1112223333/adGroups/7"},
+                         "adGroupAd": {"ad": {"resourceName": "customers/1112223333/ads/70",
+                                              "finalUrls": url_live["final"]}}}]
+            if "FROM ad_group " in q:
+                calls.append(("search", q))
+                return [{"adGroup": {"resourceName": "customers/1112223333/adGroups/7", "name": "pasco",
+                                     "status": "ENABLED", "urlCustomParameters": [
+                                         {"key": k, "value": v} for k, v in url_live["params"].items()]}}]
+            return super().search(q)
+
+        def mutate(self, svc, ops, validate_only, partial=False):
+            calls.append(("mutate", svc, validate_only, json.dumps(ops)))
+            return {"results": [{}] * len(ops)}
+
+    ustate = dict(state, daily_budget_usd=8, campaign_final_url_suffix="utm_content={_ag}",
+                  url_domains=["evil.com"],                 # ignored: only the config allowlist counts
+                  ad_groups={"pasco": {"url_custom_parameters": {"ag": "pasco"},
+                                       "ad_final_urls": ["https://example.com/owners/pasco/"]}})
+    json.dump(ustate, open(sp, "w"))
+    camp_cfg = cfg["accounts"][0]["campaigns"][0]
+    srv4 = build_server(cfg, client_factory=lambda a: UrlClient(), git_runner=runner, now=lambda: clock["t"])
+
+    def call4(name, args=None):
+        return srv4.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": name, "arguments": args or {}}})["result"]
+    r = call4("adsops_plan", {"campaign": "c42"})
+    assert r["isError"] and "allowlist" in r["content"][0]["text"]; n += 1       # no config allowlist -> refused
+    camp_cfg["url_domains"] = ["example.com"]
+    p6 = call4("adsops_plan", {"campaign": "c42"})["structuredContent"]
+    assert sorted(p6["ops"]) == ["adGroups", "ads"] and p6["ops_count"] == 2 and p6["plan_id"]; n += 1
+    assert p6["exposure_increases"] == [] and sum(x.startswith("url: ") for x in p6["notes"]) == 2; n += 1
+    assert p6["ops"]["adGroups"][0]["update"]["urlCustomParameters"] == [{"key": "ag", "value": "pasco"}]; n += 1
+    assert p6["ops"]["ads"][0]["update"] == {"resourceName": "customers/1112223333/ads/70",
+                                             "finalUrls": ["https://example.com/owners/pasco/"]}; n += 1
+    calls.clear()
+    v6 = call4("adsops_apply", {"campaign": "c42"})["structuredContent"]
+    assert not v6["committed"] and [c[1:3] for c in calls if c[0] == "mutate"] == [("adGroups", True), ("ads", True)]; n += 1
+    r = call4("adsops_apply", {"campaign": "c42", "commit": True})
+    assert r["isError"] and "plan_id required" in r["content"][0]["text"]; n += 1
+    os.utime(hb, (clock["t"] - 7200, clock["t"] - 7200))                    # dead guard: URL change is no exposure
+    calls.clear()
+    a6 = call4("adsops_apply", {"campaign": "c42", "commit": True, "plan_id": p6["plan_id"]})["structuredContent"]
+    assert a6["committed"] and a6["ops_count"] == 2; n += 1
+    assert [c[1:3] for c in calls if c[0] == "mutate"] == [("adGroups", True), ("ads", True),
+                                                           ("adGroups", False), ("ads", False)]; n += 1
+    last = [json.loads(l) for l in open(cfg_d["audit_log"])][-1]
+    assert last["tool"] == "adsops_apply" and last["ops"] == {"adGroups": 1, "ads": 1} \
+        and any("final_urls" in x and "/owners/pasco/" in x for x in last["notes"]); n += 1   # URL change audited
+    url_live.update(params={"ag": "pasco"}, final=["https://example.com/owners/pasco/"])   # Google now has it
+    st6 = call4("adsops_status", {"campaign": "c42"})["structuredContent"]
+    assert st6["urls"]["ad_groups"]["pasco"]["url_custom_parameters"] == {"ag": "pasco"} \
+        and st6["urls"]["ad_groups"]["pasco"]["ads"][0]["final_urls"] == ["https://example.com/owners/pasco/"] \
+        and st6["urls"]["campaign_final_url_suffix"] == "utm_content={_ag}"; n += 1     # read-back
+    assert call4("adsops_plan", {"campaign": "c42"})["structuredContent"]["ops_count"] == 0; n += 1
+    json.dump({**ustate, "ad_groups": {"pasco": {"ad_final_urls": ["https://evil.com/owners/"]}}}, open(sp, "w"))
+    r = call4("adsops_plan", {"campaign": "c42"})
+    assert r["isError"] and "allowlist" in r["content"][0]["text"]; n += 1
+    json.dump({**ustate, "ad_groups": {"pasco": {"ad_final_urls": ["https://example.com/x/"], "cpc_bid_micros": 5}}},
+              open(sp, "w"))
+    r = call4("adsops_plan", {"campaign": "c42"})
+    assert r["isError"] and "bids/keywords" in r["content"][0]["text"]; n += 1
+    os.utime(hb, (clock["t"], clock["t"]))
+    json.dump(ustate, open(sp, "w"))
+    url_live.update(params={}, final=["https://example.com/owners/"])
+    d7 = call4("adsops_set", {"campaign": "c42", "daily_budget_usd": 9, "dry_run": True,
+                              "reason": "budget nudge with URL state"})["structuredContent"]
+    assert sorted(d7["ops"]) == ["adGroups", "ads", "campaignBudgets"] and d7["exposure_increases"] == \
+        ["budget up 8.00 -> 9.00"]; n += 1                                   # set keeps the allowlist + URL diff
+    del camp_cfg["url_domains"]
+    json.dump(state, open(sp, "w"))
     del cfg["accounts"][0]["campaigns"][0]["policy_file"]
     return n

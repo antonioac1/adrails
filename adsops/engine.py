@@ -11,10 +11,17 @@ import datetime as dt
 import json
 
 from . import strict
+from . import urls
 from .errors import RailViolation, ToolError, scrub
 
 MATCH = {"BROAD", "PHRASE", "EXACT"}
-ORDER = ("campaignBudgets", "campaigns", "campaignCriteria")
+ORDER = ("campaignBudgets", "campaigns", "campaignCriteria", "adGroups", "ads")
+# The only fields any plan may write. Bids, keywords (other than negative adds), ad copy and anything
+# else are refused even if a future code path tried to emit them alongside a URL change.
+_UPDATE_FIELDS = {"campaignBudgets": {"amountMicros"},
+                  "campaigns": {"status", "finalUrlSuffix"},
+                  "adGroups": {"urlCustomParameters", "finalUrlSuffix"},
+                  "ads": {"finalUrls"}}
 
 _REQUIRED_STATE = ("customer_id", "campaign_id", "campaign_name", "guards")
 _REQUIRED_GUARDS = ("max_daily_budget_usd", "max_end_date", "lifetime_spend_pause_usd",
@@ -26,6 +33,31 @@ _REQUIRED_LIVE_BUDGET = ("budget_usd", "budget_shared", "budget_rn")
 def _end_key(end_field):
     """campaign.end_date_time -> endDateTime (same camelisation as gads_ctl)."""
     return "".join(w.capitalize() if i else w for i, w in enumerate(end_field.split("_")))
+
+
+def check_op_fields(ops, end_field="end_date_time"):
+    """RailViolation unless every op is an update of an allowed field, or a negative-keyword create."""
+    for svc, entries in (ops or {}).items():
+        if svc == "campaignCriteria":
+            for e in entries:
+                c = e.get("create") if isinstance(e, dict) else None
+                if set(e) != {"create"} or not isinstance(c, dict) or c.get("negative") is not True \
+                        or set(c) != {"campaign", "negative", "keyword"}:
+                    raise RailViolation("campaignCriteria ops may only create negative keywords")
+            continue
+        allowed = set(_UPDATE_FIELDS.get(svc, ()))
+        if svc == "campaigns":
+            allowed.add(_end_key(end_field))
+        if not allowed:
+            raise RailViolation(f"service {svc!r} is not managed by adsops")
+        for e in entries:
+            upd = e.get("update") if isinstance(e, dict) else None
+            if set(e) != {"update", "updateMask"} or not isinstance(upd, dict):
+                raise RailViolation(f"{svc} ops must be field-masked updates")
+            fields = set(upd) - {"resourceName"}
+            mask = set(str(e["updateMask"]).split(","))
+            if fields != mask or not fields <= allowed:
+                raise RailViolation(f"{svc} op touches unmanaged field(s) {sorted(fields - allowed)}")
 
 
 def _require(obj, keys, what):
@@ -98,6 +130,10 @@ def plan(state, live, today=None, end_field="end_date_time"):
         key = _end_key(end_field)
         camp[key] = want_end + (" 23:59:59" if end_field.endswith("time") else "")
         mask.append(key)
+    url_camp, url_ops, url_notes = urls.plan_urls(state, live)   # URL fields: no spend exposure
+    for k, v in url_camp.items():
+        camp[k] = v
+        mask.append(k)
     if mask:
         ops["campaigns"] = [{"update": camp, "updateMask": ",".join(mask)}]
 
@@ -127,6 +163,9 @@ def plan(state, live, today=None, end_field="end_date_time"):
         ops["campaignCriteria"] = [{"create": {"campaign": rn, "negative": True,
                                                "keyword": {"text": t, "matchType": m}}} for t, m in adds]
         notes.append(f"{len(adds)} new negatives")
+    ops.update(url_ops)
+    notes += url_notes
+    check_op_fields(ops, end_field)
     total = sum(len(v) for v in ops.values())
     if total > g["max_ops_per_run"]:
         raise RailViolation(f"{total} ops exceeds guard max_ops_per_run {g['max_ops_per_run']}")
@@ -378,7 +417,7 @@ def selftest():
     c = _FakeClient()
     res = execute(c, ops, commit=True)
     seq = [(svc, vo) for svc, vo, _ in c.calls]
-    ck(seq == [(svc, v) for v in (True, False) for svc in ORDER],
+    ck(seq == [(svc, v) for v in (True, False) for svc in ORDER if svc in ops],
        f"validate pass precedes commit pass, ORDER respected: {seq}")
     ck(all(p == (svc == "campaignCriteria") for svc, _, p in c.calls),
        "partial=True only for campaignCriteria")
@@ -393,5 +432,42 @@ def selftest():
     ck(ops_count(ops) == 4, "ops_count sums operations")
     ck(ops_count(None) == 0 and ops_count({}) == 0, "ops_count tolerates None/{}")
     ck(MATCH == {"BROAD", "PHRASE", "EXACT"}
-       and ORDER == ("campaignBudgets", "campaigns", "campaignCriteria"), "constants")
+       and ORDER == ("campaignBudgets", "campaigns", "campaignCriteria", "adGroups", "ads"), "constants")
+
+    # ── URL fields through plan + execute ────────────────────────────────────────────────────
+    urls_live = {"campaign_final_url_suffix": "a=1",
+                 "ad_groups": {"g1": {"resource_name": "customers/1234567890/adGroups/7", "status": "ENABLED",
+                                      "url_custom_parameters": {}, "final_url_suffix": "",
+                                      "ads": [{"resource_name": "customers/1234567890/ads/70",
+                                               "final_urls": ["https://example.com/"]}]}}}
+    want = {"url_domains": ["example.com"], "campaign_final_url_suffix": "a=1",
+            "ad_groups": {"g1": {"url_custom_parameters": {"ag": "g1"}, "ad_final_urls": ["https://example.com/g1/"]}}}
+    ck(plan(S(url_domains=["example.com"], campaign_final_url_suffix="a=1"), L(urls=urls_live), today=TODAY)
+       == ({}, []), "URL state equal to live -> no ops")
+    ops, notes = plan(S(**want), L(urls=urls_live), today=TODAY)
+    ck(sorted(ops) == ["adGroups", "ads"] and ops_count(ops) == 2
+       and sum(x.startswith("url: ") for x in notes) == 2, "URL diff -> adGroups + ads ops with notes")
+    ops, _ = plan(S(**{**want, "campaign_final_url_suffix": "a=2"}, status="PAUSED"), L(urls=urls_live), today=TODAY)
+    ck(ops["campaigns"][0]["updateMask"] == "status,finalUrlSuffix", "campaign suffix shares the campaign op")
+    for name, st in (("off-allowlist", {**want, "ad_groups": {"g1": {"ad_final_urls": ["https://evil.com/"]}}}),
+                     ("http", {**want, "ad_groups": {"g1": {"ad_final_urls": ["http://example.com/"]}}}),
+                     ("no allowlist", {**want, "url_domains": []}),
+                     ("bid field", {**want, "ad_groups": {"g1": {"cpc_bid_micros": 1}}})):
+        r = _attempt(lambda: plan(S(**st), L(urls=urls_live), today=TODAY))
+        ck(r[0] == "err" and isinstance(r[1], RailViolation), f"URL rail: {name}")
+    r = _attempt(lambda: plan(S(**want), L(), today=TODAY))
+    ck(r[0] == "err" and "no URL read" in str(r[1]), "URL state without a live URL read refused")
+    for bad in ({"adGroups": [{"update": {"resourceName": "x", "cpcBidMicros": "1"}, "updateMask": "cpcBidMicros"}]},
+                {"ads": [{"update": {"resourceName": "x", "finalUrls": [], "headline": "h"},
+                          "updateMask": "finalUrls"}]},
+                {"adGroupCriteria": [{"create": {}}]},
+                {"campaignCriteria": [{"create": {"campaign": "c", "negative": False, "keyword": {}}}]},
+                {"campaignCriteria": [{"remove": "customers/1/campaignCriteria/1~2"}]}):
+        r = _attempt(lambda: check_op_fields(bad))
+        ck(r[0] == "err" and isinstance(r[1], RailViolation), f"check_op_fields refuses {list(bad)}")
+    c = _FakeClient()
+    url_ops = plan(S(**want), L(urls=urls_live), today=TODAY)[0]
+    execute(c, url_ops, commit=True)
+    ck([(s_, v) for s_, v, _ in c.calls] == [("adGroups", True), ("ads", True), ("adGroups", False), ("ads", False)]
+       and not any(p for _, _, p in c.calls), "URL ops validated then committed via adGroups/ads, no partial")
     return n

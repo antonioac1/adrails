@@ -17,7 +17,7 @@ INVARIANTS (checked for every case):
 Read-only: never touches adsops/.  Prints ``QA: N checks, M failures`` plus one block
 per failure.
 
-Run: python3 tests/qa_protocol.py
+Run: cd <repo> && python3 tests/qa_protocol.py
 """
 import builtins
 import io

@@ -43,6 +43,12 @@ def _path_of(url):
     return s
 
 
+def _token_expired(err):
+    """True for Google's 'HTTP 401 ... ACCESS_TOKEN_EXPIRED' (the only error we retry)."""
+    s = str(err)
+    return "HTTP 401" in s and "ACCESS_TOKEN_EXPIRED" in s
+
+
 # ── default transport (only touched when called) ──────────────────────────────────────────────
 def urllib_http(method, url, headers, body):
     """POST/GET JSON via urllib with a 60s timeout. HTTPError -> ToolError with a scrubbed body."""
@@ -112,7 +118,17 @@ class GoogleAdsClient:
         return h
 
     def _post(self, path, body):
-        r = self.http("POST", self._url(path), self._headers(), body)
+        try:
+            r = self.http("POST", self._url(path), self._headers(), body)
+        except ToolError as e:
+            if not _token_expired(e):
+                raise
+            # One shot: drop the cached token, refresh, retry once. A 401 is refused before Google
+            # processes the request, so re-sending a mutate cannot double-apply it. A second 401 propagates.
+            inv = getattr(self.token_provider, "invalidate", None)
+            if callable(inv):
+                inv()
+            r = self.http("POST", self._url(path), self._headers(), body)
         if not isinstance(r, dict):
             raise ToolError("unexpected response from %s (not a JSON object)" % path)
         return r
@@ -181,6 +197,42 @@ def live_state(client, campaign_id, end_field="end_date_time"):
                               _g(n, "campaignCriterion", "keyword", "matchType", default=""))
                              for n in negs}),
     }
+
+
+def live_urls(client, campaign_id):
+    """URL fields adsops can manage: campaign final_url_suffix; per non-removed ad group its custom
+    parameters, final_url_suffix and the final_urls of each ENABLED ad. Read-only."""
+    try:
+        cid = int(campaign_id)
+    except (TypeError, ValueError):
+        raise ToolError("invalid campaign_id: %r" % (campaign_id,))
+    c = client.search("SELECT campaign.id, campaign.final_url_suffix FROM campaign WHERE campaign.id = %d" % cid)
+    if not c:
+        raise ToolError("campaign %s not visible to this identity" % campaign_id)
+    groups = {}
+    for r in client.search("SELECT ad_group.resource_name, ad_group.name, ad_group.status, "
+                           "ad_group.url_custom_parameters, ad_group.final_url_suffix FROM ad_group "
+                           "WHERE campaign.id = %d AND ad_group.status != 'REMOVED'" % cid):
+        name = _g(r, "adGroup", "name")
+        entry = {"resource_name": _g(r, "adGroup", "resourceName"), "status": _g(r, "adGroup", "status"),
+                 "url_custom_parameters": {_g(p, "key"): _g(p, "value", default="")
+                                           for p in (_g(r, "adGroup", "urlCustomParameters", default=[]) or [])},
+                 "final_url_suffix": _g(r, "adGroup", "finalUrlSuffix", default="") or "", "ads": []}
+        if name in groups:
+            groups[name]["duplicate"] = True
+        else:
+            groups[name] = entry
+    by_rn = {g["resource_name"]: g for g in groups.values()}
+    for r in client.search("SELECT ad_group.resource_name, ad_group_ad.ad.resource_name, ad_group_ad.ad.final_urls "
+                           "FROM ad_group_ad WHERE campaign.id = %d AND ad_group_ad.status = 'ENABLED'" % cid):
+        g = by_rn.get(_g(r, "adGroup", "resourceName"))
+        if g is not None:
+            g["ads"].append({"resource_name": _g(r, "adGroupAd", "ad", "resourceName"),
+                             "final_urls": list(_g(r, "adGroupAd", "ad", "finalUrls", default=[]) or [])})
+    for g in groups.values():
+        g["ads"].sort(key=lambda a: str(a["resource_name"]))
+    return {"campaign_final_url_suffix": _g(c[0], "campaign", "finalUrlSuffix", default="") or "",
+            "ad_groups": groups}
 
 
 def search_terms(client, campaign_id, days, today=None):
@@ -304,6 +356,43 @@ def selftest():
         raise ToolError("HTTP 400 on /v24/customers/1/googleAds:search: bad")
 
     raises(lambda: GoogleAdsClient("1", Tok(), http=Fake(boom)).search("x"), needle="HTTP 400")
+
+    # 4b. HTTP 401 ACCESS_TOKEN_EXPIRED: invalidate the cached token, refresh, retry ONCE
+    from .. import auth
+    minted = []
+
+    def _mint(info, scope):
+        minted.append(1)
+        return "tok-%d" % len(minted), 10_000.0 + 3600
+
+    expired = ('HTTP 401 on /v24/customers/1/googleAds:search: {"error": {"code": 401, "status": '
+               '"UNAUTHENTICATED", "details": [{"errors": [{"errorCode": {"authenticationError": '
+               '"ACCESS_TOKEN_EXPIRED"}}]}]}}')
+    script = {"fail": 1}
+
+    def flaky(method, url, headers, body):
+        if script["fail"] > 0:
+            script["fail"] -= 1
+            raise ToolError(expired)
+        return {"results": [{"ok": headers["Authorization"]}]}
+
+    sa = auth.ServiceAccount(lambda: {"k": 1}, now=lambda: 10_000.0, refresher=_mint)
+    f = Fake(flaky)
+    rows = GoogleAdsClient("1", sa, http=f).search("SELECT campaign.id FROM campaign")
+    check(len(f.calls) == 2 and len(minted) == 2, "401 expired -> one refresh + one retry")
+    check(f.calls[0]["headers"]["Authorization"] == "Bearer tok-1"
+          and f.calls[1]["headers"]["Authorization"] == "Bearer tok-2", "retry carries the fresh token")
+    check(rows == [{"ok": "Bearer tok-2"}], "retried result returned")
+    script["fail"] = 2
+    f = Fake(flaky)
+    raises(lambda: GoogleAdsClient("1", sa, http=f).mutate("adGroups", [{}], validate_only=True),
+           needle="ACCESS_TOKEN_EXPIRED")
+    check(len(f.calls) == 2, "a second 401 propagates (retried exactly once)")
+    other = Fake(lambda m, u, h, b: (_ for _ in ()).throw(ToolError("HTTP 401 on /x: PERMISSION_DENIED")))
+    raises(lambda: GoogleAdsClient("1", Tok(), http=other).search("x"), needle="HTTP 401")
+    check(len(other.calls) == 1, "other 401s are not retried")
+    check(len(Fake(lambda *a: {}).calls) == 0 and _token_expired(ToolError(expired))
+          and not _token_expired(ToolError("HTTP 400: ACCESS_TOKEN_EXPIRED")), "_token_expired matches 401 only")
     raises(lambda: GoogleAdsClient("1", Tok(), http=Fake(lambda *a: ["not", "a", "dict"]))
            .search("x"), needle="not a JSON object")
 
@@ -374,6 +463,37 @@ def selftest():
            needle="not visible")
     raises(lambda: live_state(GoogleAdsClient("1", Tok(), http=Fake()), "abc"),
            needle="invalid campaign_id")
+
+    # 6b. live_urls: campaign suffix, ad-group params/suffix, enabled ads' final URLs
+    def url_responder(method, url, headers, body):
+        q = body["query"]
+        if "FROM ad_group_ad" in q:
+            return {"results": [
+                {"adGroup": {"resourceName": "customers/1/adGroups/11"},
+                 "adGroupAd": {"ad": {"resourceName": "customers/1/ads/102", "finalUrls": ["https://e.com/b/"]}}},
+                {"adGroup": {"resourceName": "customers/1/adGroups/11"},
+                 "adGroupAd": {"ad": {"resourceName": "customers/1/ads/101", "finalUrls": ["https://e.com/a/"]}}}]}
+        if "FROM ad_group " in q:
+            return {"results": [
+                {"adGroup": {"resourceName": "customers/1/adGroups/11", "name": "pasco", "status": "ENABLED",
+                             "urlCustomParameters": [{"key": "ag", "value": "pasco"}]}},
+                {"adGroup": {"resourceName": "customers/1/adGroups/12", "name": "old", "status": "PAUSED",
+                             "finalUrlSuffix": "x=1"}},
+                {"adGroup": {"resourceName": "customers/1/adGroups/13", "name": "old", "status": "ENABLED"}}]}
+        return {"results": [{"campaign": {"id": "9", "finalUrlSuffix": "utm_content={_ag}"}}]}
+
+    f = Fake(url_responder)
+    lu = live_urls(GoogleAdsClient("1", Tok(), http=f), 9)
+    check(lu["campaign_final_url_suffix"] == "utm_content={_ag}", "live_urls campaign suffix")
+    pg = lu["ad_groups"]["pasco"]
+    check(pg["url_custom_parameters"] == {"ag": "pasco"} and pg["final_url_suffix"] == "", "live_urls ad group params")
+    check([a["resource_name"] for a in pg["ads"]] == ["customers/1/ads/101", "customers/1/ads/102"]
+          and pg["ads"][0]["final_urls"] == ["https://e.com/a/"], "live_urls ads sorted with final URLs")
+    check(lu["ad_groups"]["old"].get("duplicate") is True, "duplicate ad group names flagged")
+    qs = [c["body"]["query"] for c in f.calls]
+    check(all("WHERE campaign.id = 9" in q for q in qs) and "ad_group.status != 'REMOVED'" in qs[1]
+          and "ad_group_ad.status = 'ENABLED'" in qs[2], "live_urls GAQL scoped to the campaign")
+    check(all(c["url"].endswith("googleAds:search") for c in f.calls), "live_urls is read-only (search only)")
 
     # 7. search_terms with an injected today
     f = Fake(lambda m, u, h, b: {"results": [

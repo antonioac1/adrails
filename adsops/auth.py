@@ -9,12 +9,31 @@ import json
 import os
 import subprocess
 import time
+from datetime import timezone
 
 from .errors import ToolError, scrub
 
 SCOPE_GOOGLE_ADS = "https://www.googleapis.com/auth/adwords"
 
 _REDACTED = "[REDACTED]"
+MAX_TOKEN_LIFETIME_S = 3600   # Google access tokens live 1 h; never trust an expiry further out than this
+
+
+def _expiry_epoch(expiry, now=time.time):
+    """Epoch seconds for a google-auth `creds.expiry`.
+
+    google-auth returns a NAIVE datetime that is in UTC. `naive.timestamp()` interprets it as LOCAL
+    time, so on a Mac in America/New_York a token was believed valid ~4-5 h past its real 1 h expiry
+    and calls failed with 401 ACCESS_TOKEN_EXPIRED (observed live 2026-11-01). Naive means UTC here.
+    """
+    if expiry is None:
+        return float(now()) + 3000
+    try:
+        if getattr(expiry, "tzinfo", None) is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return float(expiry.timestamp())
+    except Exception:
+        return float(now()) + 3000
 
 
 def _hide(text, secret=None):
@@ -33,6 +52,10 @@ class TokenProvider:
 
     def access_token(self):
         raise NotImplementedError
+
+    def invalidate(self):
+        """Forget any cached token so the next access_token() fetches a fresh one (no-op by default)."""
+        return None
 
 
 class StaticToken(TokenProvider):
@@ -110,12 +133,7 @@ def _google_refresher(info, scope):
     except Exception as e:
         raise ToolError("service-account token refresh failed: " + _hide(e)) from None
     token = getattr(creds, "token", None)
-    expiry = getattr(creds, "expiry", None)
-    try:
-        expiry_epoch = expiry.timestamp() if expiry is not None else time.time() + 3000
-    except Exception:
-        expiry_epoch = time.time() + 3000
-    return token, expiry_epoch
+    return token, _expiry_epoch(getattr(creds, "expiry", None))
 
 
 class ServiceAccount(TokenProvider):
@@ -149,12 +167,18 @@ class ServiceAccount(TokenProvider):
             raise ToolError("service-account refresher returned a malformed (token, expiry) pair") from None
         if not token:
             raise ToolError("service-account refresher returned no token") from None
+        t = float(self.now())
         try:
             self._expiry = float(expiry)
         except (TypeError, ValueError):
-            self._expiry = float(self.now()) + 3000
+            self._expiry = t + 3000
+        self._expiry = min(self._expiry, t + MAX_TOKEN_LIFETIME_S)   # defensive cap: a bad clock/TZ can't stretch it
         self._token = str(token)
         return self._token
+
+    def invalidate(self):
+        """Drop the cached token (e.g. after a 401 ACCESS_TOKEN_EXPIRED) so the next call refreshes."""
+        self._token, self._expiry = None, 0.0
 
     def __repr__(self):
         return "ServiceAccount(scope=%r)" % (self.scope,)
@@ -342,6 +366,46 @@ def selftest():
     check(sa.access_token() == "tok1" and len(calls) == 1, "still cached just before expiry-60")
     clock[0] = 1000.0 + 3600 - 60
     check(sa.access_token() == "tok2" and len(calls) == 2, "refreshed at expiry-60s")
+    sa.invalidate()
+    check(sa.access_token() == "tok3" and len(calls) == 3, "invalidate() forces a refresh")
+    TokenProvider.invalidate(StaticToken("x"))   # base no-op is callable
+
+    # defensive cap: an expiry claimed 5 h out is trusted for at most MAX_TOKEN_LIFETIME_S
+    clock2, calls2 = [5000.0], []
+    def far_refresher(info, scope):
+        calls2.append(1)
+        return "far%d" % len(calls2), clock2[0] + 5 * 3600
+    sa_far = ServiceAccount(lambda: {"k": 1}, now=lambda: clock2[0], refresher=far_refresher)
+    check(sa_far.access_token() == "far1" and sa_far._expiry == 5000.0 + MAX_TOKEN_LIFETIME_S,
+          "expiry capped at now + 3600 s")
+    clock2[0] = 5000.0 + MAX_TOKEN_LIFETIME_S - 59
+    check(sa_far.access_token() == "far2" and len(calls2) == 2, "capped token refreshed before the real 1 h expiry")
+
+    # naive-UTC expiry (google-auth's creds.expiry) under a non-UTC local timezone
+    import datetime as _dt
+    old_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        real_now = time.time()
+        naive = _dt.datetime.now(timezone.utc).replace(tzinfo=None) + _dt.timedelta(seconds=3600)
+        check(abs(naive.timestamp() - (real_now + 3600)) > 3 * 3600,
+              "control: naive .timestamp() is hours off under America/New_York (the bug)")
+        check(abs(_expiry_epoch(naive) - (real_now + 3600)) < 5, "naive expiry read as UTC")
+        aware = _dt.datetime.now(timezone.utc) + _dt.timedelta(seconds=1800)
+        check(abs(_expiry_epoch(aware) - (real_now + 1800)) < 5, "aware expiry unchanged")
+        check(abs(_expiry_epoch(None, now=lambda: 100.0) - 3100.0) < 1e-6, "missing expiry -> now + 3000")
+        clock3 = [real_now]
+        sa_tz = ServiceAccount(lambda: {"k": 1}, now=lambda: clock3[0],
+                               refresher=lambda i, s: ("tz-tok", _expiry_epoch(naive)))
+        sa_tz.access_token()
+        check(abs(sa_tz._expiry - (real_now + 3600)) < 5, "service account caches the real 1 h expiry")
+    finally:
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        time.tzset()
 
     # refresher failures are ToolError and scrubbed
     def bad_refresher(info, scope):

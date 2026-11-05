@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adrails"
-version = "0.2.3"
-description = "AdRails: open-source Google Ads MCP server with spend guardrails. Agents read freely and write only through a reviewed desired-state file."
+version = "0.4.0"
+description = "AdRails: open-source MCP server for AI agents running ad accounts with guardrails: Google Ads changes through plan/validate/commit, enterprise controls, AEO toolkit and direct-mail tracking."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "adsops contributors" }]
-keywords = ["mcp", "advertising", "google-ads", "agents", "guardrails"]
+keywords = ["mcp", "mcp-server", "google-ads", "ai-agents", "guardrails", "aeo", "direct-mail", "qr-code", "llms-txt", "advertising"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -32,3 +32,6 @@ adsops-mcp = "adsops.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["adsops*"]
+
+[tool.setuptools.package-data]
+adsops = ["fixtures/*.json", "intel/fixtures/*.csv", "intel/fixtures/*.tsv", "intel/fixtures/*.txt", "intel/fixtures/*.json"]

@@ -21,6 +21,9 @@ Three things it does differently:
 - **Pay per call in sats.** Optional hosted add-ons, Lightning-first, metered per call in sats —
   coming soon. Nothing in this release contacts any hosted service.
 
+
+> **New in 0.4.0:** 50 tools. Enterprise controls (roles, human approvals with signed tokens, a hash-chained audit log, rollback, drift detection, aggregate caps, SBOM), diagnostics (conversion-tracking audit, wasted spend, impression share, quality score, anomalies), automation that only proposes (rules, monitors, budget reallocation), an AEO toolkit (AI-crawler, page, JSON-LD and llms.txt audits, share of answer, IndexNow, AI traffic, ads-to-answers), and direct-mail tracking (list hygiene, phone-readable codes with a proven check character, QR, print-exact labels, scan counting, cost per lead across channels). Plus `adrails init` / `adrails doctor`. ChatGPT Ads support is in development, not released.
+
 ## Testing
 
 ```bash
@@ -159,13 +162,63 @@ More: https://adrails.dev/docs/mcp-clients/
 | Tool | What it does |
 | --- | --- |
 | `adsops_campaigns` | Lists the campaigns this deployment may operate: keys, accounts, state files, and the active commit policy. |
-| `adsops_status` | Live read for one campaign: status, end date, daily budget, spend today and lifetime, negative count, whether caps come from the policy file, and the guard heartbeat's age. |
+| `adsops_status` | Live read for one campaign: status, end date, daily budget, spend today and lifetime, negative count, whether caps come from the policy file, and the guard heartbeat's age. When the state file manages URL fields it also returns `urls`: the campaign final URL suffix and, per ad group, its custom parameters, final URL suffix and the final URLs of each enabled ad. |
 | `adsops_terms` | Clicked search terms for the last N days (1–90, default 14): term, matched keyword, clicks, cost. |
-| `adsops_plan` | Pure diff of the desired-state file against live state; writes nothing. Returns the operations, notes, `ops_count`, the exposure increases it found, and a single-use **`plan_id`** with its expiry. |
+| `adsops_plan` | Pure diff of the desired-state file against live state; writes nothing. Covers budget, status, end date, negatives and the URL fields below. Returns the operations, notes (one `url: ...` line per URL change), `ops_count`, the exposure increases it found, and a single-use **`plan_id`** with its expiry. |
 | `adsops_apply` | Validate-only unless `commit=true`. A commit needs `commit_policy.allow_commit`, a clean git-tracked state file, a fresh guard heartbeat when the change adds exposure, and the **`plan_id`** from `adsops_plan` when the policy requires it. |
 | `adsops_set` | Proposes a budget / status / end-date / negatives change with a short `reason`; checks it against policy caps and live state, writes the state file and commits it to git. `dry_run=true` returns a **`plan_id`** instead of writing; `apply=true` needs that `plan_id` when the policy requires it. |
 | `adsops_guard` | Reads spend and pauses the campaign if the daily or lifetime threshold is crossed. Pause only: it never enables, raises a budget or edits keywords. Validate-only unless `commit=true`. |
 | `adsops_usage` | Metering summary for the tenant: calls, errors, units, ops and median latency per tool. |
+| `adsops_negatives_suggest` | Read-only. Classifies the last N days (1–90, default 30) of search terms (renter, job, HOA/condo, vacation, DIY/software, out-of-area, competitor brand) with deterministic rules and an optional local-model hook you supply, and proposes PHRASE negatives with cost and click evidence. Skips terms and phrases your existing negatives already cover, never suggests words on your protect list, and returns a ready-to-paste `negatives_add` patch plus a basis note. It writes nothing: the patch goes through the desired-state file like any other change. |
+| `adsops_lp_diagnose` | Read-only. Per ad group, Google's quality-score components (expected CTR, ad relevance, landing page experience) plus a plain HTTP check of each final URL: status, response time, bytes, and whether the title and H1 echo the ad group's keywords and town. Returns plain-English findings, worst first. No browser and no JavaScript, so a headline built by script shows as missing. |
+| `adsops_competitors_report` | Read-only. The AdRails Intel weekly report from the free sources (Auction Insights you imported, cached Transparency Center data, your own stats snapshots). Needs `intel_config` in the config; makes no network call. |
+| `adsops_auction_insights_import` | Imports an Auction Insights CSV/TSV export or a pasted table into the local intel database (replaces rows for the same date range). Writes only that local SQLite file. Needs `intel_config`. |
+
+
+### New in 0.4.0: enterprise controls, automation and an AEO toolkit (28 tools)
+
+| Tool | What it does |
+| --- | --- |
+| `adsops_conv_audit` | Read-only. Audit conversion tracking for the campaign's account: primary goals, dead tags, double counting, auto-tagging, lead counting, smart bidding without enough conversions. Returns a 0-100 score, grade, and ranked findings with fixes. Run this before trusting any CPA or optimising toward conversions. |
+| `adsops_diagnostics` | Read-only PPC diagnostics bundle for one campaign: wasted spend (zero-conversion search terms), impression share lost to budget vs rank, cost-weighted quality score with weak components, and day-over-baseline anomalies (z-score). Returns a ranked headline list plus details. |
+| `adsops_rsa_validate` | Pure check, no account access. Validate a Responsive Search Ad draft against Google's limits and common disapproval causes (lengths incl. double-width chars, pins, duplicates, caps, punctuation, phone numbers, unsubstantiated superlatives, banned phrases) before any write. Returns errors, warnings and fixes. |
+| `adsops_rules_check` | Read-only. Evaluate the automation rules in the campaign's POLICY file (founder-owned, agents can't edit it) against live metrics. Returns PROPOSALS and a desired-state patch; nothing is applied. Rules can only pause, add negatives, alert, or move budget inside the policy caps. |
+| `adsops_monitor_check` | Read-only. Run monitors (CPA spike, pacing over/under, month forecast, zero impressions, disapprovals, budget-limited) over live snapshots of every configured campaign (or one). New alerts are de-duplicated for 24 h; with deliver=true they are posted to the webhook named in config alerts.webhook_env. |
+| `adsops_brief` | Read-only. A short markdown brief across every configured campaign: spend today, conversions, blended CPA and the top issues from the monitors. Built for a daily Slack/email post. |
+| `adsops_fleet` | Read-only. Fleet view across every configured account and campaign: spend, budget, conversions and CPA by account and platform, plus the AGGREGATE cap check (config fleet_caps), which assumes platforms may deliver up to 2x the daily budget. |
+| `adsops_realloc_suggest` | Read-only. Recommend moving daily budget from weak campaigns to budget-limited strong ones inside each policy's caps. The total never rises. Returns moves plus per-campaign desired-state patches to review. |
+| `adsops_drift` | Read-only. Who changed the account outside AdRails? Reads Google's change history for the last N days (max 30) and flags out-of-band edits (UI, scripts, auto-applied recommendations), highlighting budget, status and bidding changes. |
+| `adsops_keyword_ideas` | Read-only. Keyword Planner ideas (searches, competition, top-of-page bid range) for seed keywords and/or a URL, clustered by theme with an intent label. Needs a Basic-access developer token. |
+| `adsops_offline_conv_plan` | Build (never send) an offline / enhanced conversion upload from CRM rows. Emails, phones and names are normalised and SHA-256 hashed LOCALLY, so raw PII never leaves this machine. Returns a redacted preview and counts; validate_only stays true. |
+| `adsops_history` | Read-only. Git history of the campaign's desired-state file: every change agents or lanes made, newest first. |
+| `adsops_rollback` | Undo: build the desired state as of an earlier commit (guards, account and campaign ids are never reverted, and negatives are never removed). With commit=true it writes and git-commits the state file; then run adsops_plan and adsops_apply as usual. Nothing reaches the ad account from this tool. |
+| `adsops_approval_request` | Ask a human to approve a plan before it can be committed (when config approvals.mode is on). Returns approve/reject tokens to send to the approver; the tokens are HMAC-signed and expire. |
+| `adsops_approval_decide` | Record a human decision using a signed approve/reject token. Forged, expired or reused tokens are refused. |
+| `adsops_approvals` | List approval requests (newest first), optionally by status. |
+| `adsops_audit_verify` | Verify the tamper-evident audit chain of every mutating call (hash-linked entries). Returns ok, entry count, the first bad entry if any, and a head digest to publish so later truncation is detectable. |
+| `adsops_audit_tail` | The last N audit-chain entries (redacted), newest first. |
+| `adsops_sbom` | Supply-chain manifest of this AdRails install: a CycloneDX 1.5 SBOM and a SHA-256 manifest of every package file, so you can verify the code you run is the code that was released. |
+| `adsops_whoami` | This server's identity and controls: version, principal and roles (RBAC), approval mode, audit chain path, and whether a guard heartbeat is configured. |
+| `aeo_site_audit` | Read-only. Can AI answer engines reach this site? Checks robots.txt rules for 18 AI and search crawlers (GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, Claude-User, PerplexityBot, Google-Extended, Bingbot, Applebot...), llms.txt, the sitemap, and the homepage's noindex/canonical/body-text signals. Returns a 0-100 score and ranked fixes. |
+| `aeo_page_audit` | Read-only. Answer-readiness of one page: answer-first paragraph, question headings, FAQ, structured data, specifics, freshness, citations, scannability, plus a JSON-LD audit (required/recommended fields per type) and crawler directives. Returns scores, extractable answer blocks, and missing questions. |
+| `aeo_llms_txt` | Read-only. Validate a site's /llms.txt (llmstxt.org format), or build one: pass pages [{url,title,description,section}] with title and summary and it returns a ready file that passes validation. |
+| `aeo_schema_generate` | Pure. Generate valid JSON-LD for a page: kind = faq (qas [[q,a]...]), software (name,url,description,price), org (name,url,logo,same_as) or breadcrumbs (trail [[name,url]...]). Returns the object, its own audit, and a ready <script> tag. |
+| `aeo_visibility_record` | Record an AI share-of-answer panel. YOU (the calling agent) ask each engine the prompts and pass the answers here [{engine,prompt,text,citations}]; AdRails scores mentions, rank vs competitors, citations and sentiment, stores the run, and returns the score plus the change since the last run. |
+| `aeo_indexnow` | Tell Bing, Yandex, Seznam and Naver (IndexNow) that URLs changed. Checks the key file at https://host/<key>.txt first. submit=false (default) only validates. Optionally pass sitemap_since (ISO date) to send every sitemap URL modified since then. |
+| `aeo_ai_traffic` | Read-only. Measure AI-driven traffic from a local web-server log (nginx combined or JSON lines): referrals from ChatGPT, Perplexity, Claude, Gemini and Copilot with landing pages, and AI crawler fetches split into verified / unverified / spoofed (by the providers' published IP ranges and scanner paths). |
+| `aeo_content_gaps` | Read-only. The ads-to-answers bridge: turn the campaign's real paid search terms into the questions people ask, check which of your pages already answer them, and return content briefs for the biggest gaps (facts only from site_facts, never invented). |
+
+**Hardening applied to every tool** (`adsops/enterprise_tools.py:harden`): role checks (`rbac`, off until enabled, then deny-by-default),
+an approval gate on commits (`approvals.mode`: `off` | `exposure` | `all`; HMAC-signed, expiring tokens; secret from env
+`ADRAILS_APPROVAL_SECRET`, 32+ chars), and a SHA-256 hash-chained audit log of every mutating call, refused ones included
+(`audit_chain`, default `~/.adsops/audit-chain.jsonl`). Monitors deliver to the webhook URL in the env var named by `alerts.webhook_env`.
+Nothing here adds spending authority: account changes still go committed state file → `adsops_plan` → `adsops_apply`.
+
+New CLI: `adsops-mcp init --dir DIR --customer-id ID --campaign-id N --sa KEY.json` scaffolds a campaign with a safe policy
+(caps = today's budget, commits off, enabling forbidden) and makes the first git commit; `adsops-mcp --config DIR/config.json doctor`
+reports what's missing, with a fix for each failed check.
+
+Optional per-campaign config for the new tools: `negatives` (`protect`, `out_of_area`, `competitor_brands`, `home_state`, `llm_command`) and `landing` (`towns`); top-level `intel_config` points at your AdRails Intel tenant file (see `adsops/intel/README.md`).
 
 ## The policy file
 
@@ -251,7 +304,7 @@ like; the server computes the diff.
 Keep these files in git. That is what makes "reviewed desired state" real: `git diff` is the
 change review, and `require_clean_git` makes the server refuse to act on uncommitted edits.
 
-## Works with Google's official read-only `google-ads-mcp`
+## Works with Google's official `google-ads-mcp`
 
 Run both servers side by side in the same MCP client. Google's server answers ad-hoc GAQL
 exploration and never writes; AdRails is the only write path. The agent reads with the official
@@ -262,3 +315,5 @@ in between. Both speak JSON-RPC over stdio, so one `.mcp.json` entry each is the
 ## License
 
 Apache-2.0.
+
+<!-- mcp-name: dev.adrails/adrails -->
