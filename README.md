@@ -24,7 +24,9 @@ Three things it does differently:
 
 
 
-> **New in 0.4.1:** 50 tools. Enterprise controls (roles, human approvals with signed tokens, a hash-chained audit log, rollback, drift detection, aggregate caps, SBOM), diagnostics (conversion-tracking audit, wasted spend, impression share, quality score, anomalies), automation that only proposes (rules, monitors, budget reallocation), an AEO toolkit (AI-crawler, page, JSON-LD and llms.txt audits, share of answer, IndexNow, AI traffic, ads-to-answers), and direct-mail tracking (list hygiene, phone-readable codes with a proven check character, QR, print-exact labels, scan counting, cost per lead across channels). Plus `adrails init` / `adrails doctor`. ChatGPT Ads support is in development, not released.
+
+
+> **New in 0.4.2:** 50 tools. Enterprise controls (roles, human approvals with signed tokens, a hash-chained audit log, rollback, drift detection, aggregate caps, SBOM), diagnostics (conversion-tracking audit, wasted spend, impression share, quality score, anomalies), automation that only proposes (rules, monitors, budget reallocation), an AEO toolkit (AI-crawler, page, JSON-LD and llms.txt audits, share of answer, IndexNow, AI traffic, ads-to-answers), and direct-mail tracking (list hygiene, phone-readable codes with a proven check character, QR, print-exact labels, scan counting, cost per lead across channels). Plus `adrails init` / `adrails doctor`. ChatGPT Ads support is in development, not released.
 
 ## Testing
 

@@ -43,6 +43,12 @@ QUERIES = {
         "metrics.cost_micros, metrics.clicks, metrics.conversions "
         "FROM campaign WHERE segments.date BETWEEN '{since}' AND '{until}' AND campaign.status = 'ENABLED'"
     ),
+    # Goal biddability: an action flagged primary_for_goal only COUNTS as a conversion when its (category, origin) goal is
+    # biddable. Added 2026-11-05 after the audit called Google-hosted "Local actions" primary while their goals were off.
+    "goals": (
+        "SELECT customer_conversion_goal.category, customer_conversion_goal.origin, customer_conversion_goal.biddable "
+        "FROM customer_conversion_goal"
+    ),
     "customer": (
         "SELECT customer.id, customer.auto_tagging_enabled, "
         "customer.conversion_tracking_setting.conversion_tracking_status, "
@@ -268,8 +274,27 @@ def _grade(score):
 
 
 # ----------------------------------------------------------------------------- audit
-def audit(actions, action_stats, campaigns, customer, days=30) -> dict:
-    """Audit conversion tracking from raw GAQL rows and return a graded report."""
+_ORIGIN_BY_TYPE = {"GOOGLE_HOSTED": "GOOGLE_HOSTED", "AD_CALL": "CALL_FROM_ADS", "WEBPAGE": "WEBSITE", "WEBPAGE_CODELESS": "WEBSITE",
+                   "UPLOAD_CLICKS": "WEBSITE", "WEBSITE_CALL": "WEBSITE", "UPLOAD_CALLS": "WEBSITE", "STORE_SALES": "STORE",
+                   "GOOGLE_PLAY_DOWNLOAD": "APP", "FIREBASE_ANDROID_FIRST_OPEN": "APP"}
+
+
+def _biddable_goals(goals):
+    """{(category, origin): bool} from customer_conversion_goal rows; None when no rows were supplied."""
+    if not goals:
+        return None
+    out = {}
+    for r in goals:
+        g = _g(r, "customerConversionGoal") or {}
+        out[(str(g.get("category") or ""), str(g.get("origin") or ""))] = _bool(g.get("biddable")) is True
+    return out
+
+
+def audit(actions, action_stats, campaigns, customer, days=30, goals=None) -> dict:
+    """Audit conversion tracking from raw GAQL rows and return a graded report.
+
+    goals (optional customer_conversion_goal rows): when given, an action counts as primary only if primary_for_goal is set
+    AND its (category, origin) goal is biddable; actions excluded that way are listed under "non_biddable_primary"."""
     window = _validate_days(days)
 
     stats = _stats_by_action(action_stats)
@@ -279,7 +304,16 @@ def audit(actions, action_stats, campaigns, customer, days=30) -> dict:
 
     findings = []
     enabled_actions = [a for a in norm_actions if a["status"] == "ENABLED"]
-    primary = [a for a in enabled_actions if a["primary_for_goal"]]
+    bid = _biddable_goals(goals)
+    raw_types = {str(_g(r, "conversionAction", "id") or ""): str(_g(r, "conversionAction", "type") or "") for r in (actions or [])}
+    non_biddable = []
+    if bid is not None:
+        for a in enabled_actions:
+            if a["primary_for_goal"]:
+                origin = _ORIGIN_BY_TYPE.get(raw_types.get(str(a.get("id")), "") or str(a.get("type") or ""), "WEBSITE")
+                if not bid.get((str(a.get("category") or ""), origin), False):
+                    non_biddable.append(a)
+    primary = [a for a in enabled_actions if a["primary_for_goal"] and a not in non_biddable]
     # The campaigns query already filters ENABLED; treat a missing status as enabled.
     enabled_campaigns = [c for c in norm_campaigns if c["status"] in ("", "ENABLED")]
 
@@ -397,7 +431,8 @@ def audit(actions, action_stats, campaigns, customer, days=30) -> dict:
                    "no issues found.")
 
     return {"score": score, "grade": grade, "findings": findings,
-            "actions": norm_actions, "summary": summary}
+            "actions": norm_actions, "summary": summary,
+            "non_biddable_primary": [a.get("name") for a in non_biddable]}
 
 
 # -------------------------------------------------------------------------- selftest
@@ -593,6 +628,16 @@ def selftest() -> int:
     check(raised == "rail", "oversized window refused by rail")
     check(audit(a, s, c, cu, days="90")["score"] == 100, "string days accepted")
 
+    # goal biddability: a primary action whose goal is not biddable must not count as primary (2026-11-05 live-account lesson)
+    _acts = [{"conversionAction": {"id": "1", "name": "Maps directions", "status": "ENABLED", "type": "GOOGLE_HOSTED",
+                                   "category": "GET_DIRECTIONS", "primaryForGoal": True}},
+             {"conversionAction": {"id": "2", "name": "Lead form", "status": "ENABLED", "type": "WEBPAGE",
+                                   "category": "SUBMIT_LEAD_FORM", "primaryForGoal": True}}]
+    _goals = [{"customerConversionGoal": {"category": "GET_DIRECTIONS", "origin": "GOOGLE_HOSTED", "biddable": False}},
+              {"customerConversionGoal": {"category": "SUBMIT_LEAD_FORM", "origin": "WEBSITE", "biddable": True}}]
+    _r = audit(_acts, [], [], [{"customer": {"autoTaggingEnabled": True, "conversionTrackingSetting": {"conversionTrackingStatus": "CONVERSION_TRACKING_MANAGED_BY_SELF"}}}], 30, goals=_goals)
+    assert _r["non_biddable_primary"] == ["Maps directions"], _r["non_biddable_primary"]
+    _cnt = _r  # noqa
     return n
 
 

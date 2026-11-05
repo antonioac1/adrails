@@ -126,7 +126,8 @@ def register(srv, ctx, cfg):
         _, _, _, _, _, client = ctx.open(args["campaign"])
         since, until = _dates(ctx.now, _days(args))
         r = {k: client.search(q.format(since=since, until=until)) for k, q in conv_audit.QUERIES.items()}
-        return conv_audit.audit(r["actions"], r["action_stats"], r["campaigns"], r["customer"], args.get("days", 30))
+        return conv_audit.audit(r["actions"], r["action_stats"], r["campaigns"], r["customer"], args.get("days", 30),
+                                goals=r.get("goals"))
 
     @srv.tool("adsops_diagnostics", "Read-only PPC diagnostics bundle for one campaign: wasted spend (zero-conversion search terms), "
               "impression share lost to budget vs rank, cost-weighted quality score with weak components, and day-over-baseline "
