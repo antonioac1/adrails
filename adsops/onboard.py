@@ -166,6 +166,28 @@ def doctor(config_path, client_factory=None, env=None, now=None,
     except Exception:  # noqa: BLE001
         pass
 
+    gcred = (cfg.get("credentials") or {}).get("google_ads") or {}
+    oauth_user = gcred.get("type") == "oauth_user"
+    signin_dev = False
+    if oauth_user:
+        # small-business sign-in (adsops-mcp connect): check the sign-in file, not a service account (review #10)
+        sp = os.path.expanduser(str(gcred.get("file") or ""))
+
+        def _signin():
+            if not sp or not os.path.isfile(sp):
+                return False, "missing sign-in file: " + (sp or "<credentials.google_ads.file>")
+            if os.name != "nt" and os.stat(sp).st_mode & 0o077:
+                return False, "sign-in file is readable by others: chmod 600 " + sp
+            with open(sp, encoding="utf-8") as fh:
+                d = json.load(fh) or {}
+            return bool(d.get("refresh_token")), "signed in" if d.get("refresh_token") else "no refresh token"
+        add("google_signin", _signin, "Run: adsops-mcp connect --config %s --client-file <oauth client json>" % config_path)
+        try:
+            with open(sp, encoding="utf-8") as fh:
+                signin_dev = bool((json.load(fh) or {}).get("developer_token"))
+        except Exception:  # noqa: BLE001
+            pass
+
     # 2) service-account key file
     def _sa():
         if not os.path.isfile(sa_path):
@@ -177,15 +199,21 @@ def doctor(config_path, client_factory=None, env=None, now=None,
             return False, "no client_email in " + sa_path
         return True, "service account: " + email
 
-    add("service_account_file", _sa, "Create a service-account key in your "
-        "Google Cloud project (Google Ads API enabled) and save it at " + sa_path)
+    if gcred and not oauth_user:
+        add("service_account_file", _sa, "Create a service-account key in your "
+            "Google Cloud project (Google Ads API enabled) and save it at " + sa_path)
 
     # 3) developer token -- presence only, value never echoed
-    has_token = bool(env.get("ADSOPS_GOOGLE_DEVELOPER_TOKEN"))
-    add("developer_token", lambda: (has_token, "set" if has_token else "missing"),
-        "Google Ads > Tools > API Center: copy your developer token, then export "
-        "ADSOPS_GOOGLE_DEVELOPER_TOKEN=... in the environment that launches "
-        "adsops-mcp")
+    has_token = bool(env.get("ADSOPS_GOOGLE_DEVELOPER_TOKEN")) or signin_dev
+    if not gcred:
+        pass        # no Google credentials yet (local business before `connect`): nothing to check
+    elif oauth_user and not has_token:
+        add("developer_token", lambda: (True, "not set (only needed if Google issued one for your Cloud project)"), "")
+    else:
+        add("developer_token", lambda: (has_token, "set" if has_token else "missing"),
+            "Google Ads > Tools > API Center: copy your developer token, then export "
+            "ADSOPS_GOOGLE_DEVELOPER_TOKEN=... in the environment that launches "
+            "adsops-mcp")
 
     # 4-6) per account / per campaign
     for acct in cfg.get("accounts") or []:

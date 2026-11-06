@@ -311,9 +311,31 @@ def from_config(cred):
                 raise ToolError("credentials.sources[%d].kind %r is not supported "
                                 "(file|1password)" % (i, skind)) from None
         return ServiceAccount(chain_loader(*loaders))
+    if kind == "oauth_user":
+        # Small-business path (2026-11-06): the owner signs in with his own Google login once (`adsops-mcp connect`), and the
+        # refresh token lives in a chmod-600 file beside the config. Either inline fields or {"file": path} written by connect.
+        info = cred
+        if cred.get("file"):
+            import json as _json
+            p = os.path.expanduser(str(cred["file"]))
+            if not os.path.isfile(p):
+                raise ToolError("Google sign-in file not found: run `adsops-mcp connect` first") from None
+            # POSIX only: Windows st_mode always reports 0o666, and its ACLs (user profile dir) are the protection (review #9)
+            if os.name != "nt" and os.stat(p).st_mode & 0o077:
+                raise ToolError("the Google sign-in file must be private (chmod 600)") from None
+            with open(p, encoding="utf-8") as fh:
+                info = _json.load(fh)
+        for k in ("client_id", "client_secret", "refresh_token"):
+            if not isinstance(info.get(k), str) or not info.get(k):
+                raise ToolError("oauth_user credentials need %s (run `adsops-mcp connect`)" % k) from None
+        from adsops.local.oauth_connect import UserTokenProvider
+        from adsops.aeo_tools import raw_http
+        tp = UserTokenProvider(info, http=raw_http)
+        tp.developer_token = info.get("developer_token") or None   # optional; Google is moving access to the Cloud project
+        return tp
     if not kind:
-        raise ToolError("credentials.type is required (static|service_account)") from None
-    raise ToolError("credentials.type %r is not supported (static|service_account)" % (kind,)) from None
+        raise ToolError("credentials.type is required (static|service_account|oauth_user)") from None
+    raise ToolError("credentials.type %r is not supported (static|service_account|oauth_user)" % (kind,)) from None
 
 
 # -- selftest ----------------------------------------------------------------------------------

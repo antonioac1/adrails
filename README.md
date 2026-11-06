@@ -29,7 +29,13 @@ Three things it does differently:
 
 
 
-> **New in 0.5.0:** 50 tools. Enterprise controls (roles, human approvals with signed tokens, a hash-chained audit log, rollback, drift detection, aggregate caps, SBOM), diagnostics (conversion-tracking audit, wasted spend, impression share, quality score, anomalies), automation that only proposes (rules, monitors, budget reallocation), an AEO toolkit (AI-crawler, page, JSON-LD and llms.txt audits, share of answer, IndexNow, AI traffic, ads-to-answers), and direct-mail tracking (list hygiene, phone-readable codes with a proven check character, QR, print-exact labels, scan counting, cost per lead across channels). Plus `adrails init` / `adrails doctor`. ChatGPT Ads support is in development, not released.
+
+
+
+
+
+
+> **New in 0.6.0:** 78 tools. A local-business suite run from the owner's own Claude: Google Local Services Ads leads, reports, junk-lead feedback and verification readiness (built against the v24 API, not yet run on a live LSA account), a lead book for every channel, a generic 90-day growth plan each business's Claude customises, LocalBusiness schema, NAP checks, service-area page briefs and a reviews engine. One-prompt setup (`adsops-mcp setup --install-desktop`, `adsops-mcp connect` for a one-click Google sign-in) and MCP prompts start/morning/weekly. ChatGPT Ads (16 tools) since 0.5.0.
 
 ## Common questions
 
@@ -346,6 +352,11 @@ like; the server computes the diff.
 Keep these files in git. That is what makes "reviewed desired state" real: `git diff` is the
 change review, and `require_clean_git` makes the server refuse to act on uncommitted edits.
 
+
+
+
+
+
 ## ChatGPT Ads
 
 AdRails also runs OpenAI (ChatGPT) Ads accounts through the same plan, validate and commit path. The tools
@@ -371,6 +382,36 @@ are named `adsops_openai_*`. Full guide: [docs/OPENAI-ADS.md](docs/OPENAI-ADS.md
 in read-only mode ([live proof](docs/LIVE-PROOF-2026-11-06.md)); that run found and fixed a full-hour insights rule the mock had
 missed. Creates, image upload, activation and conversion/audience commits are tested offline (`tests/qa_openai_ads.py`,
 `tests/qa_openai_suite.py`) but have not yet run live. Section 9 of the guide lists what is still unverified.
+
+
+## Local business and Google LSA
+
+For a small service business (plumber, HVAC, roofer, cleaner, lawyer...) that wants leads from Google and AI assistants and runs
+everything from its own Claude. **Setup is one prompt** in Claude Desktop's Code tab:
+
+> Set me up with AdRails for my business. Read https://adrails.dev/start/ and follow the steps for Claude.
+
+Claude runs `adsops-mcp setup --business "Name" --install-desktop` (workspace in `~/AdRails`, registered in Claude Desktop with a backup
+of its config), interviews the owner, builds the plan, and later `adsops-mcp connect --config ~/AdRails/config.json --client-file
+<Desktop-app OAuth client JSON>` (one Google sign-in: loopback on 127.0.0.1 + PKCE, refresh token saved chmod 600 beside the config, the
+reachable Google Ads accounts added). No ad account is needed to start: the lead book, plan, AEO and reviews work without one.
+
+| Tool | What it does |
+|---|---|
+| `adsops_local_profile` | questions to ask the owner; saved profile; max cost per lead the business can afford |
+| `adsops_local_plan` | generic 90-day growth plan customised from the profile (4 stages, every task names its tool); progress |
+| `adsops_leads`, `adsops_leads_due` | one lead book for every channel (dedupe by source id/phone/email), stages, follow-ups, pipeline by source, CSV, won jobs -> offline conversions; speed-to-lead list |
+| `adsops_lsa_leads` | Local Services Ads leads + calls/messages, answered/missed, first-response time, junk flags; syncs into the lead book |
+| `adsops_lsa_report` | spend, cost per charged lead vs max, credits, booking/answer rate, missed calls, leads by hour/weekday, advice |
+| `adsops_lsa_dispute` | suggested lead ratings (junk -> dissatisfied + Google's reason, booked -> satisfied); `commit=true` + explicit decisions submits ProvideLeadFeedback |
+| `adsops_lsa_readiness` | license/insurance/background/registration verification, expiry warnings, ranking signals |
+| `adsops_local_schema`, `adsops_local_nap`, `adsops_local_area_page` | LocalBusiness JSON-LD, NAP consistency + citation checklist, service x area page briefs for AI answers |
+| `adsops_reviews` | review link, request/reply DRAFTS (never sent), review velocity vs competitors |
+
+MCP prompts `start`, `morning` and `weekly` chain these into the daily routine. **Status, exactly:** the LSA tools are built against the
+Google Ads API v24 definitions and tested offline (`tests/qa_local_suite.py`, 77 checks through the real server); they have not yet run
+against a live LSA account. LSA budgets, bids, hours and pausing are not in the API (dashboard only). Lead-book, profile and plan files
+live beside the config (chmod 600); the audit chain records only structural arguments for these tools, never customer names or notes.
 
 
 ## Works with Google's official `google-ads-mcp`

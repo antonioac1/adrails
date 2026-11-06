@@ -76,6 +76,13 @@ VIEWER = (
     "adsops_realloc_suggest",
     "adsops_drift",
     "adsops_conv_audit",
+    "adsops_leads_due",
+    "adsops_local_schema",
+    "adsops_local_nap",
+    "adsops_local_area_page",
+    "adsops_reviews",
+    "adsops_lsa_report",
+    "adsops_lsa_readiness",
 )
 
 OPERATOR_EXTRA = (
@@ -97,6 +104,11 @@ OPERATOR_EXTRA = (
     "adsops_openai_draft_campaign",
     "adsops_openai_send_conversions",
     "adsops_openai_audience",
+    "adsops_local_profile",
+    "adsops_local_plan",
+    "adsops_leads",
+    "adsops_lsa_leads",
+    "adsops_lsa_dispute",
 )
 
 BUILTIN_ROLES = {

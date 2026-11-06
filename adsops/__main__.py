@@ -15,6 +15,7 @@ def _selftest():
                  "aeo.ai_traffic", "aeo.ads_to_aeo", "aeo_tools", "onboard",
                  "mail.codes", "mail.qr", "mail.hygiene", "mail.labels", "mail.scans", "mail.response", "mail.cac", "platforms.openai_ads", "oai_policy",
                  "oai_creative", "oai_conversions", "oai_audiences", "oai_experiments", "oai_builder",
+                 "local.leadbook", "local.presence", "local.reviews", "local.oauth_connect", "local.plan", "local.lsa", "local.setup_cli",
                  "mail_tools", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
@@ -28,7 +29,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="adsops")
     ap.add_argument("--config", default=os.environ.get("ADSOPS_CONFIG"))
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("cmd", nargs="?", choices=["serve", "meter-summary", "guard-all", "init", "doctor"], default="serve")
+    ap.add_argument("cmd", nargs="?", choices=["serve", "meter-summary", "guard-all", "init", "doctor", "setup", "connect"], default="serve")
     ap.add_argument("--since")
     # init: scaffold one campaign (config, desired state, SAFE policy: caps == today's budget, commits off) + first git commit
     ap.add_argument("--dir"); ap.add_argument("--customer-id"); ap.add_argument("--campaign-id"); ap.add_argument("--sa")
@@ -36,11 +37,17 @@ def main(argv=None):
     ap.add_argument("--offline", action="store_true", help="init without reading the live campaign (placeholder values)")
     ap.add_argument("--only-platform", choices=["google_ads", "openai_ads"],
                     help="guard-all: check only this platform's campaigns")
+    # setup / connect: agent-driven small-business onboarding (adsops/local/setup_cli.py); both print one JSON object
+    ap.add_argument("--business"); ap.add_argument("--install-desktop", action="store_true")
+    ap.add_argument("--client-file"); ap.add_argument("--developer-token-file")
     a = ap.parse_args(argv)
     if a.selftest:
         return _selftest()
     if a.cmd == "init":
         return _init(a, ap)
+    if a.cmd in ("setup", "connect"):
+        from adsops.local import setup_cli
+        return setup_cli.main(a.cmd, a)
     if not a.config:
         ap.error("--config (or ADSOPS_CONFIG) is required")
     from adsops import config, meter, tools

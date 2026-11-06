@@ -44,7 +44,8 @@ class Context:
         return google_ads.GoogleAdsClient(account["customer_id"], self._tokens,
                                           api_version=g.get("api_version", "v24"),
                                           login_customer_id=g.get("login_customer_id"),
-                                          developer_token=os.environ.get("ADSOPS_GOOGLE_DEVELOPER_TOKEN"))
+                                          developer_token=os.environ.get("ADSOPS_GOOGLE_DEVELOPER_TOKEN")
+                                          or getattr(self._tokens, "developer_token", None))
 
     def end_field(self):
         return self.cfg.get("google_ads", {}).get("end_field", "end_date_time")
@@ -323,6 +324,9 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     mail_tools.register(srv, ctx, cfg)        # direct mail: list hygiene, codes, QR, labels, scans, response, cross-channel CAC
     from adsops import oai_tools
     oai_tools.register(srv, ctx, cfg, oai_client_factory)   # adsops_openai_* (only when an openai_ads account exists)
+    from adsops import local_tools, lsa_tools
+    local_tools.register(srv, ctx, cfg)       # local business: profile, 90-day plan, lead book, schema/NAP/area pages, reviews, prompts
+    lsa_tools.register(srv, ctx, cfg)         # Google Local Services Ads: leads, report, lead feedback (credits), readiness
     enterprise_tools.harden(srv, ctx, cfg)    # LAST: wrap every tool with RBAC -> approval gate -> tamper-evident audit chain
     return srv
 
@@ -400,7 +404,7 @@ def selftest():
     assert names[:12] == ["adsops_campaigns", "adsops_status", "adsops_terms", "adsops_plan", "adsops_apply",
                      "adsops_set", "adsops_guard", "adsops_usage", "adsops_negatives_suggest", "adsops_competitors_report",
                      "adsops_auction_insights_import", "adsops_lp_diagnose"], names; n += 1
-    assert len(names) == 50 and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
+    assert len(names) == 62 and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
     assert call("adsops_campaigns")["structuredContent"]["campaigns"][0]["key"] == "c42"; n += 1
     assert call("adsops_status", {"campaign": "nope"})["isError"]; n += 1
     st = call("adsops_status", {"campaign": "c42"})["structuredContent"]

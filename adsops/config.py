@@ -110,8 +110,11 @@ def load_config(path):
     _load_credentials(cfg)
 
     accounts = cfg.get("accounts")
-    if not isinstance(accounts, list) or not accounts:
-        raise ToolError("config: 'accounts' must be a non-empty list")
+    if not isinstance(accounts, list):
+        raise ToolError("config: 'accounts' must be a list")
+    if not accounts and not cfg.get("local"):
+        # an empty account list is fine for a local business that has no ad account yet (lead book, plan, AEO, reviews work)
+        raise ToolError("config: 'accounts' must be a non-empty list (or add a 'local' block for a business without ad accounts)")
     seen, seen_accounts = {}, set()
     for i, acct in enumerate(accounts):
         if not isinstance(acct, dict):

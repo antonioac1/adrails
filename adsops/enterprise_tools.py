@@ -33,7 +33,8 @@ from adsops.platforms import google_ads
 MUTATING = {"adsops_apply", "adsops_set", "adsops_guard", "adsops_rollback", "adsops_approval_decide",
             "adsops_approval_request", "adsops_auction_insights_import", "aeo_indexnow", "mail_labels",
             "adsops_openai_apply", "adsops_openai_guard", "adsops_openai_upload_image", "adsops_openai_brand_update",
-            "adsops_openai_conversions_setup", "adsops_openai_send_conversions", "adsops_openai_audience"}
+            "adsops_openai_conversions_setup", "adsops_openai_send_conversions", "adsops_openai_audience",
+            "adsops_local_profile", "adsops_local_plan", "adsops_leads", "adsops_lsa_leads", "adsops_lsa_dispute"}
 GATED = {"adsops_apply", "adsops_set", "adsops_openai_apply"}
 
 
@@ -407,9 +408,32 @@ def harden(srv, ctx, cfg):
         entry["fn"] = guarded
 
 
+# Local-business tools carry customer PII in free text (names, notes, gate codes, addresses). The chain is append-only and hash-linked,
+# so PII written there can never be removed: record ONLY structural args for these tools (review finding #1, 2026-11-06).
+_PII_TOOL_PREFIXES = ("adsops_local_", "adsops_leads", "adsops_lsa_", "adsops_reviews")
+_SAFE_ARGS = ("action", "id", "stage", "source", "days", "commit", "account", "rebuild", "op", "channel", "start_date", "since",
+              "until", "limit", "write")
+
+
+def _audit_args(tool, args):
+    if not tool.startswith(_PII_TOOL_PREFIXES):
+        return {k: v for k, v in args.items() if k not in ("rows",)}
+    out = {k: args[k] for k in _SAFE_ARGS if k in args and isinstance(args[k], (str, int, float, bool))}
+    if isinstance(args.get("decisions"), list):
+        out["decisions"] = [{k: d.get(k) for k in ("lead_id", "answer", "reason")} for d in args["decisions"] if isinstance(d, dict)][:200]
+    if isinstance(args.get("done"), list):
+        out["done"] = [str(x)[:8] for x in args["done"]][:100]
+    if isinstance(args.get("fields"), dict):
+        out["fields_set"] = sorted(args["fields"])[:50]          # which profile keys changed, never their values
+    for k in ("rows", "lead", "note", "text", "lost_reason", "review", "reviews", "urls", "pages"):
+        if k in args:
+            out["has_" + k] = len(args[k]) if isinstance(args[k], (list, dict, str)) else True
+    return out
+
+
 def _record(cfg, tool, args, ok, error, result=None):
     """Append to the audit chain. Failure to audit a successful mutation is surfaced, never swallowed."""
-    data = {"tool": tool, "ok": ok, "args": {k: v for k, v in args.items() if k not in ("rows",)}}
+    data = {"tool": tool, "ok": ok, "args": _audit_args(tool, args)}
     if error:
         # scrub BEFORE persisting: upstream errors can echo tokens/keys (qa_secrets canary leak, 2026-11-06)
         data["error"] = scrub(error, 300)

@@ -73,6 +73,7 @@ class Server:
         self.on_call = on_call
         self._tools = {}
         self._order = []
+        self._prompts = {}     # name -> {"name","description","arguments":[{name,description,required}],"render":fn(args)->str}
 
     def tool(self, name, description, input_schema):
         """Decorator registering ``fn(args: dict) -> dict`` under *name*."""
@@ -89,6 +90,10 @@ class Server:
             return fn
 
         return register
+
+    def prompt(self, name, description, arguments=(), render=None):
+        """Register an MCP prompt (Claude Desktop shows these as ready-made starters). render(args)->str is the user message."""
+        self._prompts[name] = {"name": name, "description": description, "arguments": list(arguments), "render": render}
 
     # -- dispatch ---------------------------------------------------------
     def handle(self, msg):
@@ -112,7 +117,7 @@ class Server:
             version = params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION
             return _result(mid, {
                 "protocolVersion": version,
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {}, **({"prompts": {}} if self._prompts else {})},
                 "serverInfo": {"name": self.name, "version": self.version},
             })
         if method == "ping":
@@ -124,6 +129,19 @@ class Server:
             ]})
         if method == "tools/call":
             return self._tools_call(mid, params)
+        if method == "prompts/list" and self._prompts:
+            return _result(mid, {"prompts": [{k: p[k] for k in ("name", "description", "arguments")} for p in self._prompts.values()]})
+        if method == "prompts/get" and self._prompts:
+            p = self._prompts.get(params.get("name"))
+            if p is None:
+                return _error(mid, -32602, "Unknown prompt: %s" % params.get("name"))
+            args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+            missing = [a["name"] for a in p["arguments"] if a.get("required") and not args.get(a["name"])]
+            if missing:
+                return _error(mid, -32602, "missing prompt arguments: " + ", ".join(missing))
+            text = p["render"]({k: str(v)[:500] for k, v in args.items()})
+            return _result(mid, {"description": p["description"],
+                                 "messages": [{"role": "user", "content": {"type": "text", "text": text}}]})
         return _error(mid, -32601, "Method not found: %s" % method)
 
     def _tools_call(self, mid, params):
