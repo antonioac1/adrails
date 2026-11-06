@@ -210,7 +210,8 @@ def register(srv, ctx, cfg, fetch=None):
         engines = sorted({e for e, _ in table})
         reps = max(len(v) for v in table.values()) if table else 1
         res = visibility.run_panel(prompts, engines, ask, args["brand"], args.get("competitors") or {}, repeats=reps)
-        path = os.path.expanduser((cfg.get("aeo") or {}).get("visibility_log", "~/.adsops/aeo-visibility.jsonl"))
+        from adsops.enterprise_tools import state_path
+        path = os.path.expanduser((cfg.get("aeo") or {})["visibility_log"]) if (cfg.get("aeo") or {}).get("visibility_log") else state_path(cfg, "_none", "aeo-visibility.jsonl")
         hist = visibility.load_history(path) if os.path.isfile(path) else []
         now_iso = dt.datetime.fromtimestamp(ctx.now(), dt.timezone.utc).isoformat()
         visibility.store(path, args.get("run_id") or now_iso, res["results"], now_iso)

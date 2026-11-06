@@ -23,7 +23,8 @@ MAX_ROWS = 200_000
 
 
 def _workdir(cfg):
-    d = os.path.expanduser((cfg.get("mail") or {}).get("workdir", "~/.adsops/mail"))
+    from adsops.enterprise_tools import state_path
+    d = os.path.expanduser((cfg.get("mail") or {})["workdir"]) if (cfg.get("mail") or {}).get("workdir") else state_path(cfg, "_none", "mail")
     os.makedirs(d, exist_ok=True)
     return d
 

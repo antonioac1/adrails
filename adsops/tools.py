@@ -54,6 +54,8 @@ class Context:
 
         The policy file, when configured, is the ONLY source of caps and allow_enable; the state file's are ignored."""
         account, camp = config.resolve_campaign(self.cfg, key)
+        if account.get("platform") != "google_ads":
+            raise ToolError(f"campaign {key!r} is a {account.get('platform')} campaign: use the adsops_openai_* tools")
         raw = engine.load_state(camp["state_file"])
         if str(raw["customer_id"]).replace("-", "") != str(account["customer_id"]).replace("-", ""):
             raise RailViolation(f"state file customer_id does not match account {account['key']!r}")
@@ -155,7 +157,7 @@ def _commit(ctx, account, key, camp, eff, pol, client, live, ops, given_pid):
         raise ToolError(f"commit failed: {scrub(str(e), 300)}. Reconciled against live, NOT retried: {json.dumps(rec)}") from None
 
 
-def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter=None):
+def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter=None, oai_client_factory=None):
     ctx = Context(cfg, client_factory, git_runner, now)
     meter = meter or meter_mod.Meter(os.path.expanduser(cfg.get("meter_log", "~/.adsops/meter.jsonl")), cfg["tenant"])
     srv = protocol.Server("adsops", __version__, on_call=meter_mod.hook(meter))
@@ -319,6 +321,8 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     aeo_tools.register(srv, ctx, cfg)         # AEO: crawler/page/schema audits, llms.txt, share of answer, IndexNow, AI traffic
     from adsops import mail_tools
     mail_tools.register(srv, ctx, cfg)        # direct mail: list hygiene, codes, QR, labels, scans, response, cross-channel CAC
+    from adsops import oai_tools
+    oai_tools.register(srv, ctx, cfg, oai_client_factory)   # adsops_openai_* (only when an openai_ads account exists)
     enterprise_tools.harden(srv, ctx, cfg)    # LAST: wrap every tool with RBAC -> approval gate -> tamper-evident audit chain
     return srv
 

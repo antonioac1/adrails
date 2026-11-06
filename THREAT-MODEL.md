@@ -136,3 +136,19 @@ S = spoofing; T = tampering; R = repudiation; I = information disclosure; D = de
 5. **Harden untrusted inputs and output sinks.** Fuzz JSON/types/dates/non-finite values and oversized negatives; reject safely before writes. Inject token canaries into provider errors/reasons: none reach logs, git, stderr or MCP output. Injection strings and broad-negative requests cannot bypass independent authorization.
 
 These are acceptance criteria, not claims of passing tests.
+
+## Addendum 2026-11-05: OpenAI (ChatGPT) Ads adapter
+
+- **Approval forgery.** Activation requires an `approval` block in the committed desired-state file. An agent that
+  can edit and commit that file can write the block itself. The block is bound to the campaign name, used once, and
+  limited by the policy's approvers list and dates. That stops accidents and MCP-only agents, not an agent with
+  shell access as the user (same boundary as above). The real ceiling is a spend limit set in Ads Manager.
+- **Cap multiplication by campaign rotation.** This is blocked. Created campaigns are tagged `adrails:<key>`, only one
+  live campaign per key is allowed, spend is summed across the key's tagged campaigns, and the guard pauses orphans.
+  An optional account-wide cap also covers campaigns made by hand in Ads Manager.
+- **Silencing the guard via the state file.** This is blocked. The guard reads only the policy and the tagged
+  campaigns. A broken state file makes the guard pause anyway and then fail, so the heartbeat goes stale.
+- **Spend misread as $0.** This is blocked. Empty or field-less insights and a missing `created_at` raise an error, so
+  the guard fails closed.
+- **Key leakage.** The key travels only in the Authorization header. Error bodies, network errors and 1Password
+  stderr are redacted with the exact key value plus key-shaped patterns. Key files must be mode 600.

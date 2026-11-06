@@ -147,3 +147,31 @@ disclosure in README.md or deploy/GUARD.md. README.md was left unedited.
 | E13 | AEO audits (crawler, page, schema, llms.txt, visibility, IndexNow, AI traffic, ads-to-answers) | test: aeo.* selftests + independent DeepSeek black-box suites in tests/blackbox/ written from the specs only |
 | E14 | `init` writes a safe policy and never overwrites; `doctor` never echoes secrets | test: onboard.selftest (30 checks) |
 | E15 | ChatGPT Ads adapter: in development, not released | disclosure: the site and README say so; no code claims |
+
+## OpenAI (ChatGPT) Ads adapter (README "ChatGPT Ads (beta)" + docs/OPENAI-ADS.md)
+
+Evidence is the check text printed by `python3 tests/qa_openai_ads.py`. Every check runs against an
+in-process fake of the documented Ads API, with no network. Nothing below has been run against a live account.
+
+| # | Claim | Evidence |
+| --- | --- | --- |
+| O1 | "One API key per ad account ... from 1Password, a file or an env var" | qa: `1Password failure falls back to the file source`, `1Password ref read`, `key file read`, `config loads an openai_ads account` |
+| O2 | "Any number of `openai_ads` accounts" | config: accounts are a list; `config refuses ...` checks validate each entry. Only one account is exercised end to end (partial evidence) |
+| O3 | "always created paused" | qa: `every create is paused`, `API saw status=paused on every create`, `partial failure leaves things paused` |
+| O4 | "Each create carries an `Idempotency-Key`, so a retry cannot duplicate it" | qa: `every create carries an Idempotency-Key`, `retried create reuses the same Idempotency-Key`, `retries never duplicated the campaign`; creates without API idempotency support: `... is not retried on 5xx` |
+| O5 | "max daily and lifetime budget, max bid, allowed domains, required UTM, no archiving unless allowed" | qa: `policy refusal: exceeds policy max`, `below policy min`, `lifetime budget`, `max_bid`, `no bid ceiling`, `allowlist`, `https`, `utm_campaign`, `utm_source`, `allow_archive`, `archive only when policy allows it` |
+| O6 | "max cumulative spend per campaign key, and optionally for the whole account" | qa: `lifetime spend is summed over the managed campaign and its siblings`, `campaign rotation (rename + drop id) is refused`, `account cap: guard pauses every active campaign in the account` |
+| O7 | "Activating a campaign needs a human approval block ... single-use and bound to the campaign name" | qa: `activation refused without approval; nothing activated`, `approval refused: approvers/expired/future/above approval/max_total_spend/window`, `re-activation needs a NEW approval`, `a boolean is not a number in the approval block` |
+| O8 | "a fresh guard heartbeat" | qa: `stale guard heartbeat blocks activation`, `disabled openai account never writes its heartbeat`, `a failing openai guard writes no heartbeat (fail closed)` |
+| O9 | "room under the cap, assuming 2x daily overdelivery" | qa: `pause_at = cap - 2 x daily`, `2x-overdelivery room check blocks at $440`, `activation room uses the same pause point as the guard`, `spend is re-read right before the first activation` |
+| O10 | "`adsops_openai_guard` only pauses" | qa: `150 random guard runs: only /pause writes`, `execute refuses ops outside its allow-list (guard path = pause only)` |
+| O11 | "uses live budgets and bids" | qa: `guard pauses an outside budget raise`, `guard pauses an uncapped (maximize) bid set outside AdRails` |
+| O12 | "pauses an orphaned one" | qa: `guard pauses an active orphan campaign tagged for the key` |
+| O13 | "If spend can't be read, it fails closed" | qa: `empty insights -> guard errors (fails closed), never reads $0`, `delivery without a spend field fails closed`, `missing created_at fails closed`, `unknown spend -> no heartbeat -> activation blocked` |
+| O14 | "image upload, the brand icon (warns ... pause delivery)" | qa: `512px image refused for ads`, `favicon upload sends purpose=account_favicon`, `brand update refused without acknowledge_delivery_pause`, `brand update with acknowledgement` |
+| O15 | "pixel plus a `lead_created` conversion event, and a `validate_only` test event" | qa: `pixel + lead_created event setting created and linked`, `conversions setup is idempotent by name`, `test event is lead_created with validate_only=true` |
+| O16 | API key never leaks | qa: `the API key never appears in outputs, audit or meter`, `4xx is not retried and surfaces as an error`, `1Password stderr containing the key is redacted`, `group-readable key file refused` |
+| O17 | "Live verification": read paths, live spend reads, guard and validation ran against a real OpenAI Ads account on 2026-11-06 (read-only); creates, uploads, activation and conversion/audience commits have NOT yet run live | evidence: docs/LIVE-PROOF-2026-11-06.md; the live run found the full-hour insights bug, fixed with a test that fails without the fix (tests/qa_openai_suite.py) |
+| O18 | Google campaigns untouched by the OpenAI guard schedule | qa: `guard-all --only-platform openai_ads skips google campaigns`; the existing Google suites (`qa_invariants`, `qa_protocol`, `qa_inputs`, `qa_secrets`, `--selftest`) pass unchanged |
+
+| O19 | Growth suite: ad check, campaign drafts the engine accepts, A/B report, conversions (validate-only default), audiences (plan-only default), hashed locally | qa_openai_suite.py (24 checks): drafts pass the real oai_engine/oai_policy validators, no raw PII on the wire/in outputs/audit chain, read_only accounts refuse commits; blackbox suites for oai_* modules |

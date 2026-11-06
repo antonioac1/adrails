@@ -26,13 +26,15 @@ import subprocess
 
 from adsops import (approvals, auditchain, budget_realloc, change_history, conv_audit, diagnostics, fleet, kwplan,
                     monitors, offline_conv, rbac as rbac_mod, rollback, rsa_validator, rules, sbom)
-from adsops.errors import RailViolation, ToolError
+from adsops.errors import RailViolation, ToolError, scrub
 from adsops.platforms import google_ads
 
 # Tools that change something outside this process (an ad account, a git file, the approval queue).
 MUTATING = {"adsops_apply", "adsops_set", "adsops_guard", "adsops_rollback", "adsops_approval_decide",
-            "adsops_approval_request", "adsops_auction_insights_import", "aeo_indexnow", "mail_labels"}
-GATED = {"adsops_apply", "adsops_set"}
+            "adsops_approval_request", "adsops_auction_insights_import", "aeo_indexnow", "mail_labels",
+            "adsops_openai_apply", "adsops_openai_guard", "adsops_openai_upload_image", "adsops_openai_brand_update",
+            "adsops_openai_conversions_setup", "adsops_openai_send_conversions", "adsops_openai_audience"}
+GATED = {"adsops_apply", "adsops_set", "adsops_openai_apply"}
 
 
 def _dates(now, days):
@@ -45,6 +47,16 @@ def _days(args, default=30, hi=90):
     if not 1 <= d <= hi:
         raise ToolError(f"days must be 1..{hi}")
     return d
+
+
+def state_path(cfg, key, filename):
+    """Where a piece of local state lives: cfg[key] if set, else BESIDE the config's own audit_log/meter_log.
+    Never a hard-coded home path: that let a temp-dir test config write into the production audit chain
+    (qa_protocol caught it on 2026-11-06; the polluted chain was archived and rotated)."""
+    if cfg.get(key):
+        return os.path.expanduser(cfg[key])
+    base = cfg.get("audit_log") or cfg.get("meter_log") or "~/.adsops/audit.jsonl"
+    return os.path.join(os.path.dirname(os.path.expanduser(base)), filename)
 
 
 def _git_runner(args, cwd):
@@ -103,12 +115,12 @@ def _approval_queue(cfg, ctx):
     secret = os.environ.get(a.get("secret_env", "ADRAILS_APPROVAL_SECRET"), "")
     if len(secret) < 32:
         raise ToolError("approvals need a secret of 32+ chars in env " + a.get("secret_env", "ADRAILS_APPROVAL_SECRET"))
-    path = os.path.expanduser(a.get("path", "~/.adsops/approvals.jsonl"))
+    path = os.path.expanduser(a["path"]) if a.get("path") else state_path(cfg, "_none", "approvals.jsonl")
     return approvals.ApprovalQueue(path, secret.encode(), now=ctx.now, ttl_s=int(a.get("ttl_s", 86400)))
 
 
 def _chain(cfg):
-    return auditchain.AuditChain(os.path.expanduser(cfg.get("audit_chain", "~/.adsops/audit-chain.jsonl")))
+    return auditchain.AuditChain(state_path(cfg, "audit_chain", "audit-chain.jsonl"))
 
 
 def register(srv, ctx, cfg):
@@ -196,7 +208,7 @@ def register(srv, ctx, cfg):
         if errs:
             raise ToolError("monitor config invalid: " + "; ".join(errs[:5]))
         alerts = monitors.evaluate(mons, snap)
-        sp = os.path.expanduser(cfg.get("monitor_state", "~/.adsops/monitor-state.json"))
+        sp = state_path(cfg, "monitor_state", "monitor-state.json")
         state = json.load(open(sp)) if os.path.isfile(sp) else {}
         new, state = monitors.dedupe(alerts, state, dt.datetime.fromtimestamp(ctx.now(), dt.timezone.utc).isoformat())
         os.makedirs(os.path.dirname(sp), exist_ok=True)
@@ -356,12 +368,12 @@ def register(srv, ctx, cfg):
         from adsops import __version__
         rb = rbac_mod.Rbac.from_config(cfg, env=dict(os.environ))
         return {"version": __version__, "rbac": rb.describe(), "approvals": (cfg.get("approvals") or {}).get("mode", "off"),
-                "audit_chain": os.path.expanduser(cfg.get("audit_chain", "~/.adsops/audit-chain.jsonl")),
+                "audit_chain": state_path(cfg, "audit_chain", "audit-chain.jsonl"),
                 "guard_heartbeat": bool(cfg.get("guard_heartbeat"))}
 
 
 def _exposure_raising(tool, args):
-    if tool == "adsops_apply":
+    if tool in ("adsops_apply", "adsops_openai_apply"):
         return True                                     # direction unknown without a plan: gate it
     return any(k in args for k in ("daily_budget_usd", "end_date")) or str(args.get("status", "")).upper() == "ENABLED"
 
@@ -376,7 +388,7 @@ def harden(srv, ctx, cfg):
         fn = entry["fn"]
 
         def guarded(args, _fn=fn, _name=name):
-            committing = (_name == "adsops_apply" and args.get("commit")) or (_name == "adsops_set" and args.get("apply"))
+            committing = (_name in ("adsops_apply", "adsops_openai_apply") and args.get("commit")) or (_name == "adsops_set" and args.get("apply"))
             try:
                 rb.check(_name)
                 if _name in GATED and committing and mode != "off" and (mode == "all" or _exposure_raising(_name, args)):
@@ -399,7 +411,8 @@ def _record(cfg, tool, args, ok, error, result=None):
     """Append to the audit chain. Failure to audit a successful mutation is surfaced, never swallowed."""
     data = {"tool": tool, "ok": ok, "args": {k: v for k, v in args.items() if k not in ("rows",)}}
     if error:
-        data["error"] = error[:300]
+        # scrub BEFORE persisting: upstream errors can echo tokens/keys (qa_secrets canary leak, 2026-11-06)
+        data["error"] = scrub(error, 300)
     if isinstance(result, dict):
         data["result_keys"] = sorted(result)[:20]
         for k in ("plan_id", "committed", "request_id", "status"):

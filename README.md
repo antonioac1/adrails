@@ -26,8 +26,10 @@ Three things it does differently:
 
 
 
-> **New in 0.4.2:** 50 tools. Enterprise controls (roles, human approvals with signed tokens, a hash-chained audit log, rollback, drift detection, aggregate caps, SBOM), diagnostics (conversion-tracking audit, wasted spend, impression share, quality score, anomalies), automation that only proposes (rules, monitors, budget reallocation), an AEO toolkit (AI-crawler, page, JSON-LD and llms.txt audits, share of answer, IndexNow, AI traffic, ads-to-answers), and direct-mail tracking (list hygiene, phone-readable codes with a proven check character, QR, print-exact labels, scan counting, cost per lead across channels). Plus `adrails init` / `adrails doctor`. ChatGPT Ads support is in development, not released.
 
+
+
+> **New in 0.5.0:** 50 tools. Enterprise controls (roles, human approvals with signed tokens, a hash-chained audit log, rollback, drift detection, aggregate caps, SBOM), diagnostics (conversion-tracking audit, wasted spend, impression share, quality score, anomalies), automation that only proposes (rules, monitors, budget reallocation), an AEO toolkit (AI-crawler, page, JSON-LD and llms.txt audits, share of answer, IndexNow, AI traffic, ads-to-answers), and direct-mail tracking (list hygiene, phone-readable codes with a proven check character, QR, print-exact labels, scan counting, cost per lead across channels). Plus `adrails init` / `adrails doctor`. ChatGPT Ads support is in development, not released.
 
 ## Common questions
 
@@ -343,6 +345,33 @@ like; the server computes the diff.
 
 Keep these files in git. That is what makes "reviewed desired state" real: `git diff` is the
 change review, and `require_clean_git` makes the server refuse to act on uncommitted edits.
+
+## ChatGPT Ads
+
+AdRails also runs OpenAI (ChatGPT) Ads accounts through the same plan, validate and commit path. The tools
+are named `adsops_openai_*`. Full guide: [docs/OPENAI-ADS.md](docs/OPENAI-ADS.md).
+
+- **One API key per ad account.** It comes from 1Password, a file or an env var. Any number of `openai_ads` accounts can sit in one config.
+- **New campaigns, ad groups and ads are always created paused.** Each create carries an `Idempotency-Key`, so a retry cannot duplicate it.
+- **Caps live in an immutable policy file:**
+  - max daily and lifetime budget
+  - max cumulative spend per campaign key, and optionally for the whole account
+  - max bid
+  - allowed destination domains and required UTM parameters
+  - no archiving unless allowed
+- **Activating a campaign needs a human approval block** in the committed desired-state file. It is single-use and bound to the campaign name. Activation also needs a fresh guard heartbeat and room under the cap, assuming 2x daily overdelivery.
+- **`adsops_openai_guard` only pauses.** It uses live budgets and bids, counts every campaign AdRails created for the key, and pauses an orphaned one. If spend can't be read, it fails closed instead of reading $0.
+- **Helpers:** image upload, the brand icon (warns that a brand change can pause delivery until review), pixel plus a `lead_created` conversion event, and a `validate_only` test event.
+- **Growth suite:** `adsops_openai_ad_check` (chat_card limits, allowed domains, required UTM, duplicates), `adsops_openai_draft_campaign`
+  (a business brief becomes a paused, capped desired state the engine accepts), `adsops_openai_ab_report` (winner with intervals and
+  Bonferroni-corrected significance), `adsops_openai_send_conversions` (CRM leads to the Conversions API, hashed locally, validate-only
+  unless `commit=true`) and `adsops_openai_audience` (hashed customer lists to custom audiences, plan-only unless `commit=true`).
+
+**Live status (2026-11-06):** the read paths, live spend reads, the guard and validation ran against a real OpenAI Ads account
+in read-only mode ([live proof](docs/LIVE-PROOF-2026-11-06.md)); that run found and fixed a full-hour insights rule the mock had
+missed. Creates, image upload, activation and conversion/audience commits are tested offline (`tests/qa_openai_ads.py`,
+`tests/qa_openai_suite.py`) but have not yet run live. Section 9 of the guide lists what is still unverified.
+
 
 ## Works with Google's official `google-ads-mcp`
 

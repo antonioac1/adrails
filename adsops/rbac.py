@@ -56,6 +56,14 @@ VIEWER = (
     "mail_compare",
     "mail_breakeven",
     "channel_cac",
+    # ChatGPT Ads (OpenAI Ads) reads
+    "adsops_openai_account",
+    "adsops_openai_status",
+    "adsops_openai_insights",
+    "adsops_openai_geo_lookup",
+    "adsops_openai_plan",
+    "adsops_openai_ad_check",
+    "adsops_openai_ab_report",
     "adsops_competitors_report",
     "adsops_lp_diagnose",
     "adsops_negatives_suggest",
@@ -81,13 +89,21 @@ OPERATOR_EXTRA = (
     "mail_list_clean",
     "mail_codes_assign",
     "mail_labels",
+    "adsops_openai_apply",
+    "adsops_openai_upload_image",
+    "adsops_openai_brand_update",
+    "adsops_openai_conversions_setup",
+    "adsops_openai_test_event",
+    "adsops_openai_draft_campaign",
+    "adsops_openai_send_conversions",
+    "adsops_openai_audience",
 )
 
 BUILTIN_ROLES = {
     "viewer": VIEWER,
     "operator": VIEWER + OPERATOR_EXTRA,
     "approver": VIEWER + ("adsops_approval_decide",),
-    "guard": VIEWER + ("adsops_guard",),
+    "guard": VIEWER + ("adsops_guard", "adsops_openai_guard"),
     "admin": ("*",),
 }
 

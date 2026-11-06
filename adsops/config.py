@@ -11,7 +11,8 @@ import subprocess
 from . import strict
 from .errors import ToolError, scrub
 
-PLATFORMS = {"google_ads"}
+PLATFORMS = {"google_ads", "openai_ads"}
+OPENAI_MODES = ("disabled", "read_only", "live")
 DEFAULT_POLICY = {"require_clean_git": True, "allow_commit": False}
 DEFAULT_METER_LOG = "~/.adsops/meter.jsonl"
 DEFAULT_AUDIT_LOG = "~/.adsops/audit.jsonl"
@@ -65,6 +66,34 @@ def _load_credentials(cfg):
                 src[k] = _expand(_need_str(src, k, f"credentials['google_ads']['sources'][{j}]: "))
 
 
+def _load_openai_account(acct, akey):
+    """openai_ads accounts: one API key per ad account, so credentials live on the account."""
+    import re
+    aid = _need_str(acct, "ad_account_id", f"account '{akey}': ")
+    if not re.fullmatch(r"adacct_[A-Za-z0-9]{6,64}", aid):
+        raise ToolError(f"config: account '{akey}': ad_account_id must look like adacct_...")
+    mode = acct.setdefault("mode", "disabled")
+    if mode not in OPENAI_MODES:
+        raise ToolError(f"config: account '{akey}': mode must be one of {', '.join(OPENAI_MODES)}")
+    cred = acct.get("credentials")
+    if mode != "disabled" or cred is not None:
+        if not isinstance(cred, dict) or cred.get("type") != "api_key" or not isinstance(cred.get("sources"), list) \
+                or not cred["sources"]:
+            raise ToolError(f"config: account '{akey}': credentials must be "
+                            "{\"type\": \"api_key\", \"sources\": [...]}")
+        for j, src in enumerate(cred["sources"]):
+            if not isinstance(src, dict) or src.get("kind") not in ("1password", "file", "env"):
+                raise ToolError(f"config: account '{akey}': credentials.sources[{j}].kind must be 1password|file|env")
+            for k in ("path", "token_file"):
+                if k in src:
+                    src[k] = _expand(_need_str(src, k, f"account '{akey}' credentials.sources[{j}]: "))
+    for k in ("guard_heartbeat", "capi_key_file"):
+        if acct.get(k) is not None:
+            acct[k] = _expand(_need_str(acct, k, f"account '{akey}': "))
+    if not isinstance(acct.get("bulk_validate", False), bool):
+        raise ToolError(f"config: account '{akey}': bulk_validate must be a boolean")
+
+
 def load_config(path):
     """Read, validate and normalise a deployment config. Returns the dict."""
     if not isinstance(path, str):
@@ -97,7 +126,10 @@ def load_config(path):
                 f"config: account '{akey}': unsupported platform {plat!r} "
                 f"(supported: {', '.join(sorted(PLATFORMS))})"
             )
-        _need_str(acct, "customer_id", f"account '{akey}': ")
+        if plat == "openai_ads":
+            _load_openai_account(acct, akey)
+        else:
+            _need_str(acct, "customer_id", f"account '{akey}': ")
         camps = acct.get("campaigns")
         if not isinstance(camps, list):
             raise ToolError(f"config: account '{akey}': 'campaigns' must be a list")
@@ -110,6 +142,8 @@ def load_config(path):
             camp["state_file"] = _expand(
                 _need_str(camp, "state_file", f"campaign '{ckey}': ")
             )
+            if plat == "openai_ads":
+                camp["policy_file"] = _expand(_need_str(camp, "policy_file", f"campaign '{ckey}': "))
             seen[ckey] = akey
     return cfg
 
@@ -132,7 +166,7 @@ def list_campaigns(cfg):
                 "key": camp.get("key"),
                 "account": acct.get("key"),
                 "platform": acct.get("platform"),
-                "customer_id": acct.get("customer_id"),
+                "customer_id": acct.get("customer_id") or acct.get("ad_account_id"),
                 "state_file": camp.get("state_file"),
             })
     return out

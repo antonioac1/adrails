@@ -13,7 +13,9 @@ def _selftest():
                  "fleet", "auditchain", "offline_conv", "kwplan", "change_history", "rbac", "sbom", "enterprise_tools",
                  "aeo.crawl_audit", "aeo.schema_audit", "aeo.page_audit", "aeo.llms_txt", "aeo.visibility", "aeo.indexnow",
                  "aeo.ai_traffic", "aeo.ads_to_aeo", "aeo_tools", "onboard",
-                 "mail.codes", "mail.qr", "mail.hygiene", "mail.labels", "mail.scans", "mail.response", "mail.cac", "mail_tools", "tools"):
+                 "mail.codes", "mail.qr", "mail.hygiene", "mail.labels", "mail.scans", "mail.response", "mail.cac", "platforms.openai_ads", "oai_policy",
+                 "oai_creative", "oai_conversions", "oai_audiences", "oai_experiments", "oai_builder",
+                 "mail_tools", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
         print(f"  {name:22s} {n} checks", file=sys.stderr)
@@ -32,6 +34,8 @@ def main(argv=None):
     ap.add_argument("--dir"); ap.add_argument("--customer-id"); ap.add_argument("--campaign-id"); ap.add_argument("--sa")
     ap.add_argument("--login-customer-id"); ap.add_argument("--tenant", default="default")
     ap.add_argument("--offline", action="store_true", help="init without reading the live campaign (placeholder values)")
+    ap.add_argument("--only-platform", choices=["google_ads", "openai_ads"],
+                    help="guard-all: check only this platform's campaigns")
     a = ap.parse_args(argv)
     if a.selftest:
         return _selftest()
@@ -46,7 +50,7 @@ def main(argv=None):
         print(json.dumps(m.summary(a.since), indent=1))
         return 0
     if a.cmd == "guard-all":
-        return guard_all(cfg)
+        return guard_all(cfg, only_platform=a.only_platform)
     if a.cmd == "doctor":
         from adsops import onboard
         rows = onboard.doctor(a.config)
@@ -72,25 +76,44 @@ def _init(a, ap):
     return 0
 
 
-def guard_all(cfg, server=None, write_heartbeat=None):
-    """Unattended spend guard: PAUSE-only pass over every campaign. The heartbeat is written ONLY when every
-    campaign was checked cleanly, so a failing guard goes stale and blocks exposure increases (fail closed)."""
+def guard_all(cfg, server=None, write_heartbeat=None, only_platform=None):
+    """Unattended spend guard: PAUSE-only pass over every campaign. A heartbeat is written ONLY when every
+    campaign it covers was checked cleanly, so a failing guard goes stale and blocks exposure increases
+    (fail closed). Google campaigns share cfg.guard_heartbeat; each openai_ads account has its own, so a
+    missing OpenAI key can never stale the Google heartbeat (and vice versa)."""
     import datetime as dt
     from adsops import config, safety, tools
     srv = server or tools.build_server(cfg)
-    ok = True
+    accounts = {a["key"]: a for a in cfg.get("accounts", [])}
+    ok_by = {}
     for c in config.list_campaigns(cfg):
+        if only_platform and c["platform"] != only_platform:
+            continue
+        acct = accounts.get(c["account"], {})
+        is_oai = c["platform"] == "openai_ads"
+        hb_key = ("openai", c["account"]) if is_oai else ("google", None)
         r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                        "params": {"name": "adsops_guard", "arguments": {"campaign": c["key"], "commit": True}}})
+                        "params": {"name": "adsops_openai_guard" if is_oai else "adsops_guard",
+                                   "arguments": {"campaign": c["key"], "commit": True}}})
         res = r.get("result", {})
         line = res.get("structuredContent") or {"error": "".join(x.get("text", "") for x in res.get("content", []))[:300]}
-        ok = ok and not res.get("isError")
+        good = not res.get("isError") and "error" not in r
+        if is_oai and acct.get("mode", "disabled") == "disabled":
+            hb_key = None            # a disabled account proves nothing: never write its heartbeat
+        if hb_key is not None:
+            ok_by[hb_key] = ok_by.get(hb_key, True) and good
         print(json.dumps({"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                           "campaign": c["key"], **line}))
-    if ok:
-        (write_heartbeat or safety.write_heartbeat)(os.path.expanduser(cfg.get("guard_heartbeat", "~/.adsops/guard.heartbeat")))
-    return 0 if ok else 1
-
+    wh = write_heartbeat or safety.write_heartbeat
+    for (plat, akey), good in ok_by.items():
+        if not good:
+            continue
+        if plat == "google":
+            wh(os.path.expanduser(cfg.get("guard_heartbeat", "~/.adsops/guard.heartbeat")))
+        else:
+            a = accounts[akey]
+            wh(os.path.expanduser(a.get("guard_heartbeat") or f"~/.adsops/openai-{akey}.heartbeat"))
+    return 0 if all(ok_by.values()) else 1
 
 if __name__ == "__main__":
     sys.exit(main())
