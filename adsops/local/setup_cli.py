@@ -59,7 +59,8 @@ def server_entry(cfg_path, which=shutil.which):
     """The mcpServers entry for Claude Desktop. Absolute uvx path: Desktop does not inherit the shell PATH."""
     uvx = which("uvx")
     if uvx:
-        return {"command": uvx, "args": ["--from", "adrails", "adsops-mcp", "--config", cfg_path]}
+        # pinned floor: a machine that cached an older adrails must not start it (0.6.1)
+        return {"command": uvx, "args": ["--from", "adrails>=0.6.1", "adsops-mcp", "--config", cfg_path]}
     exe = which("adsops-mcp")
     if exe:
         return {"command": exe, "args": ["--config", cfg_path]}

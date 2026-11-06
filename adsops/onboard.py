@@ -266,9 +266,11 @@ def doctor(config_path, client_factory=None, env=None, now=None,
         msg = "last run %.0f min ago" % (age / 60.0)
         return age < 1800, (msg if age < 1800 else "stale: " + msg)
 
-    add("guard_heartbeat", _heartbeat, "Schedule: adsops-mcp --config %s "
-        "guard-all every 15 minutes (deploy/GUARD.md). Budget raises and "
-        "re-enables are refused while it is stale." % config_path)
+    # the spend guard only matters once a campaign is under rails; a local business with only the lead book/plan has none (0.6.1)
+    if any(acct.get("campaigns") for acct in cfg.get("accounts") or []):
+        add("guard_heartbeat", _heartbeat, "Schedule: adsops-mcp --config %s "
+            "guard-all every 15 minutes (deploy/GUARD.md). Budget raises and "
+            "re-enables are refused while it is stale." % config_path)
 
     return rows
 

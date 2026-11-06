@@ -35,7 +35,9 @@ Three things it does differently:
 
 
 
-> **New in 0.6.0:** 78 tools. A local-business suite run from the owner's own Claude: Google Local Services Ads leads, reports, junk-lead feedback and verification readiness (built against the v24 API, not yet run on a live LSA account), a lead book for every channel, a generic 90-day growth plan each business's Claude customises, LocalBusiness schema, NAP checks, service-area page briefs and a reviews engine. One-prompt setup (`adsops-mcp setup --install-desktop`, `adsops-mcp connect` for a one-click Google sign-in) and MCP prompts start/morning/weekly. ChatGPT Ads (16 tools) since 0.5.0.
+
+
+> **New in 0.6.1:** 78 tools. A local-business suite run from the owner's own Claude: Google Local Services Ads leads, reports, junk-lead feedback and verification readiness (built against the v24 API, not yet run on a live LSA account), a lead book for every channel, a generic 90-day growth plan each business's Claude customises, LocalBusiness schema, NAP checks, service-area page briefs and a reviews engine. One-prompt setup (`adsops-mcp setup --install-desktop`, `adsops-mcp connect` for a one-click Google sign-in) and MCP prompts start/morning/weekly. ChatGPT Ads (16 tools) since 0.5.0.
 
 ## Common questions
 
@@ -351,6 +353,8 @@ like; the server computes the diff.
 
 Keep these files in git. That is what makes "reviewed desired state" real: `git diff` is the
 change review, and `require_clean_git` makes the server refuse to act on uncommitted edits.
+
+
 
 
 
