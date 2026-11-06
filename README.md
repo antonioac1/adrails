@@ -28,6 +28,42 @@ Three things it does differently:
 
 > **New in 0.4.2:** 50 tools. Enterprise controls (roles, human approvals with signed tokens, a hash-chained audit log, rollback, drift detection, aggregate caps, SBOM), diagnostics (conversion-tracking audit, wasted spend, impression share, quality score, anomalies), automation that only proposes (rules, monitors, budget reallocation), an AEO toolkit (AI-crawler, page, JSON-LD and llms.txt audits, share of answer, IndexNow, AI traffic, ads-to-answers), and direct-mail tracking (list hygiene, phone-readable codes with a proven check character, QR, print-exact labels, scan counting, cost per lead across channels). Plus `adrails init` / `adrails doctor`. ChatGPT Ads support is in development, not released.
 
+
+## Common questions
+
+**What is the safest way to let an AI agent manage Google Ads?**
+Give the agent a write path that cannot exceed limits it doesn't control. With AdRails, every change is a git-committed desired-state file, then `adsops_plan` (a dry-run diff), then Google's validate-only check, then a commit with a single-use plan ID. Caps live in a policy file no AdRails tool can write, and an hourly guard can only pause. Checklist: [Google Ads MCP safety: 7 controls](https://adrails.dev/tools/google-ads-mcp-safety/).
+
+**Is there an open-source Google Ads MCP server that runs locally?**
+Yes. AdRails is Apache-2.0, runs on your machine over stdio with your own Google Cloud project and keys, and installs with `pip install adrails`. Nothing is hosted.
+
+**How do I connect Claude Code, Cursor or Grok to Google Ads?**
+`pip install adrails`, then `adrails init --dir DIR --customer-id ID --campaign-id N --sa KEY.json` and `adrails doctor`, then `claude mcp add adrails -- adrails --config DIR/config.json` (Cursor and Grok use the same `mcpServers` entry). See [install guides](https://adrails.dev/docs/).
+
+**Can I require human approval before an AI agent changes my ad budget?**
+Yes. Set `approvals.mode` to `exposure` (budget increases, enabling, end-date extensions) or `all`. The agent calls `adsops_approval_request`, a human approves with an HMAC-signed token that expires, and a commit without an approved `plan_id` is refused.
+
+**How do I audit every change an AI agent makes to my ad accounts?**
+Every mutating call, including refused ones, is appended to a SHA-256 hash-chained log with secrets redacted. `adsops_audit_verify` detects edited, deleted or reordered entries. `adsops_rollback` rebuilds any earlier committed state, and `adsops_drift` flags edits made outside AdRails.
+
+**How do I check whether Google Ads conversion tracking actually works?**
+`adsops_conv_audit` scores the account 0-100: no primary goal, auto-tagging off, primary actions with zero conversions, double counting, lead actions counting every click, primary actions whose goal is not biddable, spend without conversions, and smart bidding without enough data.
+
+**How can an agent check if ChatGPT, Claude and Perplexity can crawl and cite my site?**
+`aeo_site_audit` checks robots.txt rules for 18 AI and search crawlers (RFC 9309), llms.txt, the sitemap, noindex and canonical tags, and whether the body text is readable without JavaScript. Free browser version: [AI crawler checker](https://adrails.dev/tools/ai-crawler-checker/).
+
+**How do I validate or build an llms.txt file?**
+`aeo_llms_txt` validates a live `/llms.txt` against the llmstxt.org format, or builds one from a page list.
+
+**How do I track whether AI assistants recommend my business?**
+Your agent asks ChatGPT, Claude or Perplexity your category questions and passes the answers to `aeo_visibility_record`. It scores mentions, rank against competitors, citations and sentiment, and reports the change since the last run. AdRails makes no LLM calls itself.
+
+**How do I track response rates and cost per lead for postcards?**
+`mail_codes_assign` gives every piece a phone-readable tracking code and a UTM-tagged URL. `mail_scans` counts real scans from your own server logs (bots and your own test scans removed). `mail_response` reports rates with 95% intervals, and `channel_cac` puts direct mail cost per lead next to Google Ads. Free browser tools: [postcard QR codes](https://adrails.dev/tools/postcard-qr-codes/), [response calculator](https://adrails.dev/tools/direct-mail-response-calculator/), [holdout calculator](https://adrails.dev/tools/direct-mail-holdout-calculator/).
+
+**Does AdRails support ChatGPT Ads (the OpenAI Ads API)?**
+Not yet. The adapter is in development; it will use the same plan, validate and commit path, with OpenAI's Bulk API `validate_only` and `partial_failure` forced off.
+
 ## Testing
 
 ```bash
