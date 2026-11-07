@@ -15,7 +15,7 @@ def _selftest():
                  "aeo.ai_traffic", "aeo.ads_to_aeo", "aeo_tools", "onboard",
                  "mail.codes", "mail.qr", "mail.hygiene", "mail.labels", "mail.scans", "mail.response", "mail.cac", "platforms.openai_ads", "oai_policy",
                  "oai_creative", "oai_conversions", "oai_audiences", "oai_experiments", "oai_builder",
-                 "local.leadbook", "local.presence", "local.reviews", "local.oauth_connect", "local.plan", "local.lsa", "local.setup_cli",
+                 "local.leadbook", "local.presence", "local.reviews", "local.oauth_connect", "local.plan", "local.lsa", "local.setup_cli", "updates", "guides",
                  "mail_tools", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
@@ -29,7 +29,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="adsops")
     ap.add_argument("--config", default=os.environ.get("ADSOPS_CONFIG"))
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("cmd", nargs="?", choices=["serve", "meter-summary", "guard-all", "init", "doctor", "setup", "connect"], default="serve")
+    ap.add_argument("cmd", nargs="?", choices=["serve", "meter-summary", "guard-all", "init", "doctor", "setup", "connect", "upgrade"], default="serve")
     ap.add_argument("--since")
     # init: scaffold one campaign (config, desired state, SAFE policy: caps == today's budget, commits off) + first git commit
     ap.add_argument("--dir"); ap.add_argument("--customer-id"); ap.add_argument("--campaign-id"); ap.add_argument("--sa")
@@ -48,6 +48,12 @@ def main(argv=None):
     if a.cmd in ("setup", "connect"):
         from adsops.local import setup_cli
         return setup_cli.main(a.cmd, a)
+    if a.cmd == "upgrade":       # agent-run, owner-approved: fetch the latest release and raise Claude Desktop's version floor
+        from adsops import updates, config as _c
+        cfg = _c.load_config(a.config) if a.config else None
+        r = updates.main_upgrade(cfg)
+        print(json.dumps(r, indent=1))
+        return 0 if r.get("ok") else 1
     if not a.config:
         ap.error("--config (or ADSOPS_CONFIG) is required")
     from adsops import config, meter, tools
@@ -63,6 +69,8 @@ def main(argv=None):
         rows = onboard.doctor(a.config)
         print(onboard.format_report(rows))
         return 0 if all(r["ok"] for r in rows) else 1
+    from adsops import updates
+    updates.refresh_in_background(cfg)   # at most one PyPI request a day, cached; off with ADRAILS_NO_UPDATE_CHECK=1
     tools.build_server(cfg).serve()
     return 0
 

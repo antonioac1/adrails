@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adrails"
-version = "0.6.2"
+version = "0.7.0"
 description = "AdRails: open-source MCP server for AI agents running ad accounts with guardrails: Google Ads, Google Local Services Ads and ChatGPT Ads through plan/validate/commit, a local-business lead book and growth plan, AEO toolkit, enterprise controls."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,4 +34,4 @@ adsops-mcp = "adsops.__main__:main"
 include = ["adsops*"]
 
 [tool.setuptools.package-data]
-adsops = ["fixtures/*.json", "intel/fixtures/*.csv", "intel/fixtures/*.tsv", "intel/fixtures/*.txt", "intel/fixtures/*.json"]
+adsops = ["playbooks/*.md", "fixtures/*.json", "intel/fixtures/*.csv", "intel/fixtures/*.tsv", "intel/fixtures/*.txt", "intel/fixtures/*.json"]

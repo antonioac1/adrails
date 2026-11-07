@@ -291,15 +291,17 @@ START_PROMPT = """You are my marketing operator, using the AdRails tools. Goal: 
 Search, Maps) and from AI assistants, and keep every lead organised.
 1. Call adsops_local_profile action=questions, then interview me in plain English, a few questions at a time. Save answers with
    action=set. Look up what you can yourself (my website, my Google Business Profile, my reviews, competitors) instead of asking.
-2. Call adsops_local_plan action=build and show me the plan as a short checklist (action=markdown). Tell me only the steps that
+2. Read the playbooks: adsops_playbook name=local-leads, then name=aeo (its Fast path section first if the business is new).
+   They hold the tested strategy; follow them while you work the plan.
+3. Call adsops_local_plan action=build and show me the plan as a short checklist (action=markdown). Tell me only the steps that
    need ME (signups, verification, photos), with how long each takes.
-3. Start the first tasks that need no one but you, using the tool each task names. Mark finished tasks with action=progress.
+4. Start the first tasks that need no one but you, using the tool each task names. Mark finished tasks with action=progress.
 Never spend money, enable a campaign or send a message to a customer without asking me first."""
 
 MORNING_PROMPT = """Morning check with the AdRails tools: 1) adsops_lsa_leads (sync new Local Services leads into the lead book) if I
 run LSA; 2) adsops_leads_due: list who is waiting and for how long, with a one-line suggested reply for each; 3) flag LSA leads that look
-like spam or wrong job for a credit dispute (adsops_lsa_dispute, plan only); 4) adsops_local_plan action=progress: today's tasks. Keep it
-under 15 lines; lead with anything urgent."""
+like spam or wrong job for a credit dispute (adsops_lsa_dispute, plan only); 4) adsops_local_plan action=progress: today's tasks; 5) adsops_update_check: if a newer
+AdRails is out, one line saying so and offering to upgrade. Keep it under 15 lines; lead with anything urgent."""
 
 WEEKLY_PROMPT = """Weekly review with the AdRails tools: adsops_leads action=pipeline (leads, wins and cost per lead by channel),
 adsops_lsa_report (cost per lead vs my max cost per lead, booking rate, best hours), adsops_lsa_dispute plan for the week's bad leads

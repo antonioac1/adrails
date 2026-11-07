@@ -272,6 +272,15 @@ def doctor(config_path, client_factory=None, env=None, now=None,
             "guard-all every 15 minutes (deploy/GUARD.md). Budget raises and "
             "re-enables are refused while it is stale." % config_path)
 
+    # informational, never a failure: an available update must not make doctor exit 1 (cache only: doctor never hits the network)
+    def _update():
+        from . import updates
+        st = updates.check(cfg, cache_only=True)
+        if st.get("update_available"):
+            return True, "AdRails %s is out (running %s): %s" % (st["latest"], st["current"], st["release_notes"])
+        return True, "running %s%s" % (st["current"], "" if st.get("latest") else " (latest not checked yet)")
+    add("version", _update, "Upgrade with the owner's OK: adsops-mcp upgrade, then restart Claude Desktop.")
+
     return rows
 
 

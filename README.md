@@ -39,7 +39,9 @@ Three things it does differently:
 
 
 
-> **New in 0.6.2:** 78 tools. A local-business suite run from the owner's own Claude: Google Local Services Ads leads with call and message history, cost-per-lead reports, junk-lead feedback for credits and verification readiness (every LSA query verified against the live Google Ads API v24), a lead book for every channel, a 90-day growth plan each business's Claude customises, LocalBusiness schema, NAP checks, service-area page briefs and a reviews engine. One-prompt setup (`adsops-mcp setup --install-desktop`, `adsops-mcp connect` for a one-click Google sign-in) and MCP prompts start/morning/weekly. ChatGPT Ads (16 tools) since 0.5.0.
+
+
+> **New in 0.7.0:** playbooks and update awareness. `adsops_playbook` ships the tested AEO and local lead-gen strategy for the agent to execute (a 7-day fast path for a new business, the AI-visibility panel, the pages engines quote, speed-to-lead and follow-up cadence), every step tied to a tool. `adsops_update_check` and the MCP instructions tell the agent when a new release is out; `adsops-mcp upgrade` applies it with the owner's OK. 80 tools, including the local-business suite (Google Local Services Ads verified against the live API v24, lead book, 90-day plan, reviews) and ChatGPT Ads.
 
 ## Common questions
 
@@ -365,6 +367,8 @@ change review, and `require_clean_git` makes the server refuse to act on uncommi
 
 
 
+
+
 ## ChatGPT Ads
 
 AdRails also runs OpenAI (ChatGPT) Ads accounts through the same plan, validate and commit path. The tools
@@ -420,6 +424,17 @@ MCP prompts `start`, `morning` and `weekly` chain these into the daily routine. 
 (verified 2026-11-06; `tests/qa_local_suite.py` pins each selected field to Google's live field list). Lead feedback submits through
 ProvideLeadFeedback the first time an account has a lead to rate, and returns Google's credit decision. LSA budgets, bids, hours and pausing are not in the API (dashboard only). Lead-book, profile and plan files
 live beside the config (chmod 600); the audit chain records only structural arguments for these tools, never customer names or notes.
+
+**Playbooks.** `adsops_playbook` serves the strategy behind the tools, written for the agent to execute: `aeo` (a 7-day fast path
+for a new business, the AI-visibility panel method, the pages engines quote, schema, entity consistency, the ads-to-AEO bridge,
+cadence, myths) and `local-leads` (speed-to-lead, LSA, Google Business Profile, reviews, follow-up cadence). Every step names its
+tool and a done-check; every claim is marked tested or early evidence. Files: `adsops/playbooks/*.md`.
+
+**Staying current.** The server tells the agent when a newer AdRails is out: the MCP `initialize` instructions carry a one-line
+notice (from a cache, so startup never waits) and `adsops_update_check` returns the release notes and the upgrade command.
+At most one request a day to `https://pypi.org/pypi/adrails/json`, no account or usage data sent; off with
+`ADRAILS_NO_UPDATE_CHECK=1` or `"update_check": false`. With the owner's OK the agent runs `adsops-mcp upgrade`, which pre-fetches
+the release and raises the version floor in Claude Desktop's config (backup first, other servers untouched).
 
 
 ## Works with Google's official `google-ads-mcp`

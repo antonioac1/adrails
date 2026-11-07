@@ -73,6 +73,7 @@ class Server:
         self.on_call = on_call
         self._tools = {}
         self._order = []
+        self.instructions = None   # callable -> str|None: MCP initialize `instructions` (how to use this server; update notice)
         self._prompts = {}     # name -> {"name","description","arguments":[{name,description,required}],"render":fn(args)->str}
 
     def tool(self, name, description, input_schema):
@@ -115,11 +116,18 @@ class Server:
             params = {}
         if method == "initialize":
             version = params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION
-            return _result(mid, {
+            res = {
                 "protocolVersion": version,
                 "capabilities": {"tools": {}, **({"prompts": {}} if self._prompts else {})},
                 "serverInfo": {"name": self.name, "version": self.version},
-            })
+            }
+            try:
+                text = self.instructions() if callable(self.instructions) else None
+            except Exception:          # instructions are advisory: never fail the handshake over them
+                text = None
+            if text:
+                res["instructions"] = text
+            return _result(mid, res)
         if method == "ping":
             return _result(mid, {})
         if method == "tools/list":

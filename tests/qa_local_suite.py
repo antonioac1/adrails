@@ -311,6 +311,27 @@ def main():
     ok, _, _ = call(srv2, "adsops_lsa_report")
     check(ok, "viewer can read the LSA report")
     os.environ.pop("ADRAILS_PRINCIPAL", None)
+    # 7. playbooks + update awareness (0.7.0) through the real server; update check disabled so tests never touch PyPI
+    os.environ["ADRAILS_NO_UPDATE_CHECK"] = "1"
+    try:
+        init = srv.handle({"jsonrpc": "2.0", "id": 90, "method": "initialize", "params": {}})["result"]
+        check("adsops_playbook" in init.get("instructions", "") and "never spend money" in init.get("instructions", ""),
+              "initialize carries agent instructions (playbook pointer + rails)")
+        ok, r, t = call(srv, "adsops_playbook")
+        check(ok and {p["name"] for p in r["playbooks"]} >= {"aeo", "local-leads"}, "playbook list has aeo + local-leads")
+        ok, r, t = call(srv, "adsops_playbook", name="aeo", section="Fast path")
+        check(ok and r["text"].startswith("## Fast path") and "aeo_visibility_record" in r["text"], "playbook section read")
+        ok, _, t = call(srv, "adsops_playbook", name="../../etc/passwd")
+        check(not ok, "playbook name traversal refused")
+        ok, r, t = call(srv, "adsops_update_check")
+        check(ok and r["source"] == "disabled" and r["update_available"] is False, "update check honours ADRAILS_NO_UPDATE_CHECK")
+        os.environ["ADRAILS_PRINCIPAL"] = "v"
+        ok1, _, _ = call(srv2, "adsops_playbook", name="local-leads")
+        ok2, _, _ = call(srv2, "adsops_update_check")
+        check(ok1 and ok2, "viewer can read playbooks and the update check")
+        os.environ.pop("ADRAILS_PRINCIPAL", None)
+    finally:
+        os.environ.pop("ADRAILS_NO_UPDATE_CHECK", None)
     # 6. GAQL contract: every LSA field we SELECT must be selectable in Google Ads API v24. Snapshot taken from the live
     #    GoogleAdsFieldService on 2026-11-06; FakeHTTP accepts any field, which is how contact_details.phone_number shipped in
     #    0.6.0/0.6.1 and failed on the first live call (UNRECOGNIZED_FIELD). Refresh the snapshot when the API version moves.
