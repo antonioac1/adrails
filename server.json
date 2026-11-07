@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "dev.adrails/adrails",
   "title": "AdRails",
-  "description": "Guarded Google Ads + ChatGPT Ads MCP for AI agents: plan/validate/commit, approvals, audit log, AEO",
-  "version": "0.6.1",
+  "description": "Google Ads, Local Services Ads & ChatGPT Ads MCP with guardrails: leads, AEO, local SEO, approvals",
+  "version": "0.6.2",
   "websiteUrl": "https://adrails.dev",
   "repository": {
     "url": "https://github.com/antonioac1/adrails",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "adrails",
-      "version": "0.6.1",
+      "version": "0.6.2",
       "transport": {
         "type": "stdio"
       }

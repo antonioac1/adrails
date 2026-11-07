@@ -10,6 +10,28 @@ N = [0, 0]
 NOW = 1793995200.0          # 2026-11-06 00:00 UTC-ish fixed clock
 
 
+# Selectable fields from the live GoogleAdsFieldService (v24, 2026-11-06). See section 6 of main().
+LIVE_V24_LSA_FIELDS = """
+local_services_lead.category_id local_services_lead.contact_details local_services_lead.creation_date_time
+local_services_lead.credit_details.credit_state local_services_lead.credit_details.credit_state_last_update_date_time
+local_services_lead.id local_services_lead.lead_charged local_services_lead.lead_feedback_submitted local_services_lead.lead_status
+local_services_lead.lead_type local_services_lead.locale local_services_lead.note.description local_services_lead.note.edit_date_time
+local_services_lead.resource_name local_services_lead.service_id
+local_services_lead_conversation.conversation_channel local_services_lead_conversation.event_date_time
+local_services_lead_conversation.id local_services_lead_conversation.lead local_services_lead_conversation.message_details.attachment_urls
+local_services_lead_conversation.message_details.text local_services_lead_conversation.participant_type
+local_services_lead_conversation.phone_call_details.call_duration_millis local_services_lead_conversation.phone_call_details.call_recording_url
+local_services_lead_conversation.resource_name
+local_services_verification_artifact.artifact_type local_services_verification_artifact.creation_date_time
+local_services_verification_artifact.id local_services_verification_artifact.status
+local_services_verification_artifact.insurance_verification_artifact.expiration_date_time
+local_services_verification_artifact.insurance_verification_artifact.rejection_reason
+local_services_verification_artifact.license_verification_artifact.expiration_date_time
+local_services_verification_artifact.license_verification_artifact.rejection_reason
+local_services_verification_artifact.business_registration_check_verification_artifact.rejection_reason
+local_services_verification_artifact.background_check_verification_artifact.final_adjudication_date_time
+"""
+
 def check(cond, what):
     N[0] += 1
     if not cond:
@@ -289,6 +311,20 @@ def main():
     ok, _, _ = call(srv2, "adsops_lsa_report")
     check(ok, "viewer can read the LSA report")
     os.environ.pop("ADRAILS_PRINCIPAL", None)
+    # 6. GAQL contract: every LSA field we SELECT must be selectable in Google Ads API v24. Snapshot taken from the live
+    #    GoogleAdsFieldService on 2026-11-06; FakeHTTP accepts any field, which is how contact_details.phone_number shipped in
+    #    0.6.0/0.6.1 and failed on the first live call (UNRECOGNIZED_FIELD). Refresh the snapshot when the API version moves.
+    import re as _re
+    from adsops.local import lsa as _lsa
+    live = set(LIVE_V24_LSA_FIELDS.split())
+    qs = [_lsa.render("leads", since="2026-01-01 00:00:00", limit=1), _lsa.render("artifacts"),
+          list(_lsa.conversations_for(["customers/1/localServicesLeads/2"]))[0]]
+    used = set()
+    for q in qs:
+        sel = q.split("FROM")[0].replace("SELECT", "")
+        used |= {f.strip() for f in sel.split(",") if f.strip()}
+    bad = sorted(f for f in used if f.startswith("local_services") and f not in live)
+    check(not bad, "GAQL: every LSA field is selectable in live v24 (bad: %s)" % bad)
     print("QA: %d checks, %d failures" % (N[0], N[1]))
     return 1 if N[1] else 0
 

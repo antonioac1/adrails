@@ -37,7 +37,9 @@ Three things it does differently:
 
 
 
-> **New in 0.6.1:** 78 tools. A local-business suite run from the owner's own Claude: Google Local Services Ads leads, reports, junk-lead feedback and verification readiness (built against the v24 API, not yet run on a live LSA account), a lead book for every channel, a generic 90-day growth plan each business's Claude customises, LocalBusiness schema, NAP checks, service-area page briefs and a reviews engine. One-prompt setup (`adsops-mcp setup --install-desktop`, `adsops-mcp connect` for a one-click Google sign-in) and MCP prompts start/morning/weekly. ChatGPT Ads (16 tools) since 0.5.0.
+
+
+> **New in 0.6.2:** 78 tools. A local-business suite run from the owner's own Claude: Google Local Services Ads leads with call and message history, cost-per-lead reports, junk-lead feedback for credits and verification readiness (every LSA query verified against the live Google Ads API v24), a lead book for every channel, a 90-day growth plan each business's Claude customises, LocalBusiness schema, NAP checks, service-area page briefs and a reviews engine. One-prompt setup (`adsops-mcp setup --install-desktop`, `adsops-mcp connect` for a one-click Google sign-in) and MCP prompts start/morning/weekly. ChatGPT Ads (16 tools) since 0.5.0.
 
 ## Common questions
 
@@ -361,6 +363,8 @@ change review, and `require_clean_git` makes the server refuse to act on uncommi
 
 
 
+
+
 ## ChatGPT Ads
 
 AdRails also runs OpenAI (ChatGPT) Ads accounts through the same plan, validate and commit path. The tools
@@ -412,9 +416,9 @@ reachable Google Ads accounts added). No ad account is needed to start: the lead
 | `adsops_local_schema`, `adsops_local_nap`, `adsops_local_area_page` | LocalBusiness JSON-LD, NAP consistency + citation checklist, service x area page briefs for AI answers |
 | `adsops_reviews` | review link, request/reply DRAFTS (never sent), review velocity vs competitors |
 
-MCP prompts `start`, `morning` and `weekly` chain these into the daily routine. **Status, exactly:** the LSA tools are built against the
-Google Ads API v24 definitions and tested offline (`tests/qa_local_suite.py`, 77 checks through the real server); they have not yet run
-against a live LSA account. LSA budgets, bids, hours and pausing are not in the API (dashboard only). Lead-book, profile and plan files
+MCP prompts `start`, `morning` and `weekly` chain these into the daily routine. **Live status:** every LSA query (leads, conversations, campaigns, verification) runs against the live Google Ads API v24
+(verified 2026-11-06; `tests/qa_local_suite.py` pins each selected field to Google's live field list). Lead feedback submits through
+ProvideLeadFeedback the first time an account has a lead to rate, and returns Google's credit decision. LSA budgets, bids, hours and pausing are not in the API (dashboard only). Lead-book, profile and plan files
 live beside the config (chmod 600); the audit chain records only structural arguments for these tools, never customer names or notes.
 
 

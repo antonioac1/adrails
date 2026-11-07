@@ -6,10 +6,10 @@
                         Plan by default; commit=true submits (operator role, audited). The only LSA write the API offers.
   adsops_lsa_readiness  verification (license, insurance, background check, registration) + profile signals Google ranks on
 
-Contract: Google Ads API v24 protos (specs/ent/local_lsa.md). Built against the documented API; NOT yet run against a live LSA account
-(no LSA account of ours exists), so the first real call is the proof: metrics on LOCAL_SERVICES campaigns are UNVERIFIED and the
-report degrades to lead-only numbers if Google returns none. Budgets, bids, hours and pausing for LSA are not in the API: the LSA
-dashboard owns them, and these tools never pretend otherwise.
+Contract: Google Ads API v24 protos (specs/ent/local_lsa.md). All four read queries ran against the live API on 2026-11-06 (that run
+caught contact_details sub-fields that v24 rejects; qa_local_suite pins every field to the live list). An account with no LSA campaign
+returns zero rows and the report says so. Budgets, bids, hours and pausing for LSA are not in the API: the LSA dashboard owns them,
+and these tools never pretend otherwise.
 """
 import datetime as dt
 

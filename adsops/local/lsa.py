@@ -112,9 +112,10 @@ def _as_date(value):
 
 QUERIES = {
     "leads": (
-        "SELECT local_services_lead.id, local_services_lead.category_id, "
-        "local_services_lead.service_id, local_services_lead.contact_details.phone_number, "
-        "local_services_lead.contact_details.email, local_services_lead.contact_details.consumer_name, "
+        "SELECT local_services_lead.resource_name, local_services_lead.id, local_services_lead.category_id, "
+        # contact_details is selectable only as a whole message (v24 rejects its sub-fields: UNRECOGNIZED_FIELD,
+        # found by the first live run 2026-11-06); the response carries contactDetails.{phoneNumber,email,consumerName}
+        "local_services_lead.service_id, local_services_lead.contact_details, "
         "local_services_lead.lead_type, local_services_lead.lead_status, "
         "local_services_lead.creation_date_time, local_services_lead.locale, "
         "local_services_lead.note.description, local_services_lead.lead_charged, "
