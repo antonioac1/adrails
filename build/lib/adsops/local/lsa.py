@@ -760,7 +760,7 @@ def readiness(artifacts, profile=None, today=None):
         if "review_count" in profile:
             reviews = _int(profile.get("review_count"))
             status = "ok" if reviews >= 5 else ("fail" if reviews == 0 else "warn")
-            checks.append({"check": "reviews", "status": status, "fix": "" if reviews >= 5 else "Ask happy customers for reviews to build trust."})
+            checks.append({"check": "reviews", "status": status, "fix": "" if reviews >= 5 else "Ask every customer for a review (no gating, no incentives)."})
         if "rating" in profile:
             rating = _float(profile.get("rating"))
             checks.append({"check": "rating", "status": "warn" if rating < 4.0 else "ok", "fix": "Rating below 4.0; fix service issues and request reviews." if rating < 4.0 else ""})

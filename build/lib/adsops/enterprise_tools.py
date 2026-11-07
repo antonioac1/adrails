@@ -410,7 +410,7 @@ def harden(srv, ctx, cfg):
 
 # Local-business tools carry customer PII in free text (names, notes, gate codes, addresses). The chain is append-only and hash-linked,
 # so PII written there can never be removed: record ONLY structural args for these tools (review finding #1, 2026-11-06).
-_PII_TOOL_PREFIXES = ("adsops_local_", "adsops_leads", "adsops_lsa_", "adsops_reviews")
+_PII_TOOL_PREFIXES = ("adsops_local_", "adsops_leads", "adsops_lsa_", "adsops_reviews", "adsops_results", "adsops_gbp")
 _SAFE_ARGS = ("action", "id", "stage", "source", "days", "commit", "account", "rebuild", "op", "channel", "start_date", "since",
               "until", "limit", "write")
 

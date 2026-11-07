@@ -129,7 +129,7 @@ def main():
     init = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})["result"]
     check("prompts" in init["capabilities"], "prompts capability advertised")
     pl = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "prompts/list"})["result"]["prompts"]
-    check({p["name"] for p in pl} == {"start", "morning", "weekly"}, "three prompts")
+    check({p["name"] for p in pl} == {"start", "morning", "weekly", "monthly"}, "four prompts")
     g = srv.handle({"jsonrpc": "2.0", "id": 3, "method": "prompts/get", "params": {"name": "start"}})["result"]
     check("adsops_local_profile" in g["messages"][0]["content"]["text"], "start prompt drives the profile tool")
 
@@ -332,6 +332,25 @@ def main():
         os.environ.pop("ADRAILS_PRINCIPAL", None)
     finally:
         os.environ.pop("ADRAILS_NO_UPDATE_CHECK", None)
+    # 8. results report, case study privacy, GBP checker, plan->playbook links (0.8.0), through the real server
+    ok, r, t = call(srv, "adsops_results")
+    check(ok and "markdown" in r and "| Metric |" in r["markdown"], "results report renders a before/after table: " + t[:120])
+    ok, r, t = call(srv, "adsops_results", action="case_study", quote="It answers leads before I do", permission="anonymous")
+    blob = json.dumps(r)
+    check(ok and r["case_study"]["permission"] == "anonymous" and not any(x in blob for x in ("Maria Lopez", "8135550101", "Kim Ng",
+          "Jane Customer", "Example Plumbing")), "case study carries no customer PII and hides the business name when anonymous")
+    ok, _, t = call(srv, "adsops_results", action="case_study", permission="everyone")
+    check(not ok, "case study refuses an unknown permission")
+    ok, r, t = call(srv, "adsops_gbp", action="audit", snapshot={"verified": True, "primary_category": "Plumber"})
+    check(ok and 0 < r["score"] < 50 and r["fixes"], "gbp audit scores a thin profile low with ranked fixes")
+    ok, r, t = call(srv, "adsops_gbp", action="history")
+    check(ok and r["history"] and "score" in r["history"][-1] and "Plumber" not in json.dumps(r), "gbp history keeps scores only")
+    ok, r, t = call(srv, "adsops_gbp", action="description", text="Best plumber! www.x.com")
+    check(ok and not r["ok"], "gbp description rules catch URL + superlative")
+    ok, r, t = call(srv, "adsops_local_plan", action="markdown")
+    check(ok and "playbook: " in r["markdown"], "plan markdown links tasks to playbook sections")
+    chain_body = open(os.path.join(td, "audit-chain.jsonl")).read()
+    check("It answers leads before I do" not in chain_body, "owner quote never lands in the audit chain")
     # 6. GAQL contract: every LSA field we SELECT must be selectable in Google Ads API v24. Snapshot taken from the live
     #    GoogleAdsFieldService on 2026-11-06; FakeHTTP accepts any field, which is how contact_details.phone_number shipped in
     #    0.6.0/0.6.1 and failed on the first live call (UNRECOGNIZED_FIELD). Refresh the snapshot when the API version moves.

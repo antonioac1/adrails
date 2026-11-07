@@ -85,6 +85,8 @@ VIEWER = (
     "adsops_lsa_readiness",
     "adsops_update_check",
     "adsops_playbook",
+    "adsops_results",
+    "adsops_gbp",
 )
 
 OPERATOR_EXTRA = (

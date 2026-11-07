@@ -25,7 +25,7 @@ import urllib.request
 PYPI_URL = "https://pypi.org/pypi/adrails/json"
 RELEASES = "https://github.com/antonioac1/adrails/releases/tag/v%s"
 TTL_S = 24 * 3600
-_FLOOR = re.compile(r"^adrails(>=|==)([0-9][0-9A-Za-z.\-+]*)$")
+_FLOOR = re.compile(r"^adrails>=([0-9][0-9A-Za-z.\-+]*)$")   # floors only: an == pin is the owner's choice (review #9)
 
 
 def vtuple(v):
@@ -101,7 +101,11 @@ def check(cfg=None, current=None, now=time.time, fetch=_fetch_pypi, force=False,
         return {**status(current, None, source="disabled"), "note": "update check disabled (ADRAILS_NO_UPDATE_CHECK or update_check:false)"}
     path = cache_path(cfg)
     c = _read(path)
-    fresh = c.get("latest") and (now() - float(c.get("checked_at_ts", 0))) < TTL_S
+    try:                                       # review #7: a corrupt or future-dated cache must not wedge the check forever
+        age = now() - float(c.get("checked_at_ts") or 0)
+    except (TypeError, ValueError):
+        age = TTL_S + 1
+    fresh = bool(c.get("latest")) and 0 <= age < TTL_S
     if (fresh and not force) or cache_only:
         return status(current, c.get("latest"), c.get("checked_at"), "cache")
     try:
@@ -141,23 +145,31 @@ def upgrade_desktop(latest, desktop_cfg=None, now=time.time):
             doc = json.load(fh)
     except ValueError:
         raise ToolError("Claude Desktop config is not valid JSON (%s); nothing was changed" % path)
-    changed = []
+    if not isinstance(doc, dict) or not isinstance(doc.get("mcpServers", {}), dict):
+        raise ToolError("Claude Desktop config has an unexpected shape (%s); nothing was changed" % path)
+    changed, skipped = [], []
     for name, ent in (doc.get("mcpServers") or {}).items():
         args = ent.get("args") if isinstance(ent, dict) else None
         if not isinstance(args, list):
             continue
         for i, a in enumerate(args):
             m = _FLOOR.match(str(a))
-            if m and vtuple(m.group(2)) < vtuple(latest):
+            if not m and str(a).startswith("adrails") and any(op in str(a) for op in ("==", "<", "[", ",")):
+                skipped.append({"server": name, "spec": a, "why": "pinned or ranged by hand; left as is"})
+            if m and vtuple(m.group(1)) < vtuple(latest):
                 args[i] = "adrails>=%s" % latest
                 changed.append({"server": name, "from": a, "to": args[i]})
     if changed:
-        shutil.copy2(path, "%s.bak-%d" % (path, int(now())))
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2)
-        os.replace(tmp, path)
-    return {"changed": changed, "path": path,
+        real = os.path.realpath(path)             # review #8: a symlinked config updates its target, not a new file beside it
+        shutil.copy2(real, "%s.bak-%d" % (path, int(now())))
+        mode = os.stat(real).st_mode & 0o777      # keep 0600 (the file can hold tokens in "env")
+        tmp = real + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, ensure_ascii=False)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    return {"changed": changed, "skipped": skipped, "path": path,
             "next": "restart Claude Desktop (quit fully, reopen) so it starts AdRails %s" % latest if changed else None}
 
 
@@ -166,6 +178,8 @@ def main_upgrade(cfg=None, desktop_cfg=None, fetch=_fetch_pypi, run=None):
     import subprocess
     s = check(cfg, force=True, fetch=fetch)
     latest = s.get("latest")
+    if s.get("source") == "disabled":
+        return {"ok": False, "error": "update checks are disabled (ADRAILS_NO_UPDATE_CHECK or update_check:false); unset it to upgrade"}
     if not latest:
         return {"ok": False, "error": "could not reach PyPI to find the latest version; try again when online"}
     out = {"ok": True, "current": s["current"], "latest": latest}
@@ -211,11 +225,15 @@ def selftest():
     s = check(cfg, current="9.9.9", now=lambda: clock[0], fetch=fetch)
     assert not s["update_available"]; n += 1
     assert check({**cfg, "update_check": False}, fetch=fetch)["source"] == "disabled"; n += 1
+    _prev = os.environ.get("ADRAILS_NO_UPDATE_CHECK")
     os.environ["ADRAILS_NO_UPDATE_CHECK"] = "1"
     try:
         assert check(cfg, fetch=fetch)["source"] == "disabled" and instructions_note(cfg) is None; n += 1
     finally:
-        os.environ.pop("ADRAILS_NO_UPDATE_CHECK", None)
+        if _prev is None:
+            os.environ.pop("ADRAILS_NO_UPDATE_CHECK", None)
+        else:
+            os.environ["ADRAILS_NO_UPDATE_CHECK"] = _prev
     from . import __version__
     assert ("AdRails 9.9.9 is available" in (instructions_note(cfg) or "")) == (vtuple(__version__) < vtuple("9.9.9")); n += 1
     # Desktop floor upgrade: only adrails floors that are lower; other servers untouched; backup made; bad JSON refused
@@ -227,6 +245,25 @@ def selftest():
     d2 = json.load(open(dpath))
     assert d2["mcpServers"]["adrails"]["args"][1] == "adrails>=0.7.0" and d2["mcpServers"]["other"] == doc["mcpServers"]["other"]; n += 1
     assert d2["mcpServers"]["pinned"]["args"] == ["adrails==9.9.9"] and os.path.exists(dpath + ".bak-5") and len(r["changed"]) == 1; n += 1
+    assert r["skipped"] and r["skipped"][0]["server"] == "pinned", "an == pin is reported, never rewritten"; n += 1
+    # mode kept, symlink followed (review #8)
+    real = os.path.join(td, "real.json"); link = os.path.join(td, "link.json")
+    json.dump({"mcpServers": {"a": {"command": "uvx", "args": ["--from", "adrails>=0.1.0"]}}}, open(real, "w")); os.chmod(real, 0o600)
+    os.symlink(real, link)
+    upgrade_desktop("0.7.0", link, now=lambda: 6)
+    assert os.path.islink(link) and json.load(open(real))["mcpServers"]["a"]["args"][1] == "adrails>=0.7.0"; n += 1
+    assert (os.stat(real).st_mode & 0o777) == 0o600; n += 1
+    for bad in ("[]", '{"mcpServers": [1]}'):
+        open(dpath, "w").write(bad)
+        try:
+            upgrade_desktop("0.7.0", dpath); raise AssertionError("odd shape must be refused")
+        except Exception as e:
+            assert "unexpected shape" in str(e); n += 1
+    json.dump(doc, open(dpath, "w"))
+    # corrupt cache recovers (review #7)
+    open(cache_path(cfg), "w").write('{"latest": "1.0.0", "checked_at_ts": "bad"}')
+    assert check(cfg, current="0.6.2", now=lambda: clock[0], fetch=fetch)["source"] == "pypi"; n += 1
+    upgrade_desktop("0.7.0", dpath)
     assert upgrade_desktop("0.7.0", dpath)["changed"] == [], "idempotent"; n += 1
     open(dpath, "w").write("{bad")
     try:
@@ -246,6 +283,12 @@ def selftest():
     finally:
         shutil.which = old_which
     assert r["ok"] and r["latest"] == "0.7.0" and r["prefetch"]["ok"] and r["desktop"]["changed"]; n += 1
-    assert main_upgrade(cfg, dpath, fetch=boom)["ok"] in (True, False); n += 1    # offline: falls back to cache, never raises
+    # offline: falls back to the cached latest and never raises. which() is stubbed to "no uvx" so the selftest can NEVER spawn a real
+    # `uvx --refresh` (0.7.0 shipped without this stub: the selftest hit the network and took minutes; fixed 0.8.0)
+    shutil.which = lambda name: None
+    try:
+        assert main_upgrade(cfg, dpath, fetch=boom)["ok"] in (True, False); n += 1
+    finally:
+        shutil.which = old_which
     shutil.rmtree(td, ignore_errors=True)
     return n

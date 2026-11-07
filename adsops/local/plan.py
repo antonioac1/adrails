@@ -22,9 +22,50 @@ TOOLS = (
     "adsops_local_nap", "adsops_local_area_page", "adsops_reviews", "aeo_visibility_record",
     "aeo_page_audit", "aeo_schema_generate", "aeo_site_audit", "aeo_llms_txt", "aeo_indexnow",
     "adsops_plan", "adsops_apply", "adsops_status", "adsops_guard", "adsops_conv_audit",
-    "adsops_lp_diagnose", "adsops_negatives_suggest", "adsops_offline_conv_plan",
+    "adsops_lp_diagnose", "adsops_negatives_suggest", "adsops_offline_conv_plan", "adsops_gbp",
 )
 _ALLOWED = frozenset(TOOLS) | {"owner", "agent"}  # internal only, never returned
+
+
+# Every task points at the playbook section that explains WHY and HOW (founder 11-06 #3: "link plan tasks to playbook sections").
+# (playbook name, substring of a '## ' heading). Owner/agent tasks are matched by title first. guides.read(name, section) serves it;
+# selftest proves every pair below resolves to a real heading in the shipped playbooks, so a renamed section fails the build.
+PLAYBOOK_BY_TITLE = (
+    ("Business Profile", ("google-business-profile", "Fast path")),
+    ("Answer the questions people ask AI", ("aeo", "Build the pages")),
+    ("Move the budget", ("google-ads", "Monitors, briefs and reallocation")),
+    ("website", ("aeo", "Fast path")),
+)
+PLAYBOOK_BY_TOOL = {
+    "adsops_local_profile": ("local-leads", "Step 0"), "adsops_leads": ("local-leads", "Step 5"),
+    "adsops_leads_due": ("local-leads", "Step 1"), "adsops_lsa_leads": ("local-leads", "Step 2"),
+    "adsops_lsa_report": ("local-leads", "Step 2"), "adsops_lsa_dispute": ("local-leads", "Step 2"),
+    "adsops_lsa_readiness": ("local-leads", "Step 2"), "adsops_reviews": ("local-leads", "Step 4"),
+    "adsops_local_schema": ("aeo", "Schema and llms.txt"), "adsops_local_nap": ("aeo", "Entity"),
+    "adsops_local_area_page": ("aeo", "Build the pages"), "aeo_visibility_record": ("aeo", "Measure first"),
+    "aeo_page_audit": ("aeo", "Build the pages"), "aeo_schema_generate": ("aeo", "Schema and llms.txt"),
+    "aeo_site_audit": ("aeo", "Make sure you can be reached"), "aeo_llms_txt": ("aeo", "Schema and llms.txt"),
+    "aeo_indexnow": ("aeo", "Make sure you can be reached"), "adsops_plan": ("google-ads", "Budget, caps and the change rail"),
+    "adsops_apply": ("google-ads", "Budget, caps and the change rail"), "adsops_status": ("google-ads", "Measure first"),
+    "adsops_guard": ("google-ads", "Budget, caps and the change rail"), "adsops_conv_audit": ("google-ads", "Conversion tracking"),
+    "adsops_lp_diagnose": ("google-ads", "Landing pages"), "adsops_negatives_suggest": ("google-ads", "Search terms and negatives"),
+    "adsops_offline_conv_plan": ("google-ads", "Leads, speed to lead"),
+    "adsops_gbp": ("google-business-profile", "Fast path"),
+}
+
+
+def playbook_for(task):
+    """-> {"name","section"} or None: title rules first (owner/agent tasks), then the task's tool."""
+    if not isinstance(task, dict):
+        return None
+    ref = PLAYBOOK_BY_TOOL.get(task.get("tool"))
+    if ref:                                   # a real tool decides; title rules are for owner/agent tasks only (review 11-06 #12)
+        return {"name": ref[0], "section": ref[1]}
+    title = str(task.get("title") or "")
+    for needle, r in PLAYBOOK_BY_TITLE:
+        if needle.lower() in title.lower():
+            return {"name": r[0], "section": r[1]}
+    return None
 
 
 def _yes(v):
@@ -244,6 +285,14 @@ def build(p, start_date="2025-01-06", horizon_days=90) -> dict:
             "pick the business and finish the verification Google offers.",
             "Google shows Verified on the profile and you can publish an update.",
             "P0", 1, (), 20, "$0", 1)
+    ids["gbp_score"] = add(
+        "Get the Google Business Profile to 90+ out of 100", "adsops_gbp",
+        "A complete profile (categories, services, attributes, photos, posts, Q&A, reviews) is what Maps, the local pack and AI "
+        "assistants read first.",
+        "Read the google-business-profile playbook, fill a snapshot from the dashboard, run action=audit and work the fixes top "
+        "down; check the description with action=description before pasting.",
+        "adsops_gbp action=audit scores 90 or more.",
+        "P0", 1, tuple(ids[d] for d in ("gbp",) if d in ids), 45, "$0", 1)
     ids["nap"] = add(
         "Make name, address and phone identical on every listing", "adsops_local_nap",
         "Google and AI assistants cross-check listings; mismatches split your ranking signal.",
@@ -467,7 +516,7 @@ def build(p, start_date="2025-01-06", horizon_days=90) -> dict:
             {"name": "Optimise", "days": "week 6-13",
              "why": "Dispute junk leads, fix the landing page, feed back won jobs, follow the money."},
         ],
-        "tasks": tasks, "weekly_rhythm": rhythm, "economics": econ, "kpis": kpis,
+        "tasks": [{**t, "playbook": playbook_for(t)} for t in tasks], "weekly_rhythm": rhythm, "economics": econ, "kpis": kpis,
         "skipped": skipped,
     }
 
@@ -511,7 +560,9 @@ def to_markdown(plan) -> str:
         if st.get("why"):
             lines.append("_%s_" % st["why"])
         for t in group:
-            lines.append("- [ ] %s (week %s) %s — %s" % (t.get("id"), t.get("week"), t.get("title"), t.get("tool")))
+            pb = t.get("playbook") or {}
+            lines.append("- [ ] %s (week %s) %s — %s%s" % (t.get("id"), t.get("week"), t.get("title"), t.get("tool"),
+                                                          " · playbook: %s › %s" % (pb["name"], pb["section"]) if pb else ""))
         lines.append("")
     known = {t.get("id") for st in stages for t in tasks if int(t.get("stage", 1) or 1) <= len(stages)}
     rest = [t for t in tasks if t.get("id") not in known]
@@ -544,6 +595,15 @@ def _demo_profile(**over) -> dict:
 
 
 def selftest() -> int:
+    # playbook links resolve to real headings in the shipped playbooks (renaming a section must fail here, not in a user's chat)
+    from adsops import guides
+    for _prof in ({"business_name": "X", "trade": "t", "city": "c"},
+                  {"business_name": "X", "trade": "t", "city": "c", "website": "https://x.com", "monthly_budget": 500,
+                   "lsa_eligible_category": "y", "licensed_insured": "y", "has_gbp": "y", "gbp_verified": "y"}):
+        _unlinked = [t["title"] for t in build(_prof, start_date="2026-11-02")["tasks"] if not t.get("playbook")]
+        assert not _unlinked, "plan tasks without a playbook link: %s" % _unlinked
+    for _ref in list(PLAYBOOK_BY_TOOL.values()) + [r for _, r in PLAYBOOK_BY_TITLE]:
+        guides.read(_ref[0], _ref[1])
     """All I/O mocked or absent. Returns the number of checks."""
     n = 0
 

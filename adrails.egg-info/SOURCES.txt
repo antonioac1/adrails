@@ -48,6 +48,7 @@ adsops/playbook_tools.py
 adsops/policy.py
 adsops/protocol.py
 adsops/rbac.py
+adsops/results_tools.py
 adsops/rollback.py
 adsops/rsa_validator.py
 adsops/rules.py
@@ -88,11 +89,13 @@ adsops/intel/fixtures/auction_insights_sample.csv
 adsops/intel/fixtures/transparency_creatives_competitor_example.json
 adsops/intel/fixtures/transparency_suggestions_domain.json
 adsops/local/__init__.py
+adsops/local/gbp.py
 adsops/local/leadbook.py
 adsops/local/lsa.py
 adsops/local/oauth_connect.py
 adsops/local/plan.py
 adsops/local/presence.py
+adsops/local/results.py
 adsops/local/reviews.py
 adsops/local/setup_cli.py
 adsops/mail/__init__.py
@@ -107,4 +110,7 @@ adsops/platforms/__init__.py
 adsops/platforms/google_ads.py
 adsops/platforms/openai_ads.py
 adsops/playbooks/aeo.md
+adsops/playbooks/chatgpt-ads.md
+adsops/playbooks/google-ads.md
+adsops/playbooks/google-business-profile.md
 adsops/playbooks/local-leads.md

@@ -285,14 +285,17 @@ def register(srv, ctx, cfg):
                render=lambda a: MORNING_PROMPT)
     srv.prompt("weekly", "Weekly review: leads and cost per lead by channel, LSA disputes, reviews, AI visibility, next week's plan",
                render=lambda a: WEEKLY_PROMPT)
+    srv.prompt("monthly", "Monthly results: before/after leads, cost per lead, response time, AI visibility, Google Business Profile "
+               "score and reviews, plus what to change next month", render=lambda a: MONTHLY_PROMPT)
 
 
 START_PROMPT = """You are my marketing operator, using the AdRails tools. Goal: get my business real leads from Google (Local Services Ads,
 Search, Maps) and from AI assistants, and keep every lead organised.
 1. Call adsops_local_profile action=questions, then interview me in plain English, a few questions at a time. Save answers with
    action=set. Look up what you can yourself (my website, my Google Business Profile, my reviews, competitors) instead of asking.
-2. Read the playbooks: adsops_playbook name=local-leads, then name=aeo (its Fast path section first if the business is new).
-   They hold the tested strategy; follow them while you work the plan.
+2. Read the playbooks that fit what you learned (adsops_playbook with no name lists them): always local-leads and
+   google-business-profile, then aeo (its Fast path first if the business is new); google-ads and chatgpt-ads only if I advertise or
+   want to. They hold the tested strategy; every plan task links the section to follow.
 3. Call adsops_local_plan action=build and show me the plan as a short checklist (action=markdown). Tell me only the steps that
    need ME (signups, verification, photos), with how long each takes.
 4. Start the first tasks that need no one but you, using the tool each task names. Mark finished tasks with action=progress.
@@ -302,6 +305,12 @@ MORNING_PROMPT = """Morning check with the AdRails tools: 1) adsops_lsa_leads (s
 run LSA; 2) adsops_leads_due: list who is waiting and for how long, with a one-line suggested reply for each; 3) flag LSA leads that look
 like spam or wrong job for a credit dispute (adsops_lsa_dispute, plan only); 4) adsops_local_plan action=progress: today's tasks; 5) adsops_update_check: if a newer
 AdRails is out, one line saying so and offering to upgrade. Keep it under 15 lines; lead with anything urgent."""
+
+MONTHLY_PROMPT = """Monthly results with the AdRails tools: 1) adsops_gbp action=audit on a fresh snapshot of my Google Business
+Profile; 2) aeo_visibility_record with the same locked prompts as last month; 3) adsops_results action=report, passing spend from
+adsops_lsa_report / adsops_campaigns and my review counts; 4) adsops_local_plan action=progress. Show me the before/after table and the
+highlights, say plainly what did not work, and finish with the 3 changes for next month, each with the tool call and the playbook
+section behind it. Ask before spending money or contacting anyone."""
 
 WEEKLY_PROMPT = """Weekly review with the AdRails tools: adsops_leads action=pipeline (leads, wins and cost per lead by channel),
 adsops_lsa_report (cost per lead vs my max cost per lead, booking rate, best hours), adsops_lsa_dispute plan for the week's bad leads

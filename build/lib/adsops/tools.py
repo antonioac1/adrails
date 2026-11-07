@@ -30,8 +30,8 @@ SERVER_INSTRUCTIONS = (
     "AdRails: lead generation, Google Ads, Google Local Services Ads, ChatGPT Ads and AEO (getting recommended by AI assistants) "
     "for a business, run by you with guardrails. Getting started for a small business: use the `start` prompt (or call "
     "adsops_local_profile action=questions, then adsops_local_plan action=build); every morning the `morning` prompt; weekly the "
-    "`weekly` prompt. The playbooks (adsops_playbook) hold the tested strategy behind the plan: read the relevant one before "
-    "doing AEO or lead-gen work. Rails you must keep: never spend money, enable a campaign or message a customer without the "
+    "`weekly` prompt; monthly the `monthly` prompt (adsops_results before/after). The playbooks (adsops_playbook: aeo, local-leads, "
+    "google-business-profile, google-ads, chatgpt-ads) hold the tested strategy behind the plan: read the relevant one before the work. Rails you must keep: never spend money, enable a campaign or message a customer without the "
     "owner's yes; ad changes go plan -> validate-only -> commit; review requests and replies are drafts the owner sends.")
 
 
@@ -339,6 +339,9 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     lsa_tools.register(srv, ctx, cfg)         # Google Local Services Ads: leads, report, lead feedback (credits), readiness
     from adsops import guides, updates
     guides.register(srv, ctx, cfg)            # adsops_playbook: the tested AEO + local-leads strategy, shipped as markdown
+    from adsops import results_tools
+    results_tools.register(srv, ctx, cfg)     # adsops_results: before/after report + privacy-safe case study
+    results_tools.register_gbp(srv, ctx, cfg) # adsops_gbp: Google Business Profile completeness to 100%
 
     @srv.tool("adsops_update_check", "Is a newer AdRails out? Returns the running and latest versions, the release notes link and "
               "the one command that upgrades (owner's OK first). Checks PyPI at most once a day (cached); sends no account or usage "
@@ -428,7 +431,7 @@ def selftest():
     assert names[:12] == ["adsops_campaigns", "adsops_status", "adsops_terms", "adsops_plan", "adsops_apply",
                      "adsops_set", "adsops_guard", "adsops_usage", "adsops_negatives_suggest", "adsops_competitors_report",
                      "adsops_auction_insights_import", "adsops_lp_diagnose"], names; n += 1
-    assert len(names) == 64 and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
+    assert len(names) == 66 and "adsops_gbp" in names and "adsops_results" in names and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
     assert call("adsops_campaigns")["structuredContent"]["campaigns"][0]["key"] == "c42"; n += 1
     assert call("adsops_status", {"campaign": "nope"})["isError"]; n += 1
     st = call("adsops_status", {"campaign": "c42"})["structuredContent"]
