@@ -12,14 +12,17 @@ The Python package and module are still named `adsops` — that is the name you 
 Three things it does differently:
 
 - **Your keys.** It runs on your machine against your own Google Cloud project and Google Ads
-  credentials. Nothing is hosted: the only endpoint the package talks to is the Google Ads API,
-  and credentials are read from the sources you configure (a service-account JSON file, a static
-  token, or a secret-manager lookup).
+  credentials, read from the sources you configure (a service-account JSON file, a static token, or
+  a secret-manager lookup), and they never leave your machine. It talks to the ad platforms you
+  connect, to PyPI once a day for an update check (off with `ADRAILS_NO_UPDATE_CHECK=1`), and to
+  adrails.dev only when your agent calls `adsops_paid`.
 - **Your caps.** Caps live in a policy file that no AdRails tool writes; with `require_plan_id`
   on, every commit must quote a fresh, single-use `plan_id` issued for that exact plan; and a
   change that adds spend exposure is refused while the scheduled guard's heartbeat is stale.
-- **Pay per call in sats.** Optional hosted add-ons, Lightning-first, metered per call in sats —
-  coming soon. Nothing in this release contacts any hosted service.
+- **Free, with optional paid extras.** Everything runs free. Three hosted extras are paid per job in
+  sats (on-chain) or USDC (x402), with no account: an AI visibility panel, a second opinion before a
+  change goes live, and a Bitcoin timestamp of your audit log. Your agent shows you the price first;
+  the tool never pays.
 
 
 
@@ -43,7 +46,11 @@ Three things it does differently:
 
 
 
-> **New in 0.8.0:** a full local-business suite your AI runs after one intake interview. Five playbooks (AEO, local leads, Google Business Profile, Google Ads, ChatGPT Ads), each 90-day plan task linked to the section behind it, `adsops_results` before/after reports and privacy-safe case studies, `adsops_gbp` to get a Business Profile to 100, and a `monthly` prompt. Plus update awareness (`adsops_update_check`, `adsops-mcp upgrade`). 82 tools.
+
+
+
+
+> **New in 0.9.0:** optional paid extras, per job, with no account: `adsops_paid` quotes an AI visibility panel (ChatGPT, Perplexity, Gemini and Claude from clean sessions), a second opinion on a change before it goes live, and a Bitcoin timestamp of your audit log (OpenTimestamps). Pay in sats on-chain or USDC via x402; the tool never pays by itself. Everything else stays free: the local-business suite, five playbooks, results reports, Business Profile to 100. 83 tools.
 
 ## Common questions
 
@@ -51,7 +58,7 @@ Three things it does differently:
 Give the agent a write path that cannot exceed limits it doesn't control. With AdRails, every change is a git-committed desired-state file, then `adsops_plan` (a dry-run diff), then Google's validate-only check, then a commit with a single-use plan ID. Caps live in a policy file no AdRails tool can write, and an hourly guard can only pause. Checklist: [Google Ads MCP safety: 7 controls](https://adrails.dev/tools/google-ads-mcp-safety/).
 
 **Is there an open-source Google Ads MCP server that runs locally?**
-Yes. AdRails is Apache-2.0, runs on your machine over stdio with your own Google Cloud project and keys, and installs with `pip install adrails`. Nothing is hosted.
+Yes. AdRails is Apache-2.0, runs on your machine over stdio with your own Google Cloud project and keys, and installs with `pip install adrails`. The server itself is never hosted; only the optional paid extras run on adrails.dev.
 
 **How do I connect Claude Code, Cursor or Grok to Google Ads?**
 `pip install adrails`, then `adrails init --dir DIR --customer-id ID --campaign-id N --sa KEY.json` and `adrails doctor`, then `claude mcp add adrails -- adrails --config DIR/config.json` (Cursor and Grok use the same `mcpServers` entry). See [install guides](https://adrails.dev/docs/).
@@ -373,6 +380,10 @@ change review, and `require_clean_git` makes the server refuse to act on uncommi
 
 
 
+
+
+
+
 ## ChatGPT Ads
 
 AdRails also runs OpenAI (ChatGPT) Ads accounts through the same plan, validate and commit path. The tools
@@ -447,6 +458,14 @@ notice (from a cache, so startup never waits) and `adsops_update_check` returns 
 At most one request a day to `https://pypi.org/pypi/adrails/json`, no account or usage data sent; off with
 `ADRAILS_NO_UPDATE_CHECK=1` or `"update_check": false`. With the owner's OK the agent runs `adsops-mcp upgrade`, which pre-fetches
 the release and raises the version floor in Claude Desktop's config (backup first, other servers untouched).
+
+**Optional paid extras.** Everything above is free and stays free. Three extras cost us money to run, so `adsops_paid` sells them per
+job, with no account or subscription: an **AI visibility panel** (ChatGPT, Perplexity, Gemini and Claude answer up to 8 questions
+from clean sessions with live web search; feed the answers to `aeo_visibility_record`), a **second opinion** (OpenAI GPT-5 reviews
+a plan before `adsops_apply commit=true`: go, caution or stop) and a **Bitcoin timestamp** (anchors the audit-chain head via
+OpenTimestamps; proofs are saved beside the chain and verify with `ots verify`). The tool only fetches a quote: a fresh Bitcoin
+address and amount, and an x402 URL for USDC on Base. **It never pays.** The owner pays from their own wallet, or an x402 agent
+wallet pays within a budget the owner set. Prices and terms: `https://adrails.dev/api/v1` and https://adrails.dev/pricing/.
 
 
 ## Works with Google's official `google-ads-mcp`

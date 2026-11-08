@@ -113,6 +113,7 @@ OPERATOR_EXTRA = (
     "adsops_leads",
     "adsops_lsa_leads",
     "adsops_lsa_dispute",
+    "adsops_paid",          # creates quotes / reads results; it never pays (the owner or an owner-budgeted wallet does)
 )
 
 BUILTIN_ROLES = {

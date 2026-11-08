@@ -15,7 +15,7 @@ def _selftest():
                  "aeo.ai_traffic", "aeo.ads_to_aeo", "aeo_tools", "onboard",
                  "mail.codes", "mail.qr", "mail.hygiene", "mail.labels", "mail.scans", "mail.response", "mail.cac", "platforms.openai_ads", "oai_policy",
                  "oai_creative", "oai_conversions", "oai_audiences", "oai_experiments", "oai_builder",
-                 "local.leadbook", "local.presence", "local.reviews", "local.oauth_connect", "local.plan", "local.lsa", "local.setup_cli", "local.results", "local.gbp", "updates", "guides",
+                 "local.leadbook", "local.presence", "local.reviews", "local.oauth_connect", "local.plan", "local.lsa", "local.setup_cli", "local.results", "local.gbp", "updates", "guides", "paid_tools",
                  "mail_tools", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
