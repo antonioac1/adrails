@@ -12,6 +12,7 @@ import json
 
 from . import strict
 from . import urls
+from . import devices
 from .errors import RailViolation, ToolError, scrub
 
 MATCH = {"BROAD", "PHRASE", "EXACT"}
@@ -40,10 +41,12 @@ def check_op_fields(ops, end_field="end_date_time"):
     for svc, entries in (ops or {}).items():
         if svc == "campaignCriteria":
             for e in entries:
+                if devices.is_device_update(e):      # device bid modifier: reduce/opt-out only (devices.py)
+                    continue
                 c = e.get("create") if isinstance(e, dict) else None
                 if set(e) != {"create"} or not isinstance(c, dict) or c.get("negative") is not True \
                         or set(c) != {"campaign", "negative", "keyword"}:
-                    raise RailViolation("campaignCriteria ops may only create negative keywords")
+                    raise RailViolation("campaignCriteria ops may only create negative keywords or reduce a device bid modifier")
             continue
         allowed = set(_UPDATE_FIELDS.get(svc, ()))
         if svc == "campaigns":
@@ -163,6 +166,10 @@ def plan(state, live, today=None, end_field="end_date_time"):
         ops["campaignCriteria"] = [{"create": {"campaign": rn, "negative": True,
                                                "keyword": {"text": t, "matchType": m}}} for t, m in adds]
         notes.append(f"{len(adds)} new negatives")
+    dev_ops, dev_notes = devices.plan_devices(state, live)
+    if dev_ops:
+        ops.setdefault("campaignCriteria", []).extend(dev_ops)
+        notes += dev_notes
     ops.update(url_ops)
     notes += url_notes
     check_op_fields(ops, end_field)

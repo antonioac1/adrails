@@ -199,6 +199,27 @@ def live_state(client, campaign_id, end_field="end_date_time"):
     }
 
 
+def live_devices(client, campaign_id):
+    """Campaign DEVICE criteria -> {DEVICE: {"resource_name", "bid_modifier" (None when unset)}}. Read-only.
+    An omitted bidModifier means NO adjustment; it must not be read as 0 (= opt-out). See adsops.devices."""
+    try:
+        cid = int(campaign_id)
+    except (TypeError, ValueError):
+        raise ToolError("invalid campaign_id: %r" % (campaign_id,))
+    rows = client.search("SELECT campaign_criterion.resource_name, campaign_criterion.device.type, "
+                         "campaign_criterion.bid_modifier FROM campaign_criterion WHERE campaign.id = " + str(cid) +
+                         " AND campaign_criterion.type = DEVICE")
+    out = {}
+    for r in rows:
+        dev = _g(r, "campaignCriterion", "device", "type", default="")
+        if not dev:
+            continue
+        bm = _g(r, "campaignCriterion", "bidModifier", default=None)
+        out[str(dev).upper()] = {"resource_name": _g(r, "campaignCriterion", "resourceName", default=""),
+                                 "bid_modifier": None if bm is None else float(bm)}
+    return out
+
+
 def live_urls(client, campaign_id):
     """URL fields adsops can manage: campaign final_url_suffix; per non-removed ad group its custom
     parameters, final_url_suffix and the final_urls of each ENABLED ad. Read-only."""

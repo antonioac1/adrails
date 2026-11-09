@@ -283,7 +283,7 @@ def register(srv, ctx, cfg):
                render=lambda a: START_PROMPT)
     srv.prompt("morning", "Morning check: new leads waiting, follow-ups due, LSA leads to sync and dispute, today's plan tasks",
                render=lambda a: MORNING_PROMPT)
-    srv.prompt("weekly", "Weekly review: leads and cost per lead by channel, LSA disputes, reviews, AI visibility, next week's plan",
+    srv.prompt("weekly", "Weekly review: leads and cost per lead by channel, LSA disputes, reviews, AI visibility, organic search wins, did last week's changes work, next week's plan",
                render=lambda a: WEEKLY_PROMPT)
     srv.prompt("monthly", "Monthly results: before/after leads, cost per lead, response time, AI visibility, Google Business Profile "
                "score and reviews, plus what to change next month", render=lambda a: MONTHLY_PROMPT)
@@ -302,7 +302,7 @@ Search, Maps) and from AI assistants, and keep every lead organised.
 Never spend money, enable a campaign or send a message to a customer without asking me first."""
 
 MORNING_PROMPT = """Morning check with the AdRails tools: 1) adsops_lsa_leads (sync new Local Services leads into the lead book) if I
-run LSA; 2) adsops_leads_due: list who is waiting and for how long, with a one-line suggested reply for each; 3) flag LSA leads that look
+run LSA; 1b) adsops_metrics_pull (keeps the daily history that measures every change; quiet unless it reports an error); 2) adsops_leads_due: list who is waiting and for how long, with a one-line suggested reply for each; 3) flag LSA leads that look
 like spam or wrong job for a credit dispute (adsops_lsa_dispute, plan only); 4) adsops_local_plan action=progress: today's tasks; 5) adsops_update_check: if a newer
 AdRails is out, one line saying so and offering to upgrade. Keep it under 15 lines; lead with anything urgent."""
 
@@ -315,7 +315,9 @@ section behind it. Ask before spending money or contacting anyone."""
 WEEKLY_PROMPT = """Weekly review with the AdRails tools: adsops_leads action=pipeline (leads, wins and cost per lead by channel),
 adsops_lsa_report (cost per lead vs my max cost per lead, booking rate, best hours), adsops_lsa_dispute plan for the week's bad leads
 (ask me before submitting), adsops_reviews action=velocity, aeo_visibility_record if a month has passed since the last AI-visibility
-check, then adsops_local_plan action=progress. Finish with 3 recommendations, each with the tool call that does it."""
+check, adsops_search_console action=opportunities (cheapest organic wins and paid terms I already rank top-3 for), adsops_impact
+action=changes then action=measure for each change that now has 7+ days after it (did it work? say so plainly, including "no clear
+effect"), then adsops_local_plan action=progress. Finish with 3 recommendations, each with the tool call that does it."""
 
 
 def _biz_from_profile(p):

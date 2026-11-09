@@ -30,7 +30,7 @@ from adsops.errors import ToolError, RailViolation, scrub
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
-DEFAULT_SCOPES = ("https://www.googleapis.com/auth/adwords",)
+DEFAULT_SCOPES = ("https://www.googleapis.com/auth/adwords", "https://www.googleapis.com/auth/webmasters.readonly")
 
 
 def _now_iso() -> str:

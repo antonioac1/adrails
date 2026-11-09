@@ -50,7 +50,11 @@ Three things it does differently:
 
 
 
-> **New in 0.9.0:** optional paid extras, per job, with no account: `adsops_paid` quotes an AI visibility panel (ChatGPT, Perplexity, Gemini and Claude from clean sessions), a second opinion on a change before it goes live, and a Bitcoin timestamp of your audit log (OpenTimestamps). Pay in sats on-chain or USDC via x402; the tool never pays by itself. Everything else stays free: the local-business suite, five playbooks, results reports, Business Profile to 100. 83 tools.
+
+
+
+
+> **New in 0.10.0:** the measurement loop. `adsops_metrics_pull` keeps a daily local history of Google Ads, Google Search Console, AI-visibility panels and leads; `adsops_search_console` finds the cheapest organic wins and the search terms you pay for while already ranking top-3; `adsops_impact` answers "did that change work?" against a counterfactual with a 90% range and a placebo test. All local, all read-only towards Google. 87 tools.
 
 ## Common questions
 
@@ -366,6 +370,10 @@ like; the server computes the diff.
 
 Keep these files in git. That is what makes "reviewed desired state" real: `git diff` is the
 change review, and `require_clean_git` makes the server refuse to act on uncommitted edits.
+
+
+
+
 
 
 

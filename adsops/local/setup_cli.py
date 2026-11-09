@@ -22,7 +22,8 @@ DESKTOP_CFG = {
     "darwin": "~/Library/Application Support/Claude/claude_desktop_config.json",
     "win32": os.path.join(os.environ.get("APPDATA", "~"), "Claude", "claude_desktop_config.json"),
 }
-SCOPES = ["https://www.googleapis.com/auth/adwords"]
+# 0.10: + read-only Search Console, so adsops_search_console / adsops_metrics_pull work with the same one sign-in.
+SCOPES = ["https://www.googleapis.com/auth/adwords", "https://www.googleapis.com/auth/webmasters.readonly"]
 
 
 def _write_private(path, doc, overwrite=False):
@@ -170,7 +171,7 @@ def main(cmd, a):
             out["next_steps"] = [
                 "Restart Claude Desktop (Cmd+Q, reopen) if --install-desktop ran.",
                 "In Claude Desktop, pick the AdRails 'start' prompt (or say: use AdRails to set up my business).",
-                "To connect Google Ads/LSA: create a Google Cloud OAuth client of type 'Desktop app' with the Google Ads API enabled, "
+                "To connect Google Ads/LSA: create a Google Cloud OAuth client of type 'Desktop app' with the Google Ads API and the Google Search Console API enabled, "
                 "download its JSON, then run: adsops-mcp connect --config %s --client-file <that.json>" % out["config"],
             ]
         elif cmd == "connect":

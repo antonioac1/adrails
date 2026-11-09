@@ -11,7 +11,7 @@ import re
 import secrets
 import time
 
-from adsops import __version__, auth, config, engine, meter as meter_mod, policy as policy_mod, protocol, safety, statestore, playbook_tools, urls
+from adsops import __version__, auth, config, engine, meter as meter_mod, policy as policy_mod, protocol, safety, statestore, playbook_tools, urls, devices
 from adsops.errors import RailViolation, ToolError, scrub
 from adsops.platforms import google_ads
 
@@ -88,6 +88,8 @@ class Context:
         live = google_ads.live_state(client, eff["campaign_id"], self.end_field())
         if urls.manages_urls(eff):
             live["urls"] = google_ads.live_urls(client, eff["campaign_id"])
+        if devices.manages_devices(eff):
+            live["devices"] = google_ads.live_devices(client, eff["campaign_id"])
         return live
 
     @staticmethod
@@ -344,6 +346,8 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     results_tools.register_gbp(srv, ctx, cfg) # adsops_gbp: Google Business Profile completeness to 100%
     from adsops import paid_tools
     paid_tools.register(srv, ctx, cfg)        # adsops_paid: OPTIONAL paid extras (panel, second opinion, Bitcoin stamp); never pays
+    from adsops import metrics_tools
+    metrics_tools.register(srv, ctx, cfg)     # 0.10 measurement loop: metrics_pull, metrics, search_console, impact
 
     @srv.tool("adsops_update_check", "Is a newer AdRails out? Returns the running and latest versions, the release notes link and "
               "the one command that upgrades (owner's OK first). Checks PyPI at most once a day (cached); sends no account or usage "
@@ -433,7 +437,7 @@ def selftest():
     assert names[:12] == ["adsops_campaigns", "adsops_status", "adsops_terms", "adsops_plan", "adsops_apply",
                      "adsops_set", "adsops_guard", "adsops_usage", "adsops_negatives_suggest", "adsops_competitors_report",
                      "adsops_auction_insights_import", "adsops_lp_diagnose"], names; n += 1
-    assert len(names) == 67 and "adsops_paid" in names and "adsops_gbp" in names and "adsops_results" in names and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
+    assert len(names) == 71 and "adsops_impact" in names and "adsops_search_console" in names and "adsops_paid" in names and "adsops_gbp" in names and "adsops_results" in names and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
     assert call("adsops_campaigns")["structuredContent"]["campaigns"][0]["key"] == "c42"; n += 1
     assert call("adsops_status", {"campaign": "nope"})["isError"]; n += 1
     st = call("adsops_status", {"campaign": "c42"})["structuredContent"]

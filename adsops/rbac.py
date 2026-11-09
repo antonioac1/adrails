@@ -87,9 +87,14 @@ VIEWER = (
     "adsops_playbook",
     "adsops_results",
     "adsops_gbp",
+    # 0.10 measurement reads (local store + read-only Search Console)
+    "adsops_metrics",
+    "adsops_search_console",
+    "adsops_impact",
 )
 
 OPERATOR_EXTRA = (
+    "adsops_metrics_pull",   # calls Google APIs (quota) and writes the local store
     "adsops_plan",
     "adsops_apply",
     "adsops_set",
