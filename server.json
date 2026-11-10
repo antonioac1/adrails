@@ -3,7 +3,7 @@
   "name": "dev.adrails/adrails",
   "title": "AdRails",
   "description": "Your AI runs lead gen: Google Ads, LSA, ChatGPT Ads, AEO, Business Profile, playbooks, guardrails",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "websiteUrl": "https://adrails.dev",
   "repository": {
     "url": "https://github.com/antonioac1/adrails",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "adrails",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "transport": {
         "type": "stdio"
       }

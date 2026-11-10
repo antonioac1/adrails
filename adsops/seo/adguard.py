@@ -480,12 +480,12 @@ def run(crawl, final_urls, dup_threshold=DEFAULT_DUP_THRESHOLD):
             source_urls.extend(sources)
     first = sink_links[0] if sink_links else [None, 0, 0]
     total_links = sum(row[1] for row in sink_links)
-    total_sources = sum(row[2] for row in sink_links)
+    total_sources = len(set(source_urls))                     # a page linking to two sinks counts once
     settle("ad_lp_equity_sink", emit(
         "ad_lp_equity_sink", source_urls,
-        "%d internal links on %d indexable pages point at the ad-only page %s (%s), so their equity is lost"
-        % (total_links, total_sources, _path(first[0]) if first[0] else "(none)",
-           sink_reasons.get(first[0]) or "not indexable"),
+        "%d internal links on %d indexable pages point at %d ad-only page%s (e.g. %s, %s), so their equity is lost"
+        % (total_links, total_sources, len(sink_links), "" if len(sink_links) == 1 else "s",
+           _path(first[0]) if first[0] else "(none)", sink_reasons.get(first[0]) or "not indexable"),
         {"count": len(sink_links), "links": total_links, "targets": sink_links[:MAX_LIST]}))
 
     return findings, passed

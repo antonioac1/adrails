@@ -172,7 +172,8 @@ def _result(raw, url):
     out["bytes"] = _int(raw.get("bytes"), 0, 0, 10 ** 9)
     out["truncated"] = bool(raw.get("truncated"))
     out["ms"] = _int(raw.get("ms"), 0, 0, 10 ** 9)
-    out["ctype"] = _clean(raw.get("ctype") or "", 120).lower()
+    ctype = raw.get("ctype") or out["headers"].get("content-type") or ""
+    out["ctype"] = _clean(ctype, 120).split(";")[0].strip().lower()        # "text/html; charset=utf-8" -> "text/html"
     err = raw.get("error")
     out["error"] = None if err in (None, "") else _text(err)[:200]
     return out

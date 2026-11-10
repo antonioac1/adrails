@@ -102,7 +102,7 @@ CATALOG = {
         "Check each case: make the page self-canonical when it has its own search value, and keep the cross "
         "canonical only where the page is a true duplicate"),
     "near_duplicate_self_canonical": _c(
-        1, 2, "Near-duplicate pages each declare themselves canonical",
+        2, 2, "Near-duplicate pages each declare themselves canonical",
         "Group the near-duplicate URLs, choose one version, and make the others canonicalise to it or 301 to it"),
     "near_duplicate": _c(
         3, 2, "Near-duplicate page content",
@@ -175,13 +175,13 @@ CATALOG = {
         "Remove rel=nofollow from internal links; use robots.txt or noindex when a page must stay out of the index"),
     "schema_gaps": _c(
         3, 2, "Structured data missing for the page type",
-        "Add JSON-LD for the page type that applies (LocalBusiness, Service, FAQPage, BreadcrumbList) with the "
-        "fields Google requires"),
+        "Add the JSON-LD type the rest of the template already carries (for example Service on city pages, Article on "
+        "guides, BreadcrumbList), with the fields Google documents for it"),
     "jsonld_invalid": _c(
         2, 0.5, "JSON-LD blocks that do not parse",
         "Fix the JSON syntax of the listed blocks and validate them in the Rich Results Test before deploying"),
     "hsts_missing": _c(
-        3, 0.25, "No HSTS header on https responses",
+        4, 0.25, "No HSTS header on https responses",
         "Send Strict-Transport-Security: max-age=31536000; includeSubDomains on https responses once every "
         "subdomain supports https"),
     "security_headers_missing": _c(
@@ -377,7 +377,7 @@ def _cell(value, limit=MAX_CELL):
     """Markdown-safe cell: no pipes, no newlines, capped length."""
     text = "" if value is None else str(value)
     text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    text = text.replace("|", "\\|")
+    text = text.replace("\\", "\\\\").replace("|", "\\|").replace("<", "&lt;")   # no raw HTML tags in viewers; "->" stays readable
     return text[:limit]
 
 
@@ -414,7 +414,7 @@ def to_markdown(rows, title="Site audit", summary=None):
 def _csv_cell(value):
     """Neutralise spreadsheet formulas before the CSV writer sees the value."""
     text = "" if value is None else str(value)
-    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+    if text.lstrip(" \t\r\n\v\f\u00a0\ufeff")[:1] in ("=", "+", "-", "@") or text[:1] in ("\t", "\r", "\n"):
         text = "'" + text
     return text
 
@@ -453,7 +453,7 @@ def selftest() -> int:
     expected_hours = {"sitemap_orphans": 1, "title_too_long": 0.5, "hsts_missing": 0.25, "lcp_slow": 4,
                       "low_indexable_share": 2, "title_multiple": 0.25, "gsc_not_indexed": 1}
     expected_priority = {"robots_blocks_googlebot": 1, "title_too_long": 4, "description_duplicate": 4,
-                         "hsts_missing": 3, "sitemap_orphans": 2, "gsc_canonical_mismatch": 2}
+                         "hsts_missing": 4, "sitemap_orphans": 2, "gsc_canonical_mismatch": 2}
 
     missing = [c for c in codes if c not in CATALOG]
     assert not missing, "seo.issues.selftest: catalogue misses %r" % (missing,)

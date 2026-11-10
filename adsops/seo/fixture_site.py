@@ -66,7 +66,8 @@ def default_pages():
                          "<?xml version=\"1.0\"?><urlset>" + "".join(
                              "<url><loc>{base}%s</loc></url>" % p for p in (
                                  "/", "/services/", "/services/a/", "/services/b/", "/guides/one/", "/guides/two/",
-                                 "/about/", "/owners/", "/orphan/")) + "</urlset>"),
+                                 "/about/", "/owners/", "/orphan/", "/llms.txt")) + "</urlset>"),
+        "/llms.txt": (200, {"Content-Type": "text/plain"}, "# Fixture\n> A test site.\n"),
         "/": (200, {"Content-Type": "text/html; charset=utf-8"},
               _page("Fixture home", home_links, main_words=8, head="<link rel=\"canonical\" href=\"/\">")),
         "/services/": (200, {"Content-Type": "text/html"},

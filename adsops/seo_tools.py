@@ -112,7 +112,7 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
         ads += from_cfg["urls"][:MAX_AD_URLS]
         notes += from_cfg["errors"]
     scope = {_host(start), _host(start)[4:] if _host(start).startswith("www.") else "www." + _host(start)}
-    ads = [u for u in dict.fromkeys(extract.normalize(a) for a in ads) if u and _host(u) in scope]
+    ads = [u for u in dict.fromkeys(extract.strip_tracking(extract.normalize(a)) for a in ads) if u and _host(u) in scope]
 
     cr = crawl_mod.crawl(start, fetch=fetch, user_agent=user_agent, max_pages=max_pages, rate_limit_s=rate_limit_s,
                          respect_robots=respect_robots, sitemap_seeding=sitemap_seeding, extra_urls=ads, sleep=sleep,
@@ -153,6 +153,8 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
                               "errors": {u: r.get("error") for u, r in rendered.items() if r.get("error")}}
             except ToolError as e:
                 notes.append("JS render parity skipped: " + scrub(str(e), 200))
+            except Exception as e:                       # noqa: BLE001 - an optional stage never loses the crawl
+                notes.append("JS render parity failed: " + type(e).__name__)
     else:
         notes.append("JS render parity not run (render=true to compare raw vs rendered links and text)")
 
@@ -179,6 +181,8 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
                     perf_by_url[u] = res
                 except ToolError as e:
                     notes.append("Lighthouse: " + scrub(str(e), 200))
+                except Exception as e:                   # noqa: BLE001
+                    notes.append("Lighthouse failed on %s: %s" % (u, type(e).__name__))
             if perf_results:
                 f, p = perf_mod.findings(perf_results)
                 findings += f
@@ -202,7 +206,10 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
                 client = None
                 notes.append("Search Console not connected: " + scrub(str(e), 200))
         if client is not None:
-            gsc_out = gsc_join.join(cr, client, site=gsc_site, today=today, max_inspect=max_inspect)
+            try:
+                gsc_out = gsc_join.join(cr, client, site=gsc_site, today=today, max_inspect=max_inspect)
+            except Exception as e:                       # noqa: BLE001
+                gsc_out = {"connected": False, "note": "Search Console join failed: " + scrub(str(e), 200)}
             findings += gsc_out.get("findings") or []
             passed += gsc_out.get("passed") or []
         else:
@@ -217,7 +224,8 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
                "templates": stats["templates"], "sitemap_urls": len(cr["sitemap"]["urls"]),
                "robots_disallowed_skipped": len(cr["skipped"]["robots_disallowed"]),
                "cap_reached": cr["skipped"]["cap_reached"], "passed": sorted(set(passed)), "ad_landing_pages": ad_summary}
-    run = {"host": host, "settings": cr["settings"], "summary": summary, "rows": rows,
+    from . import __version__
+    run = {"host": host, "adrails_version": __version__, "settings": cr["settings"], "summary": summary, "rows": rows,
            "schema_matrix": stats["schema_matrix"], "pages": _page_snapshot(cr, graph, perf_by_url),
            "probes": cr["probes"], "robots": {k: v for k, v in cr["robots"].items() if k != "text"},
            "render": render_out, "lighthouse": perf_out,
@@ -233,12 +241,14 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
 def _write_reports(st, host, run_id, run):
     """Markdown + CSV beside the stored JSON (mode 0600, same directory as the run)."""
     d = os.path.join(st.base_dir, runs.safe_host(host))
+    os.makedirs(d, mode=0o700, exist_ok=True)
     out = {"json": os.path.join(d, run_id + ".json")}
     title = "Site audit: %s (%s)" % (host, run_id)
     for ext, text in (("md", issues.to_markdown(run["rows"], title=title, summary=run["summary"])),
                       ("csv", issues.to_csv(run["rows"]))):
         path = os.path.join(d, run_id + "." + ext)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
         out[ext] = path
@@ -246,7 +256,10 @@ def _write_reports(st, host, run_id, run):
 
 
 def _filter_rows(rows, priority=None, code=None, limit=50):
-    out = [r for r in rows if (priority is None or r.get("priority") <= priority) and (not code or r.get("code") == code)]
+    if priority is not None and (not isinstance(priority, int) or not 1 <= priority <= 4):
+        raise ToolError("priority must be 1..4 (1 = blocks indexing ... 4 = polish)")
+    out = [r for r in rows if (priority is None or int(r.get("priority") or 4) <= priority)
+           and (not code or r.get("code") == code)]
     return out[:max(1, min(int(limit or 50), 500))]
 
 
@@ -274,7 +287,8 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, sleep=time.sleep):
               "near-duplicates, canonicals, doctype/lang, hreflang, click depth, internal PageRank and starved pages, template "
               "hard-coded sibling links, internal links carrying utm_ tags (they corrupt ad attribution), the ad landing pages from "
               "your Google Ads/ChatGPT Ads state files, schema coverage per template and security headers. Optional: render=true "
-              "(JS render parity, needs Playwright), lighthouse=true (one page per template; local lighthouse CLI or PageSpeed key), "
+              "(JS render parity, needs Playwright), lighthouse=true (one page per template, up to lighthouse_pages=5; local lighthouse "
+              "CLI or PageSpeed key), "
               "gsc=true (Search Console URL Inspection + clicks). Returns the prioritised issue table (priority 1 blocks indexing ... "
               "4 polish, hours, recommendation, example URL, pages affected), stores the run and diffs it against the last one. "
               "Never writes to the site.",
@@ -286,6 +300,8 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, sleep=time.sleep):
                   "respect_robots": {"type": "boolean"}, "ad_urls": {"type": "array", "items": {"type": "string"}},
                   "ad_states": {"type": "boolean", "description": "also read ad final URLs from the configured state files (default true)"},
                   "render": {"type": "boolean"}, "lighthouse": {"type": "boolean"}, "gsc": {"type": "boolean"},
+                  "render_pages": {"type": "integer", "description": "templates rendered in the browser, 1..20 (default 5)"},
+                  "lighthouse_pages": {"type": "integer", "description": "templates measured, 1..20 (default 5)"},
                   "gsc_site": {"type": "string"}, "max_inspect": {"type": "integer"},
                   "limit": {"type": "integer", "description": "issue rows to return (default 40; all rows are stored)"}},
                "required": ["url"], "additionalProperties": False})
@@ -304,6 +320,8 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, sleep=time.sleep):
                   respect_robots=args.get("respect_robots", True), ad_urls=args.get("ad_urls") or (),
                   ad_states=args.get("ad_states", True), render=bool(args.get("render")),
                   lighthouse=bool(args.get("lighthouse")), gsc=bool(args.get("gsc")), gsc_site=args.get("gsc_site"),
+                  render_pages=max(1, min(int(args.get("render_pages") or 5), 20)),
+                  lighthouse_pages=max(1, min(int(args.get("lighthouse_pages") or 5), 20)),
                   gsc_client=gsc_client, max_inspect=mi, fetch=fetch, sleep=sleep, now=now, store=store(),
                   today=dt.date.fromtimestamp(now()))
         return {"run_id": r["run_id"], "host": r["host"], "summary": r["summary"],
@@ -402,8 +420,8 @@ def main(argv=None, cfg=None):
     ap.add_argument("--store", help="directory for stored runs (default: beside the config's audit log, or ~/.adsops/seo-audits)")
     ap.add_argument("--format", choices=["md", "json", "csv"], default="md")
     a = ap.parse_args(argv)
-    if a.rate < MIN_RATE_TOOL or not 1 <= a.max_pages <= MAX_PAGES_TOOL:
-        ap.error("--rate must be >= 0.5 and --max-pages 1..2000")
+    if a.rate < MIN_RATE_TOOL or not 1 <= a.max_pages <= MAX_PAGES_TOOL or not 0 <= a.max_inspect <= 500:
+        ap.error("--rate must be >= 0.5, --max-pages 1..2000 and --max-inspect 0..500")
     if cfg is None and a.config:
         from . import config as config_mod
         cfg = config_mod.load_config(a.config)
@@ -497,6 +515,9 @@ def selftest():
         ck(r["diff"]["previous"] is None and r["diff"]["summary"]["regressions"] == 0, "first run: nothing to diff")
         ck(sleeps and min(sleeps) > 0 and "JS render parity not run" in " ".join(r["notes"]), "rate limit slept; notes say what did not run")
         ck("hsts_missing" not in codes, "HSTS not demanded of an http-only site")
+        ck(codes["sitemap_non_indexable"]["urls"] == [base + "/owners/"]
+           and base + "/llms.txt" not in codes["sitemap_orphans"]["urls"],
+           "a plain-text file in the sitemap is neither 'non-indexable' nor an orphan page")
         ck("server_errors" not in codes and all(base + "/tenants/" != ex[1] for ex in
                                                  codes["internal_links_to_errors"]["data"]["examples"])
            and all(base + "/tenants/" != ex[1] for ex in codes["internal_links_to_redirects"]["data"]["examples"]),

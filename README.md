@@ -54,6 +54,8 @@ Three things it does differently:
 
 
 
+> **New in 0.11.0:** a technical SEO site audit. `seo_audit_run` crawls a site the way Googlebot does and returns one prioritised issue table (priority, hours, issue, recommendation, example URL, pages affected): indexability, sitemap vs crawl, canonicals and near-duplicates, internal PageRank and starved pages, template hard-coded links, internal links carrying utm_ tags, your ad landing pages, schema coverage per template, and optionally JS render parity, Lighthouse per template and Search Console URL Inspection. Runs are stored and diffed. Read-only towards every site. 91 tools.
+
 > **New in 0.10.0:** the measurement loop. `adsops_metrics_pull` keeps a daily local history of Google Ads, Google Search Console, AI-visibility panels and leads; `adsops_search_console` finds the cheapest organic wins and the search terms you pay for while already ranking top-3; `adsops_impact` answers "did that change work?" against a counterfactual with a 90% range and a placebo test. All local, all read-only towards Google. 87 tools.
 
 ## Common questions
@@ -94,7 +96,7 @@ Not yet. The adapter is in development; it will use the same plan, validate and 
 ## Testing
 
 ```bash
-python3 -m adsops --selftest           # 430 unit checks, everything mocked
+python3 -m adsops --selftest           # 3,673 checks, everything mocked (the site audit runs against a loopback fixture site)
 python3 tests/qa_invariants.py         # 200 random sequences against a simulated Google Ads account
 python3 tests/qa_inputs.py             # hostile policy/state/config inputs (NaN, Infinity, bad dates, bad UTF-8, ...)
 python3 tests/qa_secrets.py            # canary tokens injected everywhere; none may reach output or logs
@@ -286,6 +288,38 @@ New CLI: `adsops-mcp init --dir DIR --customer-id ID --campaign-id N --sa KEY.js
 reports what's missing, with a fix for each failed check.
 
 Optional per-campaign config for the new tools: `negatives` (`protect`, `out_of_area`, `competitor_brands`, `home_state`, `llm_command`) and `landing` (`towns`); top-level `intel_config` points at your AdRails Intel tenant file (see `adsops/intel/README.md`).
+
+## Technical SEO site audit (0.11)
+
+An agent says "audit this site" and gets the table a senior technical SEO would hand over. Read-only: GET requests only, nothing is
+ever written to the site. Playbook for the agent: `adsops_playbook` name=`seo-audit`.
+
+| Tool | What it does |
+| --- | --- |
+| `seo_audit_run` | Crawl one site (Googlebot user-agent by default, configurable; sitemap seeding; robots.txt honoured, also on every redirect hop; redirect chains recorded; same host and its www twin only; 1 request/second, 200 pages by default, 2,000 max), group pages by URL template, run every check, store the run and diff it against the previous one. Optional `render=true` (JS render parity in a sandboxed Chromium, needs `pip install adrails[render]`), `lighthouse=true` (one page per template with a local `lighthouse` CLI, or the PageSpeed API with your key), `gsc=true` (Search Console URL Inspection and clicks). |
+| `seo_audit_issues` | The stored issue table as JSON, Markdown or CSV, filtered by priority or issue code, plus the schema coverage matrix (template x type). |
+| `seo_audit_diff` | New and fixed issues between two runs, and regressions: new noindex, pages that stopped being indexable, broken canonicals, lost internal links, LCP jumps, pages now erroring or gone. |
+| `seo_gsc_exclusions` | Search Console's view of a stored run: which pages Google excluded and why (coverage state, Google-selected canonical), next to what the crawl says about each page. |
+
+What the checks cover: http to https and www consolidation; a true 404 test; robots.txt for Googlebot and Bingbot and its Sitemap line;
+the sitemap against the crawl (non-indexable URLs in the sitemap, indexable pages missing from it, orphans); the share of indexable pages;
+internal links to redirects, errors and http; titles, meta descriptions and H1s (missing, duplicate, too long, multiple);
+near-duplicates (5-word shingles) and thin pages; canonical and noindex errors, including near-duplicate pairs that are both
+self-canonical; hreflang return links and codes; missing doctype and html lang; click depth; internal PageRank, pages with three or fewer
+internal links (hubs first) and templates that hard-code the same sibling link; empty and generic anchors; nofollow internal links;
+**internal links carrying utm_ or click-id parameters** (they overwrite the real traffic source, so ad conversions get mis-credited);
+an **ad landing-page guard** over the final URLs in your Google Ads and ChatGPT Ads state files (non-200, noindex, canonical elsewhere,
+indexable copies of organic pages, organic link equity flowing into noindex ad pages); schema coverage per template; HSTS and security
+headers. With `lighthouse=true`: LCP per template, the LCP element, and whether the preloaded image is the LCP image.
+
+Safety: public addresses only, checked once per hop and the connection pinned to that address (no DNS rebinding), default ports only,
+3 MB and a deadline per response, a wall-clock limit per crawl, no execution of fetched content (the optional browser runs in a child
+process with a time limit, WebSockets and non-GET requests refused). Runs are stored in `seo-audits/<host>/` beside your audit log
+(`seo_audit_dir` overrides), newest 30 per site, mode 0600. CLI: `adsops-mcp site-audit --url https://example.com/ [--max-pages N]
+[--render] [--lighthouse] [--gsc] [--format md|json|csv]`.
+
+Limits: without `render=true` no JavaScript runs; the crawl reaches only linked or sitemap-listed pages within `max_pages`;
+near-duplicates are compared across up to 600 indexable pages; Lighthouse is one lab run per template, not field data.
 
 ## The policy file
 

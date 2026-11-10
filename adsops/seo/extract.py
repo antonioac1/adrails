@@ -108,9 +108,12 @@ def strip_tracking(url):
         return url if isinstance(url, str) else ""
     try:
         u = urllib.parse.urlsplit(url)
-        keep = [(k, v) for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)
-                if not (k.lower().startswith("utm_") or k.lower() in TRACKING_PARAMS)]
-        return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, urllib.parse.urlencode(keep), ""))
+        parts = [p for p in u.query.split("&") if p]
+        keep = [p for p in parts if not (p.split("=", 1)[0].lower().startswith("utm_")
+                                         or p.split("=", 1)[0].lower() in TRACKING_PARAMS)]
+        if len(keep) == len(parts):
+            return url                             # nothing removed: the URL stays byte-identical
+        return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, "&".join(keep), ""))
     except ValueError:
         return url
 
@@ -275,12 +278,14 @@ class _PageParser(HTMLParser):
         elif tag == "link":
             self._link(a)
         elif tag == "title":
-            if self.svg_depth == 0 and not self.has_body:
+            if self.svg_depth == 0 and self.skip_depth == 0 and not self.has_body:
                 self._title = _Buf(4000)
         elif tag == "h1":
-            self._h1 = _Buf(4000)
+            if self.skip_depth == 0:                  # <noscript>/<template> headings are not page headings
+                self._h1 = _Buf(4000)
         elif tag == "h2":
-            self.h2_count += 1
+            if self.skip_depth == 0:
+                self.h2_count += 1
         elif tag == "a":
             self._a_stack.append(self._anchor(a))
         elif tag == "img":
@@ -289,7 +294,7 @@ class _PageParser(HTMLParser):
             if a.get("poster"):
                 self.posters.append(a["poster"])
         elif tag == "script":
-            if (a.get("type") or "").strip().lower() == "application/ld+json":
+            if (a.get("type") or "").strip().lower().startswith("application/ld+json") and not closed:
                 self._ld = _Buf(BUF_CAP, sep="")
         if tag in _VOID_TAGS or closed:
             self._close_leaf(tag)
@@ -331,9 +336,10 @@ class _PageParser(HTMLParser):
         if not rels:
             return
         href = a.get("href")
-        if "canonical" in rels:
+        in_head = not self.has_body and self.skip_depth == 0       # Google ignores rel=canonical/alternate in <body>
+        if "canonical" in rels and in_head:
             self.canonicals.append(href if href is not None else "")
-        if "alternate" in rels and a.get("hreflang"):
+        if "alternate" in rels and a.get("hreflang") and in_head and len(self.hreflangs) < MAX_HREFLANG * 2:
             self.hreflangs.append([_clean(a["hreflang"]).lower(), href or ""])
         if "preload" in rels and (a.get("as") or "").strip().lower() == "image":
             src = (href or "").strip()
@@ -354,7 +360,9 @@ class _PageParser(HTMLParser):
 
     def _close_anchor(self):
         if self._a_stack:
-            self.links.append(self._a_stack.pop())
+            rec = self._a_stack.pop()
+            if len(self.links) < MAX_LINKS * 2:           # collection-time cap: no memory blow-up on hostile pages
+                self.links.append(rec)
 
     def _img(self, a):
         alt = a.get("alt")
@@ -363,6 +371,8 @@ class _PageParser(HTMLParser):
                 self._h1.add(" " + alt + " ")
             if self._a_stack:
                 self._a_stack[-1]["alt"].add(" " + alt + " ")
+        if len(self.images) >= MAX_IMAGES:
+            return
         self.images.append({"src": a.get("src") or "", "alt": alt, "width": a.get("width"),
                             "height": a.get("height"), "loading": a.get("loading")})
 
@@ -699,4 +709,13 @@ def selftest():
         except Exception:
             ok = False
         chk(ok, "hostile input still yields a full document")
+    d = parse("<html><head><title>T</title><link rel=canonical href=/a>"
+              "<script type='application/ld+json; charset=utf-8'>{\"@type\":\"Service\"}</script></head>"
+              "<body><noscript><h1>Enable JS</h1><title>NOJS</title></noscript><h1>Real</h1>"
+              "<link rel=canonical href=/b></body></html>", "https://x.com/")
+    chk(d["h1"] == ["Real"] and d["titles"] == ["T"], "noscript headings/titles are not page headings")
+    chk(d["canonicals"] == ["https://x.com/a"], "a canonical in <body> is ignored, as Google does")
+    chk(d["jsonld_types"] == ["Service"], "ld+json with a charset parameter is read")
+    chk(strip_tracking("https://x.com/s?q=a/b&utm_x=1") == "https://x.com/s?q=a/b"
+        and strip_tracking("https://x.com/s?q=a%2Bc") == "https://x.com/s?q=a%2Bc", "strip_tracking never re-encodes")
     return n

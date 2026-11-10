@@ -351,6 +351,9 @@ def diff(prev, cur, lcp_jump_ms=500, lcp_jump_ratio=0.2, inlink_drop_ratio=0.5):
     regressions.sort(key=lambda reg: (reg["kind"], reg["url"]))
     return {
         "previous": _run_id_of(prev),
+        "note": ("the two runs used different AdRails versions (%s -> %s): a fixed or new row can come from the checks, not the site"
+                 % (prev.get("adrails_version"), cur.get("adrails_version"))
+                 if isinstance(prev, dict) and prev.get("adrails_version") != cur.get("adrails_version") else None),
         "current": _run_id_of(cur),
         "new": new_items[:MAX_DIFF],
         "fixed": fixed_items[:MAX_DIFF],

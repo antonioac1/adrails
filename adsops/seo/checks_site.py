@@ -182,6 +182,14 @@ def _lookup(pages, index, url):
     return index.get(url) or index.get(_nofrag(url))
 
 
+def _plain_file(page):
+    """A 200 non-HTML file (llms.txt, PDF) that answers directly: fine in a sitemap, nothing to index-check."""
+    ctype = _text(page.get("ctype"), 100).split(";")[0].strip().lower()
+    return (_int(page.get("status"), 0) == 200 and page.get("final") in (None, page.get("url"))
+            and ctype not in ("text/html", "application/xhtml+xml", "")
+            and "noindex" not in _headers(page).get("x-robots-tag", "").lower())
+
+
 def _statuses(hops):
     """The status code of every hop of a chain."""
     return [_int(h[1]) for h in hops]
@@ -287,7 +295,7 @@ def run(crawl):
         bad, reasons = [], []
         for url in sm_urls:
             page = _lookup(pages, index, url)
-            if page is None or is_indexable(page):
+            if page is None or is_indexable(page) or _plain_file(page):
                 continue
             bad.append(url)
             reasons.append([url, _text(why_not_indexable(page), 200)])
@@ -316,7 +324,7 @@ def run(crawl):
         for url in (sm_urls if not _dict(crawl.get("skipped")).get("cap_reached") else ()):   # a capped crawl
             # cannot tell an orphan from a page it simply did not reach
             page = _lookup(pages, index, url)
-            if page is None or _int(page.get("status"), 0) != 200:
+            if page is None or _int(page.get("status"), 0) != 200 or _plain_file(page):
                 continue
             if page.get("depth") is None:
                 orphans.append(url)

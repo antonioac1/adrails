@@ -192,7 +192,7 @@ def pick_pages(crawl, per_template=1, max_pages=10):
             continue
         by_template.setdefault(tpl, []).append((_depth_key(page), url))
     ordered = []
-    for tpl in sorted(by_template, key=lambda t: (t != "home", t)):
+    for tpl in sorted(by_template, key=lambda t: (t != "home", -len(by_template[t]), t)):   # home, then biggest templates
         for _, url in sorted(by_template[tpl])[:per]:
             ordered.append(url)
         if len(ordered) >= cap:

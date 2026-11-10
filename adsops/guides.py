@@ -49,7 +49,8 @@ def register(srv, ctx, cfg):
     @srv.tool("adsops_playbook", "The tested strategy behind AdRails, written for you (the agent) to execute: 'aeo' (getting the "
               "business recommended by ChatGPT, Perplexity, Gemini and Google AI answers), 'local-leads' (speed-to-lead, Local Services Ads, "
               "reviews, follow-up), 'google-business-profile' (to 100% and kept there), 'google-ads' (Search ads: tracking honesty, "
-              "negatives, landing pages, caps, when to stop) and 'chatgpt-ads' (ChatGPT Ads: drafts, creative, attribution, the guard). "
+              "negatives, landing pages, caps, when to stop), 'chatgpt-ads' (ChatGPT Ads: drafts, creative, attribution, the guard) "
+              "and 'seo-audit' (technical SEO site audit: run, read the table in order, Search Console, prove the fixes held). "
               "Each step names the AdRails tool that does it and a done-check. No name = list; section = one part only.",
               {"type": "object", "properties": {"name": {"type": "string"}, "section": {"type": "string"}},
                "required": [], "additionalProperties": False})
@@ -82,5 +83,5 @@ def selftest():
     except Exception as e:
         assert "sections:" in str(e); n += 1
     shipped = {p["name"] for p in available()}
-    assert {"aeo", "local-leads", "google-business-profile", "google-ads", "chatgpt-ads"} <= shipped, "shipped playbooks missing: %s" % shipped; n += 1
+    assert {"aeo", "local-leads", "google-business-profile", "google-ads", "chatgpt-ads", "seo-audit"} <= shipped, "shipped playbooks missing: %s" % shipped; n += 1
     return n
