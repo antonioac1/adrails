@@ -350,6 +350,8 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     metrics_tools.register(srv, ctx, cfg)     # 0.10 measurement loop: metrics_pull, metrics, search_console, impact
     from adsops import seo_tools
     seo_tools.register(srv, ctx, cfg)         # 0.11 technical SEO site audit: seo_audit_run/issues/diff, seo_gsc_exclusions
+    from adsops import content_tools
+    content_tools.register(srv, ctx, cfg)     # 0.12 guarded content pipeline: seo_content_* (plan/draft/review/bundle/publish/...)
 
     @srv.tool("adsops_update_check", "Is a newer AdRails out? Returns the running and latest versions, the release notes link and "
               "the one command that upgrades (owner's OK first). Checks PyPI at most once a day (cached); sends no account or usage "
@@ -439,7 +441,7 @@ def selftest():
     assert names[:12] == ["adsops_campaigns", "adsops_status", "adsops_terms", "adsops_plan", "adsops_apply",
                      "adsops_set", "adsops_guard", "adsops_usage", "adsops_negatives_suggest", "adsops_competitors_report",
                      "adsops_auction_insights_import", "adsops_lp_diagnose"], names; n += 1
-    assert len(names) == 75 and all(t in names for t in ("seo_audit_run", "seo_audit_issues", "seo_audit_diff", "seo_gsc_exclusions")) and "adsops_impact" in names and "adsops_search_console" in names and "adsops_paid" in names and "adsops_gbp" in names and "adsops_results" in names and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
+    assert len(names) == 83 and all(t in names for t in ("seo_audit_run", "seo_audit_issues", "seo_audit_diff", "seo_gsc_exclusions", "seo_content_plan", "seo_content_draft", "seo_content_review", "seo_content_bundle", "seo_content_publish", "seo_content_results", "seo_content_lessons", "seo_content_facts")) and "adsops_impact" in names and "adsops_search_console" in names and "adsops_paid" in names and "adsops_gbp" in names and "adsops_results" in names and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
     assert call("adsops_campaigns")["structuredContent"]["campaigns"][0]["key"] == "c42"; n += 1
     assert call("adsops_status", {"campaign": "nope"})["isError"]; n += 1
     st = call("adsops_status", {"campaign": "c42"})["structuredContent"]
