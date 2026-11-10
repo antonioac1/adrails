@@ -51,6 +51,7 @@ DEFAULT_DUP = {"jaccard": 0.30, "containment": 0.50}
 MODES = ("new", "extend")
 CONTENT_TYPES = ("answer-extension", "guide", "faq", "comparison")
 
+_SUPER_RE = re.compile(r"(?<![\w#])(?:#\s?1|no\.?\s?1|number[\s-]+one)(?![\w])", re.I)   # PM (GLM checks #15)
 SUPERLATIVES = ("best", "#1", "number one", "leading", "top-rated", "top rated", "premier", "unmatched", "unbeatable",
                 "guaranteed", "guarantee", "most trusted", "highest rated", "world-class")
 
@@ -58,6 +59,8 @@ SUPERLATIVES = ("best", "#1", "number one", "leading", "top-rated", "top rated",
 _SLUG_RE = re.compile(r"\A/[a-z0-9/-]{1,120}/\Z")
 _FENCE_RE = re.compile(r"```.*?```", re.S)
 _LINK_RE = re.compile(r"!?\[([^\]\n]{0,500})\]\(([^()\s]{0,2000})(?:\s+\"[^\"]{0,500}\")?\)")
+_LINK_TITLE_RE = re.compile(r"\]\([^()\s]{0,2000}\s+\"([^\"]{0,500})\"\)")
+_REFDEF_RE = re.compile(r"^[ \t]{0,3}\[[^\]\n]{1,200}\]:[ \t]*\S+", re.M)
 _HEAD_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*", re.M)
 _QUOTE_RE = re.compile(r"^[ \t]{0,3}>[ \t]?", re.M)
 _BULLET_RE = re.compile(r"^[ \t]{0,3}(?:[-+*]|\d{1,3}[.)])[ \t]+", re.M)
@@ -175,7 +178,7 @@ def strip_markdown(md):
     s = _text(md, MAX_BODY + 100_000)
     if not s:
         return ""
-    s = _FENCE_RE.sub(" ", s)
+    s = _FENCE_RE.sub(lambda m: " " + m.group(0).strip("`") + " ", s)   # PM (GLM checks #1): fence content is visible
     s = html_mod.unescape(s)                    # PM (GLM #5): "Chea&#112;est" renders as "Cheapest"
     s = _LINK_RE.sub(lambda m: m.group(1), s)
     s = _HEAD_RE.sub("", s)
@@ -214,7 +217,9 @@ def visible_text(draft):
         if isinstance(item, dict):
             parts.append(_text(item.get("anchor"), 300))
     parts.extend(_jsonld_values(draft.get("jsonld")))   # PM (GLM #4): JSON-LD prices/ratings/claims are traced too
-    return "\n".join(_text(p, 20000) for p in parts if p)[:MAX_TEXT]
+    for m in _LINK_TITLE_RE.finditer(_text(draft.get("body_md"), MAX_BODY + 100_000)):   # link tooltips are visible too
+        parts.append(m.group(1))
+    return html_mod.unescape("\n".join(_text(p, 20000) for p in parts if p))
 
 
 def _jsonld_values(obj, depth=0, out=None):
@@ -487,7 +492,21 @@ def _run(draft, ctx, err, warn, stats):
     mode, slug, body = d["mode"], d["slug"], d["body"]
 
     visible = visible_text(draft)
-    live_text = _text(_mdict(ctx).get("live_text"), MAX_TEXT)
+    if len(visible) > MAX_TEXT:                  # PM (GLM checks #8): never check a silently truncated text
+        err("SCHEMA", "the draft's visible text is longer than {} characters".format(MAX_TEXT))
+        return
+    raw_live = _mdict(ctx).get("live_text")
+    if isinstance(raw_live, str) and len(raw_live) > MAX_TEXT:
+        err("SCHEMA", "the live page text is longer than {} characters; it cannot be compared safely".format(MAX_TEXT))
+        return
+    if len(_mlist(draft.get("live_changes"))) > MAX_LIST or len(_mlist(draft.get("internal_links"))) > MAX_LIST:
+        err("SCHEMA", "too many live_changes or internal_links")
+        return
+    if re.search(r"\]\(\s*<?\s*(?:javascript|data|vbscript|file):", _text(draft.get("body_md"), MAX_BODY + 100_000), re.I):
+        err("INTERNAL_LINK", "a link uses a javascript:, data:, vbscript: or file: target")
+    if _REFDEF_RE.search(_text(draft.get("body_md"), MAX_BODY + 100_000)):
+        err("INTERNAL_LINK", "reference-style link definitions ([x]: url) are not allowed; use inline links")
+    live_text = _text(raw_live, MAX_TEXT)
     live_norm = numbers.norm(live_text)
 
     # 2/3. text-under-rule: in extend mode the legacy wording of the live page is not re-ruled.
@@ -532,6 +551,16 @@ def _run(draft, ctx, err, warn, stats):
         if m:
             err("COMPETITOR", 'the competitor "{}" is named: "{}"'
                 .format(_clip(name, 80), _snippet(low, m.start(), m.end())))
+    folded = re.sub(r"[^a-z0-9]+", " ", low)    # PM (GLM checks #14): "Acme-PM", "guaranteed-returns"
+    for code, items in (("BANNED_PHRASE", cfg["banned_phrases"]), ("COMPETITOR", cfg["competitors"]),
+                        ("EXCLUDED_AREA", cfg["excluded_areas"])):
+        for item in items:
+            f_item = re.sub(r"[^a-z0-9]+", " ", numbers.norm(item)).strip()
+            if f_item and re.search(r"(?<![a-z0-9])" + re.escape(f_item) + r"(?![a-z0-9])", folded):
+                err(code, '"{}" appears in the draft (punctuation ignored)'.format(_clip(item, 120)))
+    m = _SUPER_RE.search(low_text)
+    if m:
+        err("SUPERLATIVE", 'the superlative "{}" is not allowed'.format(_clip(m.group(0), 40)))
     for word in SUPERLATIVES:                   # our own words only: an official quote may say "best practice"
         m = _phrase_re(word).search(low_text)
         if m:
@@ -549,8 +578,8 @@ def _run(draft, ctx, err, warn, stats):
         err("RAW_HTML", 'raw HTML is not allowed in the body: "{}"'.format(_snippet(under, m.start(), m.end())))
 
     # 4. duplicate + corpus completeness -----------------------------------------------------------------
-    text_norm = numbers.norm(strip_markdown(body))
-    draft_sh = _shingles(text_norm)
+    draft_sh = _shingles(numbers.norm(strip_markdown(body)))           # the page body
+    vis_sh = _shingles(numbers.norm(visible))   # PM (GLM checks #17): FAQ/title/description count for duplicates too
     corpus = _mdict(_mdict(ctx).get("corpus"))
     if _mdict(ctx).get("corpus_complete") is not True:
         err("CORPUS_INCOMPLETE", "the site corpus was not fetched completely, so duplicates cannot be ruled out")
@@ -563,11 +592,15 @@ def _run(draft, ctx, err, warn, stats):
         page_url = _text(url, 2000)
         if not page_url or _url_key(page_url) in own:
             continue
+        if isinstance(page_text, str) and len(page_text) > MAX_TEXT:      # PM (GLM checks #18): fail closed
+            err("CORPUS_INCOMPLETE", '"{}" is longer than {} characters and cannot be compared'.format(
+                _clip(page_url, 200), MAX_TEXT))
+            continue
         page_sh = _shingles(numbers.norm(_text(page_text, MAX_TEXT)))
         if not page_sh or not draft_sh:
             continue
-        jac = _jaccard(draft_sh, page_sh)
-        con = _containment(draft_sh, page_sh)
+        jac = max(_jaccard(draft_sh, page_sh), _jaccard(vis_sh, page_sh))
+        con = max(_containment(draft_sh, page_sh), _containment(vis_sh, page_sh))
         worst = max(worst, jac)
         top.append({"url": page_url, "jaccard": round(jac, 4), "containment": round(con, 4)})
         if jac > cfg["max_jaccard"] or con > cfg["max_containment"]:
@@ -598,7 +631,9 @@ def _run(draft, ctx, err, warn, stats):
         if live_sh and retention < cfg["min_retention"]:
             err("RETENTION", "only {:.0%} of the current page text survives; at least {:.0%} must be kept"
                 .format(retention, cfg["min_retention"]))
-        new_norm = numbers.norm(visible)
+        # PM (GLM checks #16): a live sentence moved into the description or an anchor is still removed from the page
+        new_norm = numbers.norm("\n".join([strip_markdown(body)] + [_text(f.get("q"), 1000) + "\n" + _text(f.get("a"), 4000)
+                                                                    for f in _mlist(draft.get("faq")) if isinstance(f, dict)]))
         changed = []
         for sentence in numbers.sentences(strip_markdown(live_text)):
             key = numbers.norm(sentence).strip(' .!?,;:"()[]\'-\u2019')
@@ -662,8 +697,20 @@ def _run(draft, ctx, err, warn, stats):
     if len(links) > MAX_LINKS:
         err("INTERNAL_LINK", "the body has {} links; the limit is {}".format(len(links), MAX_LINKS))
     for link in links[:MAX_LINKS]:
+        tgt = link["target"].strip()
+        low_t = tgt.lower()
+        scheme = low_t.split(":", 1)[0] if ":" in low_t.split("/", 1)[0] else ""
+        bad = (scheme not in ("", "http", "https")) or (low_t.startswith("//") and _internal_target(tgt, cfg["site"]) is None)
+        if bad:                                  # PM (GLM checks #3/#4): javascript:, data:, //other-host
+            err("INTERNAL_LINK", '"{}" uses a link target that is not allowed: "{}"'.format(_clip(link["text"], 80),
+                                                                                         _clip(tgt, 120)))
+            continue
         path = _internal_target(link["target"], cfg["site"])
         if path is None:
+            host = (urlsplit(tgt).hostname or "").lower() if low_t.startswith(("http://", "https://")) else ""
+            if host and not _host_allowed(host, cfg["allowed_source_domains"]):   # PM (GLM checks #3/#4)
+                err("INTERNAL_LINK", '"{}" links to {}, which is not the site or an allowed source domain'.format(
+                    _clip(link["text"], 80), _clip(host, 120)))
             continue
         norm = _norm_path(path)
         if norm and norm not in known:
@@ -689,7 +736,13 @@ def _run(draft, ctx, err, warn, stats):
         elif not _host_allowed(host, cfg["allowed_source_domains"]):
             err("SOURCE_DOMAIN", 'the source host "{}" is not an allowed source domain'
                 .format(_clip(host or source["url"], 200)))
-    if d["sources"] and not _strings(_mdict(ctx).get("verified_quotes"), MAX_TEXT // 4):
+    vq = [numbers.norm(q) for q in _strings(_mdict(ctx).get("verified_quotes"), MAX_TEXT // 4)]
+    for source in d["sources"]:                  # PM (GLM checks #19): every cited quote must be one that was verified
+        qn = numbers.norm(source.get("quote"))
+        if vq and qn and not any(qn == v or qn in v for v in vq):
+            err("QUOTE_NOT_FOUND", 'the quote cited for "{}" was not verified against the fetched source'.format(
+                _clip(source["url"], 200)))
+    if d["sources"] and not vq:
         err("SOURCES_INCOMPLETE", "the draft cites {} sources but none of them was verified against the fetched page"
             .format(len(d["sources"])))
 
@@ -951,8 +1004,21 @@ def selftest() -> int:
         "a link to a known path passes")
     chk("INTERNAL_LINK" in codes(run(draft(internal_links=[{"from": "/nowhere/", "anchor": "x"}]), ctx())),
         "an internal_links.from that does not exist fails")
-    chk("INTERNAL_LINK" not in codes(run(draft(body_md=body + " See [them](https://other.example/x)."), ctx())),
-        "an external link is not an internal link problem")
+    chk("INTERNAL_LINK" in codes(run(draft(body_md=body + " See [them](https://other.example/x)."), ctx())),
+        "an external link to a non-allowed domain fails (GLM checks #4)")
+    chk("INTERNAL_LINK" not in codes(run(draft(body_md=body + " See [the IRS](https://www.irs.gov/x)."), ctx())),
+        "an external link to an allowed source domain is fine")
+    for bad_t in ("javascript:alert(1)", "data:text/html;base64,PHM+", "//acme-pm.com/fees"):
+        chk("INTERNAL_LINK" in codes(run(draft(body_md=body + " [x](%s)" % bad_t), ctx())), "link target %s refused" % bad_t)
+    chk("INTERNAL_LINK" in codes(run(draft(body_md=body + "\n\n[f]: https://acme.example/\n"), ctx())),
+        "reference-style link definitions refused")
+    chk("SUPERLATIVE" in codes(run(draft(body_md=body + " We are the No. 1 team."), ctx())), "No. 1 is a superlative")
+    chk("COMPETITOR" in codes(run(draft(body_md=body + " Unlike Acme-PM we answer."), ctx())), "hyphenated competitor")
+    chk("UNTRACED_NUMBER" in codes(run(draft(body_md=body + "\n\n```\n68% of owners renew\n```\n"), ctx())),
+        "numbers inside fenced code are checked (GLM checks #1)")
+    chk("QUOTE_NOT_FOUND" in codes(run(draft(sources=[{"url": "https://www.irs.gov/x", "quote": quote},
+                                                      {"url": "https://www.irs.gov/x", "quote": "68% of owners renew"}]),
+                                       ctx())), "a cited quote that was not verified fails (GLM checks #19)")
 
     # sources --------------------------------------------------------------------------------------------
     chk("SOURCE_DOMAIN" in codes(run(draft(sources=[{"url": "https://spam.example.net/x", "quote": quote}]), ctx())),

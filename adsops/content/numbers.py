@@ -190,6 +190,9 @@ def _clip(text, limit=MAX_SENTENCE):
     return cut + "…"
 
 
+_SCALED_AFTER = re.compile(r"(?:[kmb](?![a-z]))|\s+(?:thousand|million|billion|trillion|grand)\b")
+
+
 def _scan(prepared):
     """-> list of number-token dicts found in prepared text (capped at MAX_LIST)."""
     items = []
@@ -197,15 +200,24 @@ def _scan(prepared):
         return items
     for m in _NUM_RE.finditer(prepared):
         token = m.group(0)
-        if len(token) > MAX_TOKEN:
+        if len(token) > MAX_TOKEN:                    # PM (GLM checks #23): never skipped silently
+            items.append({"tok": token[:MAX_TOKEN], "val": "TOO_LONG:" + token[:20], "start": m.start(), "end": m.end(),
+                          "money": True, "pct": False, "scaled": True, "year_ok": False})
             continue
         value = _value(token)
         if not value:
             continue
-        nxt = prepared[m.end():m.end() + 2]
+        nxt = prepared[m.end():m.end() + 24].lower()
+        prev = prepared[max(0, m.start() - 1):m.start()]
         items.append({"tok": token, "val": value, "start": m.start(), "end": m.end(),
-                      "money": token.startswith("$"), "pct": token.endswith("%"),
-                      "scaled": bool(re.match(r"[kKmMbB](?![a-zA-Z])", nxt))})   # PM: "5k owners" is not a small number
+                      # PM (GLM checks #11): "9 dollars", "2 grand" are money even without "$"
+                      "money": token.startswith("$") or bool(_MONEY_AFTER.match(nxt)),
+                      # PM (GLM checks #10): "1/3", the 3 after a slash
+                      "pct": token.endswith("%") or prev in ("/", "\u2044") or bool(re.match(r"\s*[/\u2044]\s*\d", nxt)),
+                      # "5k owners", "3 million in damages" are not small numbers (GLM checks #9)
+                      "scaled": bool(_SCALED_AFTER.match(nxt)),
+                      # PM (GLM checks #6): only a bare 4-digit token can be a free year ("2,026 homes" cannot)
+                      "year_ok": bool(re.fullmatch(r"\d{4}", token))})
         if len(items) >= MAX_SCAN:
             break
     return items
@@ -218,6 +230,20 @@ def _is_statistic(prepared, end):
         return False
     return bool(_PCT_AFTER.match(after) or _OUT_AFTER.match(after) or _OF_EVERY_AFTER.match(after)
                 or _IN_NUM_AFTER.match(after) or _RANGE_AFTER.match(after))
+
+
+def _allowed_kinds(allowed_text):
+    """PM (GLM checks #12): which values appear as a percentage in the allowed text, so "149%" is not traced by "$149"."""
+    if isinstance(allowed_text, (list, tuple, set, frozenset)):
+        joined = " ".join(_text(x, MAX_TEXT // 8) for x in list(allowed_text)[:MAX_SCAN])
+    else:
+        joined = _text(allowed_text)
+    prepared = _prepare(joined)
+    pct = set()
+    for it in _scan(prepared):
+        if it["pct"] or _is_statistic(prepared, it["end"]):
+            pct.add(it["val"])
+    return pct
 
 
 def _allowed_numbers(allowed_text):
@@ -281,6 +307,7 @@ def trace(text, allowed_text="", small_max=DEFAULT_SMALL_MAX, years=None):
     if len(raw) > MAX_TEXT:     # PM: fail closed - text past the cap would otherwise go untraced
         return [{"code": "UNTRACED_NUMBER", "msg": "text is longer than %d characters; refused untraced" % MAX_TEXT}]
     allowed = _allowed_numbers(allowed_text)
+    allowed_pct = _allowed_kinds(allowed_text)
     small = _small(small_max)
     window = _years(years)
     prepared = _prepare(text)
@@ -295,13 +322,13 @@ def trace(text, allowed_text="", small_max=DEFAULT_SMALL_MAX, years=None):
     errors = []
     for item in items:
         value = item["val"]
-        if value in allowed:
-            continue
         statistic = item["pct"] or _is_statistic(prepared, item["end"])
+        if value in allowed and (not statistic or value in allowed_pct):
+            continue
         if not item["money"] and not statistic and not item["scaled"]:
             if _BARE_INT_RE.match(value) and int(value) <= small:
                 continue
-            if _YEAR_RE.match(value) and window[0] <= int(value) <= window[1]:
+            if item.get("year_ok") and _YEAR_RE.match(value) and window[0] <= int(value) <= window[1]:
                 continue
         sentence = _sentence_for(prepared, spans, starts, item["start"])
         key = (value, sentence)
@@ -338,6 +365,10 @@ def _marker(phrase, after):
     return None
 
 
+_MULT_RE = re.compile(r"\b(?:twice|thrice|double|triple|quadruple|half)\s+(?:as\s+(?:many|much|likely|fast|long)|the\s+"
+                      r"(?:average|rate|number|amount|price|rent|cost))\b", re.I)   # PM (GLM checks #13)
+
+
 def word_statistics(text):
     """Flag spelled-out numbers used as statistics, money or counts ("forty percent", "one in five owners",
     "nine out of ten", "two hundred dollars", "a dozen properties", "thousands of clients", "half of all landlords").
@@ -349,6 +380,9 @@ def word_statistics(text):
         return []
     low = prepared.lower()
     errors = []
+    for m in _MULT_RE.finditer(low):
+        errors.append({"code": "WORD_STATISTIC", "msg": scrub('"%s" is a comparison statistic in words; state it from a '
+                                                              'source or drop it.' % _clip(prepared[m.start():m.end() + 40]), 400)})
     covered_to = 0
     for m in _NUMWORD_RE.finditer(low):
         start, end = m.start(), m.end()
@@ -488,4 +522,12 @@ def selftest() -> int:
     chk(numbers_in("\uff16\uff18") == ["68"], "fullwidth digits read as ASCII")
     chk(len(trace("we cut costs 5-10% for owners")) == 2, "both ends of a percent range are statistics")
     chk(norm("com\u00adpetitor") == "competitor", "soft hyphen dropped, not turned into a dash")
+    chk(len(trace("we manage 2,026 homes")) == 1 and trace("since 2026 we have grown") == [], "comma year is a count")
+    chk(len(trace("repairs cost 3 million in damages")) == 1, "3 million is not a small number")
+    chk(len(trace("about 1/3 of owners renew")) >= 1, "slash fraction is a statistic")
+    chk(len(trace("it adds 9 dollars a month")) == 1, "9 dollars is money")
+    chk(len(trace("owners keep 149% more", "Management is $149 per month.")) == 1, "a $149 fact does not trace 149%")
+    chk(trace("vacancy fell 5%", "vacancy fell 5% last year") == [], "a quoted percent traces the same percent")
+    chk(len(word_statistics("twice as many owners renew")) == 1, "twice as many is a word statistic")
+    chk(len(trace("x" + "9" * 50 + " homes")) >= 0 and len(trace("we have " + "9" * 50 + " homes")) == 1, "41+ digit token is flagged")
     return n
