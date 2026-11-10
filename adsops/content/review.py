@@ -69,6 +69,8 @@ def build_prompt(draft, ctx, lessons_text="", findings=None):
     parts.append(_block("SITE_RULES", {"banned_phrases": rul.get("banned_phrases", []),
                                         "excluded_areas": rul.get("excluded_areas", []),
                                         "never_name_competitors": rul.get("competitors", []),
+                                        "max_live_sentence_changes": ((ctx.get("profile") or {}).get("extend") or {}).get(
+                                            "max_changed_sentences", 3),
                                         "author": (ctx.get("profile") or {}).get("author", {})}, nonce))
     if lessons_text:
         parts.append(_block("LESSONS", lessons_text[:4000], nonce))

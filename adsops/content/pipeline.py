@@ -293,6 +293,33 @@ def check(d, ctx):
     return res
 
 
+def _quote_hints(d, refs, limit=6):
+    """For every cited quote that is not verbatim in its source, the closest sentence of that source, so the fix round
+    can copy it exactly (or drop the quote). Plain data for the writer; the check itself is unchanged."""
+    from . import numbers
+    out = []
+    for i, src in enumerate((d.get("sources") or [])[:40]):
+        if not isinstance(src, dict):
+            continue
+        rec = refs.get(src.get("url")) or {}
+        text, quote = rec.get("text") or "", src.get("quote") or ""
+        if not text or not quote or sources_mod._norm(quote) in sources_mod._norm(text):
+            continue
+        qw = set(numbers.norm(quote).split())
+        best, score = "", 0.0
+        for sent in numbers.sentences(text)[:3000]:
+            sw = set(numbers.norm(sent).split())
+            sc = len(qw & sw) / (len(qw | sw) or 1)
+            if sc > score:
+                best, score = sent, sc
+        if best and score >= 0.4:
+            out.append("Quote %d (%s) is not verbatim in the source. The closest sentence there is: \"%s\" - copy it "
+                       "exactly, character for character, or drop the quote." % (i, src.get("url"), best[:500]))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _merge_source_errors(res, qerr, errs):
     for e in qerr:
         res["errors"].append({"code": e["code"], "msg": e["msg"]})
@@ -382,7 +409,7 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None, re
             fix, prev = ["REVIEWER (%s): %s | quote: %s" % (f.get("severity"), f.get("issue"), f.get("quote"))
                          for f in revise.get("findings") or []][:40], revise.get("draft")
         else:
-            fix = [e["msg"] for e in chk_res["errors"]] if chk_res else None
+            fix = ([e["msg"] for e in chk_res["errors"]] + _quote_hints(prev or {}, refs)) if chk_res else None
         prompt = _writer_prompt(profile, facts, candidate, ctx, refs, lessons_text, fix=fix, prev=prev)
         chain = ws if writer_rep is None else ws[[b["name"] for b in ws].index(writer_rep["backend"]):]
         try:
@@ -613,4 +640,9 @@ def selftest() -> int:
     s = _slim({"stage": "draft", "ok": False, "errors": [{"code": "UNTRACED_NUMBER", "msg": "x"}],
                "attempts": [{"backend": "glm", "ok": True, "text": "SECRET DRAFT"}]})
     ck(s["error_codes"] == ["UNTRACED_NUMBER"] and "text" not in json.dumps(s["attempts"]), "run log is slim")
+    refs = {"u": {"text": "Most people pay on time, which means they keep their deposit. Other words here entirely."}}
+    h = _quote_hints({"sources": [{"url": "u", "quote": "Most people pay on time, which means that they keep the deposit"}]},
+                     refs)
+    ck(len(h) == 1 and "Most people pay on time, which means they keep their deposit." in h[0], "quote hint = closest sentence")
+    ck(_quote_hints({"sources": [{"url": "u", "quote": "Most people pay on time"}]}, refs) == [], "verbatim quote: no hint")
     return n
