@@ -98,7 +98,7 @@ Not yet. The adapter is in development; it will use the same plan, validate and 
 ## Testing
 
 ```bash
-python3 -m adsops --selftest           # 4,389 checks, everything mocked (site audit + content pipeline run against loopback fixtures)
+python3 -m adsops --selftest           # 4,415 checks, everything mocked (site audit + content pipeline run against loopback fixtures)
 python3 tests/qa_invariants.py         # 200 random sequences against a simulated Google Ads account
 python3 tests/qa_inputs.py             # hostile policy/state/config inputs (NaN, Infinity, bad dates, bad UTF-8, ...)
 python3 tests/qa_secrets.py            # canary tokens injected everywhere; none may reach output or logs
