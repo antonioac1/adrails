@@ -482,7 +482,7 @@ def _schema(draft, cfg, err):
             "links": links, "jsonld": jsonld, "title": title, "description": description, "ctype": ctype}
 
 
-def _run(draft, ctx, err, warn, stats):
+def _run(draft, ctx, err, warn, stats, errors_so_far=lambda: []):
     """The ten checks. Reports through err()/warn() and fills `stats`."""
     cfg = _cfg(ctx)
     if not isinstance(draft, dict):
@@ -556,7 +556,8 @@ def _run(draft, ctx, err, warn, stats):
                         ("EXCLUDED_AREA", cfg["excluded_areas"])):
         for item in items:
             f_item = re.sub(r"[^a-z0-9]+", " ", numbers.norm(item)).strip()
-            if f_item and re.search(r"(?<![a-z0-9])" + re.escape(f_item) + r"(?![a-z0-9])", folded):
+            already = any(e["code"] == code and _clip(numbers.norm(item), 120) in e["msg"].lower() for e in errors_so_far())
+            if f_item and not already and re.search(r"(?<![a-z0-9])" + re.escape(f_item) + r"(?![a-z0-9])", folded):
                 err(code, '"{}" appears in the draft (punctuation ignored)'.format(_clip(item, 120)))
     m = _SUPER_RE.search(low_text)
     if m:
@@ -793,7 +794,7 @@ def run(draft, ctx):
             warnings.append({"code": code, "msg": scrub(msg, MSG)})
 
     try:
-        _run(draft, ctx, err, warn, stats)
+        _run(draft, ctx, err, warn, stats, lambda: errors)
     except Exception as exc:                      # a check must never crash a pipeline
         err("SCHEMA", "the draft could not be checked ({}); it is not approved".format(type(exc).__name__))
     return {"ok": not errors, "errors": errors, "warnings": warnings, "stats": stats}
