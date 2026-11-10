@@ -36,9 +36,13 @@ _CHARSET = re.compile(r"charset=[\"']?([A-Za-z0-9_\-]+)", re.I)
 def check_url(url, allow_private=False, resolver=socket.getaddrinfo):
     """-> (scheme, host, port, path_with_query, pinned_ip). ToolError when the URL may not be fetched."""
     from adsops.aeo_tools import public_addresses
-    if not isinstance(url, str) or len(url) > 4096 or any(c in url for c in "\r\n\t\x00 "):
+    if not isinstance(url, str) or not url or len(url) > 4096 or any(ord(c) < 0x21 or ord(c) == 0x7f for c in url):
         raise ToolError("URL is empty, too long or contains whitespace/control characters")
-    u = urllib.parse.urlsplit(url)
+    try:
+        u = urllib.parse.urlsplit(url)
+        u.hostname, u.port                               # both raise ValueError on malformed netlocs
+    except (ValueError, UnicodeError):
+        raise ToolError("URL cannot be parsed") from None
     if u.scheme not in ("http", "https"):
         raise ToolError("only http(s) URLs can be fetched")
     if u.username is not None or u.password is not None or "@" in u.netloc:
@@ -50,7 +54,8 @@ def check_url(url, allow_private=False, resolver=socket.getaddrinfo):
         port = u.port or (443 if u.scheme == "https" else 80)
     except ValueError:
         raise ToolError("URL has an invalid port") from None
-    path = (u.path or "/") + ("?" + u.query if u.query else "")
+    path = urllib.parse.quote(u.path or "/", safe="/%:@!$&'()*+,;=~-._") + \
+        ("?" + urllib.parse.quote(u.query, safe="=&%:@!$'()*+,;/?~-._") if u.query else "")   # non-ASCII -> %XX
     if allow_private:                                    # loopback fixture tests only
         try:
             infos = resolver(host, None)
@@ -96,7 +101,8 @@ def default_connector(scheme, host, ip, port, timeout):
 
 
 def _decode_body(raw, encoding, max_bytes):
-    """Undo gzip/deflate with a hard output cap (decompression bombs stop at max_bytes). -> (bytes, truncated)."""
+    """Undo gzip/deflate with a hard output cap (decompression bombs stop at max_bytes). -> (bytes, truncated).
+    A body that cannot be decoded comes back as (b"", None): the caller reports an error instead of an empty page."""
     enc = (encoding or "").strip().lower()
     if enc in ("gzip", "x-gzip", "deflate"):
         wbits = 16 + zlib.MAX_WBITS if "gzip" in enc else zlib.MAX_WBITS
@@ -108,7 +114,7 @@ def _decode_body(raw, encoding, max_bytes):
                 d = zlib.decompressobj(-zlib.MAX_WBITS)
                 out = d.decompress(raw, max_bytes + 1)
             except zlib.error:
-                return b"", True
+                return b"", None
         return out[:max_bytes], len(out) > max_bytes or bool(d.unconsumed_tail)
     return raw[:max_bytes], len(raw) > max_bytes
 
@@ -116,9 +122,13 @@ def _decode_body(raw, encoding, max_bytes):
 def fetch(url, user_agent=GOOGLEBOT_UA, timeout=15, max_bytes=MAX_BYTES, resolver=socket.getaddrinfo,
           connector=None, allow_private=False, clock=time.monotonic, method="GET"):
     """One request, no redirect following. -> {url, status, headers{lower: str}, body (str), bytes, truncated, ms,
-    ctype, error}. status 0 = not fetched (see error)."""
+    ctype, error}. status 0 = not fetched (see error). GET or HEAD only. `timeout` applies to connect and to each read,
+    and the whole response must arrive within 3 x timeout (a server trickling bytes is cut off, error 'deadline')."""
     out = {"url": url, "status": 0, "headers": {}, "body": "", "bytes": 0, "truncated": False, "ms": 0, "ctype": "",
            "error": None}
+    if method not in ("GET", "HEAD"):
+        out["error"] = "refused: only GET and HEAD are sent"
+        return out
     try:
         scheme, host, port, path, ip = check_url(url, allow_private, resolver)
     except ToolError as e:
@@ -130,20 +140,34 @@ def fetch(url, user_agent=GOOGLEBOT_UA, timeout=15, max_bytes=MAX_BYTES, resolve
         conn = (connector or default_connector)(scheme, host, ip, port, timeout)
         default_port = 443 if scheme == "https" else 80
         conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
-        conn.putheader("Host", host if port == default_port else "%s:%d" % (host, port))
+        hhost = "[%s]" % host if ":" in host else host
+        conn.putheader("Host", hhost if port == default_port else "%s:%d" % (hhost, port))
         conn.putheader("User-Agent", user_agent)
         conn.putheader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5")
         conn.putheader("Accept-Encoding", "gzip, deflate")
         conn.putheader("Connection", "close")
         conn.endheaders()
         resp = conn.getresponse()
-        raw = resp.read(max_bytes + 1) if method != "HEAD" else b""
+        deadline = t0 + 3 * float(timeout)
+        chunks, got = [], 0
+        while method != "HEAD" and got <= max_bytes:
+            if clock() > deadline:
+                raise TimeoutError("deadline")
+            piece = resp.read(min(65536, max_bytes + 1 - got))
+            if not piece:
+                break
+            chunks.append(piece)
+            got += len(piece)
+        raw = b"".join(chunks)
         hdrs = {}
         for k, v in resp.getheaders():
             k = k.lower()
             if k in KEEP_HEADERS:
                 hdrs[k] = (hdrs[k] + ", " + v) if k in hdrs else v
         body, trunc = _decode_body(raw, hdrs.get("content-encoding"), max_bytes)
+        if trunc is None:
+            out["error"] = "content-decoding failed"
+            trunc = True
         ctype = hdrs.get("content-type", "")
         m = _CHARSET.search(ctype)
         charset = m.group(1) if m else "utf-8"
@@ -154,7 +178,7 @@ def fetch(url, user_agent=GOOGLEBOT_UA, timeout=15, max_bytes=MAX_BYTES, resolve
         out.update(status=int(resp.status), headers=hdrs, body=text, bytes=len(body),
                    truncated=trunc or len(raw) > max_bytes, ctype=ctype.split(";")[0].strip().lower())
     except (OSError, http.client.HTTPException, ssl.SSLError, ValueError) as e:
-        out["error"] = type(e).__name__
+        out["error"] = "deadline" if str(e) == "deadline" else type(e).__name__
     finally:
         out["ms"] = int((clock() - t0) * 1000)
         if conn is not None:
@@ -196,7 +220,8 @@ def selftest():
             return self._h
 
         def read(self, n):
-            return self._b[:n]
+            out, self._b = self._b[:n], self._b[n:]
+            return out
 
     class Conn:
         def __init__(self, scheme, host, ip, port, timeout, resp):
@@ -252,6 +277,24 @@ def selftest():
     r = fetch("https://a.example/", resolver=pub,
               connector=conn_for(Resp(200, [("Content-Type", "text/html; charset=bogus-cs")], b"ok")))
     ck(r["body"] == "ok", "unknown charset falls back to utf-8")
+    for bad in ("http://[::1", "https://a.example:abc/", "http://a\x1b[31m.example/", "http://a.ex\x7fample/"):
+        r = fetch(bad, resolver=pub, connector=lambda *a: (_ for _ in ()).throw(AssertionError("connected")))
+        ck(r["status"] == 0 and r["error"].startswith("refused"), f"malformed/control URL refused {bad!r}")
+    ck(fetch("https://a.example/", resolver=pub, method="POST")["error"].startswith("refused"), "only GET/HEAD")
+    r = fetch("https://a.example/caf\u00e9?q=\u00fc", resolver=pub, connector=conn_for(Resp(200, [], b"ok")))
+    ck(seen["req"] == ("GET", "/caf%C3%A9?q=%C3%BC") and r["status"] == 200, "non-ASCII path percent-encoded")
+    r = fetch("https://a.example/", resolver=pub,
+              connector=conn_for(Resp(200, [("Content-Encoding", "gzip")], b"\x1f\x8b\x08garbage-not-a-gzip-stream")))
+    ck(r["error"] == "content-decoding failed" and r["body"] == "", "corrupt gzip is an error, not an empty page")
+
+    class Slow(Resp):
+        def read(self, n):
+            tick["t"] += 10
+            return b"a"
+    tick = {"t": 0.0}
+    r = fetch("https://a.example/", resolver=pub, timeout=15, clock=lambda: tick["t"],
+              connector=conn_for(Slow(200, [], b"")))
+    ck(r["status"] == 0 and r["error"] == "deadline", "a trickling server is cut off at 3 x timeout")
     ck(check_url("http://127.0.0.1:8123/a", allow_private=True,
                  resolver=lambda h, p: [(2, 1, 6, "", ("127.0.0.1", 0))])[3] == "/a", "fixture mode allows loopback")
     return n

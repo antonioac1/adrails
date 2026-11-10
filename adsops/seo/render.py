@@ -23,6 +23,8 @@ MAX_LIST = 20
 MAX_URL_LEN = 4096
 DEFAULT_TIMEOUT_MS = 30000
 DEFAULT_MAX_PAGES = 10
+MAX_TIMEOUT_MS = 60000
+MAX_RENDER_PAGES = 20
 _VIEWPORT = {"width": 412, "height": 823}
 _ALLOW_CACHE = {}
 NOT_AVAILABLE = ("JS render parity skipped: Playwright is not installed "
@@ -158,8 +160,8 @@ def request_allowed(url, resolver=None):
         return True
     if scheme not in ("http", "https") or not host or "@" in parts.netloc:
         return False
-    key = (scheme, host, port, id(resolver) if resolver is not None else 0)
-    cached = _ALLOW_CACHE.get(key)
+    key = (scheme, host, port)
+    cached = _ALLOW_CACHE.get(key) if resolver is None else None
     if cached is not None:
         return cached
     try:
@@ -172,7 +174,8 @@ def request_allowed(url, resolver=None):
         verdict = False
     except Exception:  # anything unexpected is a refusal, never a crash
         verdict = False
-    _ALLOW_CACHE[key] = verdict
+    if resolver is None and len(_ALLOW_CACHE) < 5000:
+        _ALLOW_CACHE[key] = verdict
     return verdict
 
 
@@ -183,7 +186,7 @@ def _route_handler(allow):
     """-> handler(route) for context.route(): abort everything `allow` rejects, continue the rest."""
     def handler(route):
         try:
-            permitted = bool(allow(route.request.url))
+            permitted = getattr(route.request, "method", "GET") in ("GET", "HEAD") and bool(allow(route.request.url))
         except Exception:
             permitted = False
         try:
@@ -258,8 +261,11 @@ def render_pages(urls, user_agent=fetcher.GOOGLEBOT_UA, timeout_ms=DEFAULT_TIMEO
     allow = allow if callable(allow) else request_allowed
     limit = max_pages if isinstance(max_pages, int) and not isinstance(max_pages, bool) and max_pages >= 0 \
         else DEFAULT_MAX_PAGES
+    limit = min(limit, MAX_RENDER_PAGES)
     timeout = timeout_ms if isinstance(timeout_ms, int) and not isinstance(timeout_ms, bool) and timeout_ms > 0 \
         else DEFAULT_TIMEOUT_MS
+    timeout = min(timeout, MAX_TIMEOUT_MS)
+    _ALLOW_CACHE.clear()                       # verdicts never outlive one batch (DNS answers change)
     ua = user_agent if isinstance(user_agent, str) and user_agent else fetcher.GOOGLEBOT_UA
     todo, seen = [], set()
     for url in urls:
@@ -269,21 +275,90 @@ def render_pages(urls, user_agent=fetcher.GOOGLEBOT_UA, timeout_ms=DEFAULT_TIMEO
     result = {}
     if not todo:
         return result
+    pins = []
+    for url in todo:                           # pin each audited host to the address that was checked
+        try:
+            _s, host, _p, _path, ip = fetcher.check_url(url)
+            pins.append("MAP %s %s" % (host, ip))
+        except ToolError:
+            continue
+    args = ["--host-resolver-rules=" + ", ".join(sorted(set(pins)))] if pins and allow is request_allowed else []
     with factory() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=True, args=args) if args else pw.chromium.launch(headless=True)
         try:
             context = browser.new_context(user_agent=ua, viewport=dict(_VIEWPORT), is_mobile=True,
                                           java_script_enabled=True, service_workers="block",
                                           accept_downloads=False)
             try:
                 context.route("**/*", _route_handler(allow))
+                if hasattr(context, "route_web_socket"):   # route() does not see WebSockets: refuse them all
+                    context.route_web_socket("**/*", lambda ws: ws.close())
+                if hasattr(context, "on"):
+                    context.on("page", lambda p: None)       # popups are closed when the page that opened them closes
                 for url in todo:
                     result[url] = _render_one(context, url, allow, timeout)
             finally:
-                context.close()
+                try:
+                    context.close()
+                except Exception:                            # a crashed browser must not lose the results so far
+                    pass
         finally:
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                pass
     return result
+
+
+def render_isolated(urls, user_agent=fetcher.GOOGLEBOT_UA, timeout_ms=DEFAULT_TIMEOUT_MS, max_pages=DEFAULT_MAX_PAGES,
+                    runner=None):
+    """render_pages() in a child Python process with a hard wall-clock limit, so a page that freezes the browser's main
+    thread (evaluate() has no timeout), a Chromium crash or a memory blow-up can only cost this step, never the audit."""
+    import json
+    import subprocess
+    import sys
+    pages = min(max(1, int(max_pages or 1)), MAX_RENDER_PAGES)
+    tmo = min(max(1000, int(timeout_ms or DEFAULT_TIMEOUT_MS)), MAX_TIMEOUT_MS)
+    req = json.dumps({"urls": [u for u in urls if isinstance(u, str)][:pages], "user_agent": user_agent,
+                      "timeout_ms": tmo, "max_pages": pages})
+    import os
+    run = runner or subprocess.run
+    env = dict(os.environ)
+    pkg_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # the dir holding adsops/
+    env["PYTHONPATH"] = pkg_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    try:
+        proc = run([sys.executable, "-m", "adsops.seo.render"], input=req, capture_output=True, text=True, env=env,
+                   cwd=pkg_root, timeout=pages * (tmo / 1000.0 + 20) + 30)
+    except subprocess.TimeoutExpired:
+        raise ToolError("JS render step exceeded its time limit and was stopped") from None
+    if getattr(proc, "returncode", 1) != 0:
+        raise ToolError("JS render step failed (exit %s)" % getattr(proc, "returncode", "?"))
+    try:
+        out = json.loads(proc.stdout or "{}")
+    except ValueError:
+        raise ToolError("JS render step returned no result") from None
+    if not isinstance(out, dict):
+        raise ToolError("JS render step returned no result")
+    if out.get("error"):
+        raise ToolError(str(out["error"])[:300])
+    return out.get("rendered") or {}
+
+
+def _child_main():
+    """python3 -m adsops.seo.render < {"urls": [...], ...}: one JSON object out (used by render_isolated)."""
+    import json
+    import sys
+    try:
+        req = json.loads(sys.stdin.read() or "{}")
+        res = render_pages(req.get("urls") or [], user_agent=req.get("user_agent") or fetcher.GOOGLEBOT_UA,
+                           timeout_ms=int(req.get("timeout_ms") or DEFAULT_TIMEOUT_MS),
+                           max_pages=int(req.get("max_pages") or DEFAULT_MAX_PAGES))
+        sys.stdout.write(json.dumps({"rendered": res}))
+    except ToolError as e:
+        sys.stdout.write(json.dumps({"error": str(e)}))
+    except Exception as e:                                       # noqa: BLE001
+        sys.stdout.write(json.dumps({"error": "render failed: " + type(e).__name__}))
+    return 0
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -606,4 +681,47 @@ def selftest() -> int:
     ck(raised, "parity raises ToolError for a non-dict crawl")
     ck(parity(crawl, {"https://ex.com/deep": {"links": ["https://ex.com/deep#x"], "error": None}})[0] == [],
        "self links are ignored in parity")
+    # isolation wrapper (fake runner: no browser, no network)
+    import json as _json
+    import subprocess as _sp
+
+    class _P:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout = rc, out
+    got = render_isolated(["https://93.184.216.34/"], runner=lambda *a, **k: _P(0, _json.dumps(
+        {"rendered": {"https://93.184.216.34/": {"links": [], "words": 3, "title": "t", "h1": [], "error": None}}})))
+    ck(got["https://93.184.216.34/"]["words"] == 3, "render_isolated returns the child's result")
+
+    def _hang(*a, **k):
+        raise _sp.TimeoutExpired("x", 1)
+    try:
+        render_isolated(["https://93.184.216.34/"], runner=_hang)
+        ck(False, "a hung render must raise ToolError")
+    except ToolError:
+        ck(True, "a hung render child is stopped and reported")
+    try:
+        render_isolated(["https://93.184.216.34/"], runner=lambda *a, **k: _P(0, _json.dumps({"error": "nope"})))
+        ck(False, "a child error must raise ToolError")
+    except ToolError:
+        ck(True, "a child error surfaces as ToolError")
+
+    class _Route:
+        def __init__(self, url, method):
+            self.request = type("R", (), {"url": url, "method": method})()
+            self.done = None
+
+        def continue_(self):
+            self.done = "continue"
+
+        def abort(self):
+            self.done = "abort"
+    h = _route_handler(lambda u: True)
+    r1, r2 = _Route("https://93.184.216.34/x", "POST"), _Route("https://93.184.216.34/x", "GET")
+    h(r1)
+    h(r2)
+    ck(r1.done == "abort" and r2.done == "continue", "the browser may only GET/HEAD: page-script POSTs are aborted")
     return n
+
+
+if __name__ == "__main__":
+    raise SystemExit(_child_main())

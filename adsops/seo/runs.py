@@ -28,7 +28,9 @@ def safe_host(host):
     """-> host lowercased, restricted to [a-z0-9.-], no leading dots, max 253 chars; ToolError if unusable."""
     if not isinstance(host, str):
         raise ToolError("host must be a string")
-    clean = HOST_JUNK_RE.sub("", host.lower()).lstrip(".")[:MAX_HOST]
+    clean = host.strip().lower()
+    if HOST_JUNK_RE.search(clean) or clean.startswith(".") or len(clean) > MAX_HOST:
+        raise ToolError("host %r is not a plain hostname" % (host[:80],))      # refused, never silently rewritten
     if not clean or ".." in clean or clean in (".", ".."):
         raise ToolError("host %r is not a usable hostname" % (host[:80],))
     return clean
@@ -180,10 +182,11 @@ class RunStore:
         """Delete every run of `host` older than the newest `keep`."""
         host_dir = self._host_dir(host)
         for run_id in self._ids(host_dir)[self.keep:]:
-            try:
-                os.remove(os.path.join(host_dir, run_id + ".json"))
-            except OSError:
-                pass
+            for ext in (".json", ".md", ".csv"):                 # seo_tools writes the reports beside the run
+                try:
+                    os.remove(os.path.join(host_dir, run_id + ext))
+                except OSError:
+                    pass
 
     # -- reading -------------------------------------------------------------------------------------------
     def list(self, host):
@@ -373,8 +376,12 @@ def selftest() -> int:
 
     # --- safe_host -----------------------------------------------------------------------------------------
     chk(safe_host("  WWW.Example.COM  ") == "www.example.com", "host is lowercased, junk removed, dots stripped")
-    chk(safe_host("...ex.test") == "ex.test", "leading dots are removed")
-    chk(len(safe_host("a" * 400)) == 253, "hosts are capped at 253 chars")
+    for rewritten in ("...ex.test", "a" * 400, "../etc", "ex.test/../x", "ex test"):
+        try:
+            safe_host(rewritten)
+            chk(False, "safe_host(%r) must be refused, not rewritten" % (rewritten,))
+        except ToolError:
+            chk(True, "host needing a rewrite is refused")
     for bad in ("", "   ", "...", "..", "ex..test", None, 5):
         try:
             safe_host(bad)

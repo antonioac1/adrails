@@ -57,7 +57,7 @@ def default_pages():
     home_links = ("<a href=\"/services/\">Services</a> " + " ".join(
         "<a href=\"/services/%s/\">%s</a>" % (s, s.upper()) for s in "abcde")
         + " <a href=\"/guides/one/\">Guide one</a> <a href=\"/guides/two/\">Guide two</a>"
-          " <a href=\"/old/\">Old page</a> <a href=\"/missing/\">Missing</a> <a href=\"/private/x\">Private</a>"
+          " <a href=\"/tenants/\">Tenant portal</a> <a href=\"/old/\">Old page</a> <a href=\"/missing/\">Missing</a> <a href=\"/private/x\">Private</a>"
           " <a href=\"/owners/?utm_source=home&utm_medium=hero\">Owners</a> <a href=\"/about/\"><img src=\"/logo.png\"></a>")
     pages = {
         "/robots.txt": (200, {"Content-Type": "text/plain"},
@@ -82,6 +82,7 @@ def default_pages():
         "/orphan/": (200, {"Content-Type": "text/html"}, _page("Orphan", "<p>Nobody links here.</p>", main_words=4)),
         "/old/": (301, {"Location": "/old2/"}, ""),
         "/old2/": (301, {"Location": "/about/"}, ""),
+        "/tenants/": (302, {"Location": "https://portal.example/login"}, ""),
         "/private/x": (200, {"Content-Type": "text/html"}, _page("Private", "<p>secret</p>")),
     }
     for s in "abcde":

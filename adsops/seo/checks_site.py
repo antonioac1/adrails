@@ -10,6 +10,7 @@ Findings follow the shared contract: {"code", "urls", "detail", "data"} with a n
 sentence and a small JSON-safe data dict (lists capped at 20 items). Site-level findings use urls=[start_url] and
 data.site_level=True.
 """
+import re
 from urllib.parse import urlsplit
 
 from adsops.aeo.crawl_audit import parse_robots, can_fetch
@@ -156,7 +157,7 @@ def _headers(page):
 
 def _chain_broken(hops):
     """True when a chain means 'too many redirects' / a loop, or carries more than one redirect."""
-    if len(hops) > 2:
+    if len(hops) > 2 or len({h[0] for h in hops}) < len(hops):
         return True
     return bool(hops) and _text(hops[-1][2], 100).lower() in LOOP_LOCS
 
@@ -231,8 +232,10 @@ def run(crawl):
         fired = False
         if r_status == 0 or r_status >= 500:
             fired = emit("robots_unreachable", [start],
-                         "%s answered HTTP %d, and Google pauses crawling of the whole site while robots.txt is "
-                         "unreachable or failing" % (r_url, r_status),
+                         ("%s could not be fetched at all (no HTTP answer)" % r_url if r_status == 0 else
+                          "%s answered HTTP %d" % (r_url, r_status))
+                         + "; while robots.txt fails with a server error or times out, Google stops crawling the site "
+                           "and treats a long-lasting failure as a full block",
                          {"status": r_status, "site_level": True, "robots_url": r_url})
         settle("robots_unreachable", fired)
 
@@ -264,8 +267,8 @@ def run(crawl):
         fired = False
         if start and not _uniq(_list(robots.get("sitemaps"))):
             fired = emit("robots_no_sitemap_line", [start],
-                         "%s answers 200 but declares no Sitemap: line, so crawlers have to guess where the sitemap "
-                         "lives" % r_url, {"site_level": True, "robots_url": r_url})
+                         "%s answers 200 but declares no Sitemap: line; adding one lets every crawler (not only those "
+                         "you submitted the sitemap to) discover it" % r_url, {"site_level": True, "robots_url": r_url})
         settle("robots_no_sitemap_line", fired, ran=bool(start))
 
     # --- sitemaps --------------------------------------------------------------------------------------------
@@ -310,7 +313,8 @@ def run(crawl):
             ran=bool(sm_urls))
 
         orphans = []
-        for url in sm_urls:
+        for url in (sm_urls if not _dict(crawl.get("skipped")).get("cap_reached") else ()):   # a capped crawl
+            # cannot tell an orphan from a page it simply did not reach
             page = _lookup(pages, index, url)
             if page is None or _int(page.get("status"), 0) != 200:
                 continue
@@ -321,7 +325,7 @@ def run(crawl):
             "%d URLs in the sitemap are not reachable through internal links from %s (e.g. %s)"
             % (len(orphans), start or "the start page", _ex(orphans)),
             {"count": len(orphans), "examples": orphans[:MAX_LIST]}),
-            ran=bool(pages and sm_urls))
+            ran=bool(pages and sm_urls) and not _dict(crawl.get("skipped")).get("cap_reached"))
 
     # --- redirects and host consolidation --------------------------------------------------------------------
     start_scheme = _scheme(start)
@@ -337,7 +341,7 @@ def run(crawl):
                          % plain,
                          {"site_level": True, "http_url": plain, "status": 200,
                           "temporary": first_status in (302, 303, 307), "chain": http_hops[:MAX_LIST]})
-        settle("http_not_redirected", fired)
+        settle("http_not_redirected", fired, ran=_int(last[1], 0) > 0)     # a failed probe proves nothing
 
     chains = []
     broken_pages = []
@@ -378,7 +382,7 @@ def run(crawl):
                          % (www_url, start),
                          {"site_level": True, "www_url": www_url, "start_host": _host(start),
                           "www_host": _host(www_url), "chain": www_hops[:MAX_LIST]})
-        settle("www_not_consolidated", fired)
+        settle("www_not_consolidated", fired, ran=_int(last[1], 0) > 0)
 
     # --- soft 404 and server errors --------------------------------------------------------------------------
     not_found = _dict(probes.get("not_found"))
@@ -389,8 +393,8 @@ def run(crawl):
         if nf_url and nf_status == 200:
             fired = emit("soft_404", [nf_url],
                          "%s returns HTTP 200 for a random non-existent URL, so Google reads error pages as real "
-                         "pages" % nf_url, {"status": nf_status, "url": nf_url})
-        settle("soft_404", fired, ran=bool(nf_url))
+                         "pages" % nf_url, {"status": nf_status, "url": nf_url, "site_level": True})
+        settle("soft_404", fired, ran=bool(nf_url) and nf_status > 0)
 
     errors = []
     if pages:
@@ -421,22 +425,25 @@ def run(crawl):
     if isinstance(start_page, dict) and start:
         hdrs = _headers(start_page)
         fired = False
-        if start_https and _int(start_page.get("status"), 0) == 200 and not hdrs.get("strict-transport-security"):
+        sts = hdrs.get("strict-transport-security", "")
+        sts_age = re.search(r"max-age\s*=\s*\"?(\d+)", sts, re.I)
+        if start_https and _int(start_page.get("status"), 0) == 200 and not (sts_age and int(sts_age.group(1)) > 0):
             fired = emit("hsts_missing", [start],
                          "%s is served over https without a Strict-Transport-Security header, so browsers never "
                          "learn to skip http" % start,
                          {"site_level": True, "header": "strict-transport-security"})
-        settle("hsts_missing", fired, ran=bool(start_https))
+        settle("hsts_missing", fired, ran=bool(start_https) and _int(start_page.get("status"), 0) == 200)
 
         fired = False
         if _int(start_page.get("status"), 0) == 200:
-            missing_hdrs = [h for h in SECURITY_HEADERS if not hdrs.get(h)]
+            missing_hdrs = [h for h in SECURITY_HEADERS if not hdrs.get(h)
+                            or (h == "x-content-type-options" and hdrs.get(h, "").strip().lower() != "nosniff")]
             if missing_hdrs:
                 fired = emit("security_headers_missing", [start],
                              "%s is missing %d security response header(s): %s"
                              % (start, len(missing_hdrs), ", ".join(missing_hdrs)),
                              {"site_level": True, "missing": missing_hdrs, "count": len(missing_hdrs)})
-        settle("security_headers_missing", fired)
+        settle("security_headers_missing", fired, ran=_int(start_page.get("status"), 0) == 200)
 
     return findings, passed
 

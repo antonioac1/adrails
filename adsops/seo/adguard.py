@@ -385,7 +385,7 @@ def run(crawl, final_urls, dup_threshold=DEFAULT_DUP_THRESHOLD):
         status = _int(page.get("status"), 0)
         page_url = _url(page)
         final = page.get("final") if isinstance(page.get("final"), str) else ""
-        if status != 200 or (page_url and final != page_url):
+        if status != 200 or (page_url and final and final != page_url):
             bad.append([url, status, final])
     settle("ad_lp_non_200", emit(
         "ad_lp_non_200", [row[0] for row in bad],

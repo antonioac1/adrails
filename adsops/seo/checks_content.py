@@ -27,13 +27,23 @@ DESC_MAX = 160
 SHINGLE_K = 5
 DEFAULT_THIN_WORDS = 250
 DEFAULT_DUP_THRESHOLD = 0.8
-DEFAULT_MAX_DUP_PAGES = 1500
+DEFAULT_MAX_DUP_PAGES = 600          # pairwise shingle comparison: ~180k pairs stays in seconds
 LOW_SHARE_MIN_PAGES = 10
 LOW_SHARE_THRESHOLD = 0.6
 HTML_CTYPES = ("text/html", "application/xhtml+xml")
 ARTICLE_TYPES = ("Article", "BlogPosting", "NewsArticle", "TechArticle")
+# Page-level types a template should carry consistently. Nested helpers (ImageObject, Organization as publisher, Person as
+# author, Place, PostalAddress, WebPage, Offer...) vary by content and are NOT compared (acceptance 2026-11-10: they were
+# reported as "gaps" on baytownpm.com, a false positive).
+PAGE_TYPES = frozenset(("Service", "Product", "Article", "BlogPosting", "NewsArticle", "TechArticle", "FAQPage", "HowTo",
+                        "BreadcrumbList", "LocalBusiness", "RealEstateAgent", "ProfessionalService", "Event", "Course",
+                        "SoftwareApplication", "VideoObject", "JobPosting", "Recipe", "QAPage", "ItemList"))
+
+
+def _page_type(name):
+    return name in PAGE_TYPES or name.endswith("Business")
 ARTICLE_TEMPLATE_HINTS = ("guide", "blog", "news", "article", "resources", "insights", "learn")
-HREFLANG_RX = re.compile(r"^(x-default|[a-z]{2,3}(-([a-z]{2}|[0-9]{3}|[a-z]{4}))?)$", re.I)
+HREFLANG_RX = re.compile(r"^(x-default|[a-z]{2,3}(-[a-z]{4})?(-([a-z]{2}|[0-9]{3}))?)$", re.I)   # lang[-Script][-RG]
 _AUTO = object()
 
 
@@ -126,7 +136,12 @@ def _has_noindex_token(value):
     """True when `value` carries a noindex token ('noindex, nofollow' -> True; 'none' = noindex+nofollow -> True).
     X-Robots-Tag may be agent-scoped ('googlebot: noindex'); the scope prefix is ignored (conservative)."""
     s = value if isinstance(value, str) else ""
-    for token in s.replace(",", " ").replace(";", " ").replace(":", " ").split():
+    m = re.match(r"^\s*([a-z0-9_*-]+)\s*:\s*(.*)$", s, re.I | re.S)
+    if m and m.group(1).lower() not in ("max-snippet", "max-image-preview", "max-video-preview", "unavailable_after"):
+        if m.group(1).lower() not in ("googlebot", "*"):
+            return False                       # 'otherbot: noindex' does not apply to Google
+        s = m.group(2)
+    for token in s.replace(",", " ").replace(";", " ").split():
         if token.lower() in ("noindex", "none"):
             return True
     return False
@@ -286,7 +301,7 @@ def html_pages(crawl):
             continue
         if page.get("final") != url:
             continue
-        if _doc(page) is None:
+        if _doc(page) is None or _ctype(page) not in HTML_CTYPES:
             continue
         out.append(page)
     return out
@@ -364,6 +379,8 @@ def _dup_pairs(pages, sets, thr):
         if not sa:
             continue
         for j in range(i + 1, len(pages)):
+            if urls[j] == urls[i]:
+                continue
             sb = sets.get(urls[j]) or set()
             if not sb:
                 continue
@@ -401,7 +418,7 @@ def run(crawl, thin_words=DEFAULT_THIN_WORDS, dup_threshold=DEFAULT_DUP_THRESHOL
     HP, IP = _pairs(h_pages), _pairs(idx_pages)
     thin = _int(thin_words, DEFAULT_THIN_WORDS)
     thr = dup_threshold if isinstance(dup_threshold, (int, float)) and not isinstance(dup_threshold, bool) \
-        else DEFAULT_DUP_THRESHOLD
+        and 0 < dup_threshold <= 1 else DEFAULT_DUP_THRESHOLD          # also rejects NaN
     max_dup = _int(max_dup_pages, DEFAULT_MAX_DUP_PAGES)
     findings, passed = [], []
 
@@ -522,8 +539,8 @@ def run(crawl, thin_words=DEFAULT_THIN_WORDS, dup_threshold=DEFAULT_DUP_THRESHOL
         self_urls.extend(pair[:2])
     settle("near_duplicate_self_canonical", emit(
         "near_duplicate_self_canonical", self_urls,
-        "%d pairs of self-canonical indexable pages are near-duplicates at %.0f%% word-shingle overlap (e.g. %s)"
-        % (len(own_pairs), thr * 100, _dup_desc(own_pairs)),
+        "%d pairs of self-canonical indexable pages share at least %.0f%% of their 5-word shingles (e.g. %s, %.0f%%)"
+        % (len(own_pairs), thr * 100, _dup_desc(own_pairs), own_pairs[0][2] * 100 if own_pairs else 0),
         {"pairs": own_pairs[:MAX_LIST], "truncated": truncated, "threshold": thr}), ran=len(sample) >= 2)
     settled.append("near_duplicate_self_canonical")
 
@@ -532,8 +549,8 @@ def run(crawl, thin_words=DEFAULT_THIN_WORDS, dup_threshold=DEFAULT_DUP_THRESHOL
         other_urls.extend(pair[:2])
     settle("near_duplicate", emit(
         "near_duplicate", other_urls,
-        "%d pairs of indexable pages are near-duplicates at %.0f%% word-shingle overlap (e.g. %s)"
-        % (len(other_pairs), thr * 100, _dup_desc(other_pairs)),
+        "%d pairs of indexable pages share at least %.0f%% of their 5-word shingles (e.g. %s, %.0f%%)"
+        % (len(other_pairs), thr * 100, _dup_desc(other_pairs), other_pairs[0][2] * 100 if other_pairs else 0),
         {"pairs": other_pairs[:MAX_LIST], "truncated": truncated, "threshold": thr}), ran=len(sample) >= 2)
     settled.append("near_duplicate")
 
@@ -655,7 +672,7 @@ def run(crawl, thin_words=DEFAULT_THIN_WORDS, dup_threshold=DEFAULT_DUP_THRESHOL
         total = row["pages"]
         if total < 3:
             continue
-        for typ in sorted(row["types"]):
+        for typ in sorted(t for t in row["types"] if _page_type(t)):
             have = row["types"][typ]
             if have * 2 >= total and have < total:
                 partial.append([name, typ, have, total])
@@ -664,8 +681,8 @@ def run(crawl, thin_words=DEFAULT_THIN_WORDS, dup_threshold=DEFAULT_DUP_THRESHOL
     article_templates, article_urls = [], []
     for name in sorted(matrix):
         row = matrix[name]
-        if row["pages"] < 1 or not any(hint in name.lower() for hint in ARTICLE_TEMPLATE_HINTS):
-            continue
+        if row["pages"] < 1 or name.count("/") < 3 or not any(hint in name.lower() for hint in ARTICLE_TEMPLATE_HINTS):
+            continue                           # only article templates (/guides/*/), never the hub/listing page itself
         lacking = [u for u, types in row["members"] if not (types & set(ARTICLE_TYPES))]
         if lacking:
             article_templates.append(name)
@@ -797,7 +814,7 @@ def selftest() -> int:
     mixed = crawl_of({"https://ex.com/": mkpage("https://ex.com/"),
                       "https://ex.com/doc.pdf": mkpage("https://ex.com/doc.pdf", ctype="application/pdf"),
                       "https://ex.com/go/": mkpage("https://ex.com/go/", final="https://ex.com/")})
-    chk(len(html_pages(mixed)) == 2, "html_pages keeps 200 HTML pages and drops redirects")
+    chk(len(html_pages(mixed)) == 1, "html_pages keeps 200 HTML pages only (drops redirects and the PDF)")
     chk(html_pages({}) == [], "html_pages of an empty crawl is empty")
     chk(shingles("a b c d e f") == {"a b c d e", "b c d e f"}, "six words give two five-word shingles")
     chk(shingles("a b") == {"a b"}, "a very short text gives one whole-text shingle")

@@ -260,6 +260,7 @@ def join(crawl, client, site=None, today=None, days=DEFAULT_DAYS, max_inspect=DE
                       site, start.isoformat(), end.isoformat(), ["page"])
     if err:
         errors.append(err)
+        notes.append("search analytics could not be read; clicks below are unknown, not zero")
     try:
         aggregated = gsc.aggregate(rows if isinstance(rows, (list, tuple)) else [], ["page"], "page")
     except ToolError as exc:
@@ -287,7 +288,7 @@ def join(crawl, client, site=None, today=None, days=DEFAULT_DAYS, max_inspect=DE
         by_url.setdefault(_page_url(key, page), page)
     stopped = False
     for url in order[:budget]:
-        result, err = _call(client.inspect, site, url)
+        result, err = _call(getattr(client, "inspect", None) or (lambda *a: None), site, url)
         if err:
             errors.append(err)
             if "quota" in err.lower() or "429" in err:
@@ -306,8 +307,11 @@ def join(crawl, client, site=None, today=None, days=DEFAULT_DAYS, max_inspect=DE
             "crawl_says": explain(by_url.get(url)),
             "clicks": _stats(pages, url).get("clicks", 0),
         })
-    if stopped:
-        pass  # already noted above
+    inspected_with_verdict = [row for row in inspected if row["verdict"]]
+    if len(inspected_with_verdict) < len(inspected):
+        notes.append("%d inspections returned no verdict and were left out of the findings"
+                     % (len(inspected) - len(inspected_with_verdict)))
+    inspected_all, inspected = inspected, inspected_with_verdict
 
     excluded = sorted([{"url": row["url"], "coverage_state": row["coverage_state"],
                         "google_canonical": row["google_canonical"], "crawl_says": row["crawl_says"]}
@@ -329,7 +333,7 @@ def join(crawl, client, site=None, today=None, days=DEFAULT_DAYS, max_inspect=DE
                 "data": {"count": len(not_indexed), "inspected": len(inspected),
                          "examples": [[row["url"], row["coverage_state"]] for row in not_indexed[:MAX_LIST]]},
             })
-        else:
+        elif not stopped:
             passed.append("gsc_not_indexed")
         mismatched = [row for row in inspected
                       if row["google_canonical"] and row["google_canonical"] != row["url"]
@@ -345,14 +349,14 @@ def join(crawl, client, site=None, today=None, days=DEFAULT_DAYS, max_inspect=DE
                          "examples": [[row["url"], row["user_canonical"], row["google_canonical"]]
                                       for row in mismatched[:MAX_LIST]]},
             })
-        else:
+        elif not stopped:
             passed.append("gsc_canonical_mismatch")
 
     for finding in findings:
         finding["urls"] = finding["urls"][:MAX_URLS]
 
     return {"connected": True, "site": site, "period": [start.isoformat(), end.isoformat()], "pages": pages,
-            "inspected": inspected, "excluded": excluded, "findings": findings, "passed": passed,
+            "inspected": inspected_all, "excluded": excluded, "findings": findings, "passed": passed,
             "errors": errors, "notes": notes, "inspect_budget": budget}
 
 
@@ -606,8 +610,8 @@ def selftest() -> int:
         "seo.gsc_join.selftest: None-returning client broke the join"
     n += 1
     assert all(row["verdict"] == "" and row["google_canonical"] == "" for row in hostile2["inspected"]) and \
-        [f["code"] for f in hostile2["findings"]] == ["gsc_not_indexed"], \
-        "seo.gsc_join.selftest: empty inspections not treated as not-indexed"
+        hostile2["findings"] == [] and any("no verdict" in x for x in hostile2["notes"]), \
+        "seo.gsc_join.selftest: empty inspections never become findings (review 2026-11-10)"
     n += 1
     assert hostile2["period"] == ["2024-05-17", "2024-05-17"], \
         "seo.gsc_join.selftest: days=0 not clamped to a 1 day window: %r" % (hostile2["period"],)

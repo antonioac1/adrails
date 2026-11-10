@@ -32,9 +32,27 @@ MAX_CHILD_SITEMAPS = 200
 MAX_LOCATION = 500
 MAX_HREF = 2048
 
-_LOC = re.compile(r"<loc[^>]*>(.*?)</loc>", re.I | re.S)
-_URL_BLOCK = re.compile(r"<url[^>]*>(.*?)</url>", re.I | re.S)
-_LASTMOD = re.compile(r"<lastmod[^>]*>(.*?)</lastmod>", re.I | re.S)
+_LOC_OPEN = re.compile(r"<loc\b[^>]{0,200}>", re.I)
+_URL_OPEN = re.compile(r"<url\b[^>]{0,200}>", re.I)
+_LASTMOD = re.compile(r"<lastmod[^>]{0,200}>([^<]{0,100})</lastmod>", re.I)
+MAX_TEXT_KEEP = 20000          # page text kept per page for duplicate checks (memory: 2,000 pages x 20 KB)
+MAX_EDGES = 300000
+DEFAULT_MAX_SECONDS = 3600
+
+
+def _blocks(body, opener, close, limit):
+    """Linear scan for opener...close blocks (no backtracking regex: a hostile '<url><url>...' body cannot stall it)."""
+    out, pos, low = [], 0, body.lower()
+    while len(out) < limit:
+        m = opener.search(body, pos)
+        if not m:
+            break
+        end = low.find(close, m.end())
+        if end < 0:
+            break
+        out.append(body[m.end():end])
+        pos = end + len(close)
+    return out
 _SITEMAPINDEX = re.compile(r"<sitemapindex", re.I)
 _NON_HEX = re.compile(r"[^0-9A-Za-z]")
 
@@ -171,7 +189,8 @@ def _iso(ts):
 # ── the crawl ────────────────────────────────────────────────────────────────────────────────────────────────
 def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500, rate_limit_s=1.0,
           respect_robots=True, sitemap_seeding=True, timeout_s=15, max_bytes=3_000_000, max_redirects=5,
-          extra_urls=(), sleep=time.sleep, now=time.time, rand_hex=None, max_sitemap_urls=5000):
+          extra_urls=(), sleep=time.sleep, now=time.time, rand_hex=None, max_sitemap_urls=5000,
+          max_seconds=DEFAULT_MAX_SECONDS):
     """Crawl one site politely and return the Crawl result dict of SPEC-B. Only ToolError on a bad start_url."""
     start = _norm(start_url)
     if not start:
@@ -209,9 +228,16 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
         return _host(url) in scope_set
 
     # ── politeness + request budget: every single request goes through _get ──────────────────────────────────
-    state = {"calls": 0, "last": None, "budget_noted": False}
+    state = {"calls": 0, "last": None, "budget_noted": False, "t0": now(), "deadline_noted": False}
+    max_secs = _float(max_seconds, DEFAULT_MAX_SECONDS, 10.0, 6 * 3600.0)
+    allowed = lambda u: True                                      # replaced once robots.txt is read
 
     def _get(url):
+        if now() - state["t0"] > max_secs:
+            if not state["deadline_noted"]:
+                state["deadline_noted"] = True
+                notes.append("stopped after max_seconds=%d; remaining URLs were not fetched" % max_secs)
+            return _result({"status": 0, "error": "crawl deadline reached"}, url)
         if state["calls"] >= budget:
             if not state["budget_noted"]:
                 state["budget_noted"] = True
@@ -244,6 +270,9 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
             nxt = _norm(loc, cur)
             if not nxt:
                 break
+            if not allowed(nxt):
+                hops_list.append([nxt, 0, "robots.txt disallows this redirect target (not followed)"])
+                break
             if any(entry[0] == nxt for entry in hops_list):
                 hops_list.append([nxt, 0, "redirect loop"])
                 break
@@ -272,8 +301,10 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
         if s:
             robots_sitemaps.append(_norm(s, robots_url) or s)
     robots = {"url": robots_url, "status": r_status, "text": r_text, "sitemaps": robots_sitemaps}
-    if r_status == 0 or r_status >= 500:
+    if r_status == 0 or r_status >= 500 or r_status == 429:
         notes.append("robots.txt returned HTTP %d; Google would pause crawling; this audit crawled anyway" % r_status)
+    elif r_status not in (200, 404, 410):
+        notes.append("robots.txt returned HTTP %d; like Google, the audit treats that as no restrictions" % r_status)
     agent = "Googlebot" if "googlebot" in str(user_agent).lower() else (str(user_agent).split("/")[0] or "*")
 
     def allowed(url):
@@ -281,8 +312,10 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
             return True
         try:
             return bool(can_fetch(parsed, agent, _path_query(url)))
-        except Exception:                                        # noqa: BLE001
-            return True
+        except Exception:                                        # noqa: BLE001 - fail closed, once noted
+            if "robots.txt rule evaluation failed; affected URLs were skipped" not in notes:
+                notes.append("robots.txt rule evaluation failed; affected URLs were skipped")
+            return False
 
     # ── sitemap seeding (regex only, no XML parser) ─────────────────────────────────────────────────────────
     sitemap = {"urls": [], "lastmod": {}, "sources": [], "errors": [], "truncated": False}
@@ -313,7 +346,7 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
             base = sm_chain[-1][0]
             if _SITEMAPINDEX.search(body):
                 children = 0
-                for loc in _LOC.findall(body):
+                for loc in _blocks(body, _LOC_OPEN, "</loc>", MAX_CHILD_SITEMAPS * 2):
                     if children >= MAX_CHILD_SITEMAPS:
                         break
                     child = _norm(_unescape(loc), base)
@@ -323,11 +356,11 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
                     pending.append(child)
                     children += 1
                 continue
-            for block in _URL_BLOCK.findall(body):
-                m = _LOC.search(block)
-                if not m:
+            for block in _blocks(body, _URL_OPEN, "</url>", max_sitemap_urls * 2 + 10):
+                locs = _blocks(block, _LOC_OPEN, "</loc>", 1)
+                if not locs:
                     continue
-                loc_url = _norm(_unescape(m.group(1)), base)
+                loc_url = _norm(_unescape(locs[0][:2048]), base)
                 if not loc_url or not in_scope(loc_url) or loc_url in sitemap_set:
                     continue
                 if len(sitemap["urls"]) >= max_sitemap_urls:
@@ -348,7 +381,7 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
     link_q, side_q = deque([start]), deque()
     seen, kinds = {start}, {start: "start"}
     for extra in list(extra_urls or ())[:2000]:
-        url = _norm(extra) if isinstance(extra, str) else ""
+        url = extract.strip_tracking(_norm(extra)) if isinstance(extra, str) else ""
         if not url or not in_scope(url) or url in seen:
             continue
         seen.add(url)
@@ -356,6 +389,7 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
         side_q.append(url)
     if sitemap_seeding:
         for url in sitemap["urls"]:
+            url = extract.strip_tracking(url)
             if url in seen:
                 continue
             seen.add(url)
@@ -377,19 +411,23 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
         ch, res = chain(url)
         status = ch[-1][1]
         final = ch[-1][0]
+        synthetic = len(ch) > 1 and ch[-1][1] == 0 and not res.get("error")
+        if len(ch) > 1 and str(ch[-1][2]).startswith("off-scope"):
+            status = ch[-2][1]                    # a redirect to another site is a redirect, not a dead page
         ctype = _clean(res.get("ctype") or "", 120).lower()
         err = res.get("error")
         page = {"url": url, "chain": ch, "status": status, "final": final, "ctype": ctype,
                 "bytes": _int(res.get("bytes"), 0, 0, 10 ** 9), "truncated": bool(res.get("truncated")),
                 "ms": _int(res.get("ms"), 0, 0, 10 ** 9), "headers": res.get("headers") or {},
-                "error": None if err in (None, "") else _text(err)[:200], "depth": None,
+                "error": (str(ch[-1][2])[:200] if synthetic and status == 0 else
+                          (None if err in (None, "") else _text(err)[:200])), "depth": None,
                 "in_sitemap": url in sitemap_set, "discovered": kinds.get(url, "link"), "doc": None}
         pages[url] = page
         if final != url and final not in seen and in_scope(final):
             seen.add(final)
             kinds[final] = kinds.get(url, "link")
             link_q.append(final)
-        if status == 200 and ctype in HTML_TYPES and in_scope(final):
+        if status == 200 and ctype in HTML_TYPES and in_scope(final) and not page["error"]:
             try:
                 doc = extract.parse(res.get("body") or "", final)
             except Exception:                                    # noqa: BLE001 - parse() should never raise
@@ -400,8 +438,12 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
                 if not isinstance(href, str) or not href or len(href) > MAX_HREF:
                     continue                                          # hostile/absurd href: never queue it
                 if in_scope(href):
-                    edges.append([url, href, _clean(link.get("anchor"), 500), _clean(link.get("rel"), 200),
-                                  bool(link.get("in_nav"))])
+                    if len(edges) < MAX_EDGES:
+                        edges.append([url, href, _clean(link.get("anchor"), 500), _clean(link.get("rel"), 200),
+                                      bool(link.get("in_nav"))])
+                    else:
+                        dropped = True
+                    href = extract.strip_tracking(href)       # one fetch per page; tagged links stay in the edges
                     if href not in seen:
                         if len(link_q) + len(side_q) >= queue_cap:
                             dropped = True
@@ -413,12 +455,17 @@ def crawl(start_url, fetch=None, user_agent=fetcher.GOOGLEBOT_UA, max_pages=500,
                     skipped["off_scope"] += 1
                     if href in external_links or len(external_links) < MAX_EXTERNAL:
                         external_links[href] = external_links.get(href, 0) + 1
+            if doc and len(doc.get("text") or "") > MAX_TEXT_KEEP:
+                doc["text"] = doc["text"][:MAX_TEXT_KEEP]          # words keeps the full count
         elif status == 200:
             skipped["non_html"] += 1
 
-    if (link_q or side_q or dropped) and len(pages) >= max_pages:
+    if (link_q or side_q) and len(pages) >= max_pages:
         skipped["cap_reached"] = True
         notes.append("stopped after max_pages=%d; more URLs were still queued" % max_pages)
+    if dropped:
+        skipped["cap_reached"] = True
+        notes.append("the link queue or edge list hit its size cap; some discovered URLs were not crawled")
 
     # ── depth: BFS clicks from start over the edges, redirecting pages pass their depth to their final ──────
     adj = {}
@@ -646,6 +693,31 @@ def selftest() -> int:
     junk_out = crawl("https://ex.test/", fetch=lambda u: None, respect_robots=False, sitemap_seeding=False,
                      rate_limit_s=0.2, sleep=lambda x: None, now=lambda: 0.0)
     ck(junk_out["pages"]["https://ex.test/"]["error"] == "no result from fetch", "a None fetch result is data")
+
+    SITE["https://ex.test/go"] = (301, "", "", "/private/x")
+    rb, rb_calls, _r1, _r2 = run(extra_urls=["https://ex.test/go"])
+    ck("https://ex.test/private/x" not in [u for u, _t in rb_calls]
+       and rb["pages"]["https://ex.test/go"]["chain"][-1][2].startswith("robots.txt disallows"),
+       "a redirect into a Disallowed path is not followed")
+    del SITE["https://ex.test/go"]
+    ck(out["pages"]["https://ex.test/loop1"]["error"] == "redirect loop", "a loop page carries its reason as error")
+    import time as _t
+    t0 = _t.perf_counter()
+    _blocks("<url>" * 400000, _URL_OPEN, "</url>", 1000)
+    _blocks("<url><loc>" * 200000, _LOC_OPEN, "</loc>", 1000)
+    ck(_t.perf_counter() - t0 < 2.0, "hostile sitemap bodies are scanned in linear time")
+    many = '<html><body>' + "".join('<a href="/p%d">p</a>' % i for i in range(3000)) + '</body></html>'
+    q_out = crawl("https://ex.test/", fetch=lambda u: {"status": 200, "ctype": "text/html", "body": many},
+                  sleep=lambda x: None, now=lambda: 0.0, max_pages=1, respect_robots=False, sitemap_seeding=False)
+    ck(q_out["skipped"]["cap_reached"] and q_out["notes"], "a full queue is reported, never silent")
+    clock2 = {"t": 0.0}
+
+    def slow_now():
+        clock2["t"] += 30.0
+        return clock2["t"]
+    d_out = crawl("https://ex.test/", fetch=lambda u: {"status": 200, "ctype": "text/html", "body": A_PAGE},
+                  sleep=lambda x: None, now=slow_now, max_seconds=60, respect_robots=False, sitemap_seeding=False)
+    ck(any("max_seconds" in x for x in d_out["notes"]), "the crawl stops at its wall-clock deadline")
 
     tight, tight_calls, _ts, _tc = run(max_pages=3, max_redirects=0)
     ck(tight["pages"]["https://ex.test/loop1"]["chain"][-1][2] == "too many redirects",

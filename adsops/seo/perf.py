@@ -25,8 +25,7 @@ from adsops.seo.extract import normalize, template_of
 PSI_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 NO_BACKEND_NOTE = ("Lighthouse skipped: no lighthouse CLI on PATH (npm i -g lighthouse) and no PageSpeed API key "
                    "(cfg seo.pagespeed_key or PAGESPEED_API_KEY)")
-CLI_FLAGS = ("--output=json", "--output-path=stdout", "--quiet", "--only-categories=performance",
-             "--chrome-flags=--headless=new")
+CLI_FLAGS = ("--output=json", "--output-path=stdout", "--quiet", "--only-categories=performance")
 CHECKS = ("perf_opportunity", "lcp_slow", "lcp_preload_mismatch")
 LCP_AUDITS = ("largest-contentful-paint-element", "lcp-discovery-insight", "lcp-breakdown-insight")
 METRIC_AUDITS = (("lcp_ms", "largest-contentful-paint"), ("fcp_ms", "first-contentful-paint"),
@@ -39,9 +38,9 @@ MAX_NODE_DEPTH = 6
 LCP_BUDGET_MS = 2500
 OPP_MIN_MS = 100
 OPP_MIN_BYTES = 20480
-_SRC_RX = re.compile(r"""src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""", re.I)
-_POSTER_RX = re.compile(r"""poster\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""", re.I)
-_SRCSET_RX = re.compile(r"""srcset\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+_SRC_RX = re.compile(r"""(?<![\w:-])src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""", re.I)
+_POSTER_RX = re.compile(r"""(?<![\w:-])poster\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""", re.I)
+_SRCSET_RX = re.compile(r"""(?<![\w:-])srcset\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
 _CSS_URL_RX = re.compile(r"""url\(\s*["']?([^"')]+?)["']?\s*\)""", re.I)
 
 
@@ -206,11 +205,15 @@ def pick_pages(crawl, per_template=1, max_pages=10):
 # ---------------------------------------------------------------------------------------------------------------
 def run_cli(url, cmd, runner=subprocess.run, timeout=240, chrome_path=None):
     """-> LHR dict from a local Lighthouse CLI run (never shell=True, output captured, no secrets in messages)."""
-    fetcher.check_url(url)                                       # ToolError for non-public/unsafe URLs, before any work
+    _scheme, host, _port, _path, ip = fetcher.check_url(url)    # ToolError for non-public/unsafe URLs, before any work
     base = [c for c in _list(cmd) if isinstance(c, str) and c]
     if not base:
         raise ToolError("Lighthouse command is empty: set cfg seo.lighthouse_cmd")
-    argv = list(base) + [url] + list(CLI_FLAGS)
+    # Chrome resolves the audited host to the address we checked (no DNS rebinding for the page itself).
+    # Residual (documented): redirects and subresources to OTHER hosts are resolved by Chrome; the result is
+    # dropped below if the final URL is not public.
+    argv = list(base) + [url] + list(CLI_FLAGS) + ["--chrome-flags=--headless=new --host-resolver-rules=MAP %s %s"
+                                                   % (host, ip)]
     env = dict(os.environ)
     if chrome_path:
         env["CHROME_PATH"] = str(chrome_path)
@@ -237,7 +240,15 @@ def run_cli(url, cmd, runner=subprocess.run, timeout=240, chrome_path=None):
         raise ToolError("Lighthouse returned no report") from None
     if not isinstance(data, dict) or not isinstance(data.get("audits"), dict):
         raise ToolError("Lighthouse returned no report")
+    _final_public(data)
     return data
+
+
+def _final_public(lhr):
+    """Drop a report whose page ended up on a non-public address (a redirect into a private network)."""
+    final = lhr.get("finalDisplayedUrl") or lhr.get("finalUrl") or ""
+    if final and isinstance(final, str):
+        fetcher.check_url(final)          # raises ToolError for private/loopback/odd-port final URLs
 
 
 def run_psi(url, key, http, strategy="mobile"):
@@ -248,13 +259,12 @@ def run_psi(url, key, http, strategy="mobile"):
     strat = _text(strategy, 20).lower() or "mobile"
     if strat not in ("mobile", "desktop"):
         raise ToolError("PageSpeed strategy must be mobile or desktop")
-    target = (PSI_ENDPOINT + "?url=" + urllib.parse.quote(url, safe="") + "&strategy=" + strat
-              + "&category=performance&key=" + urllib.parse.quote(key.strip(), safe=""))
-    headers = {"Accept": "application/json"}
+    target = PSI_ENDPOINT + "?url=" + urllib.parse.quote(url, safe="") + "&strategy=" + strat + "&category=performance"
+    headers = {"Accept": "application/json", "X-Goog-Api-Key": key.strip()}     # key in a header, never in the URL
     try:
         status, body = http("GET", target, headers, None)
     except ToolError:
-        raise
+        raise ToolError("PageSpeed API request failed") from None   # the transport's text could carry the request
     except Exception as exc:                                     # noqa: BLE001 - transport failures never echo the URL
         raise ToolError("PageSpeed API unreachable: " + type(exc).__name__) from None
     code = _int(status)
@@ -427,12 +437,14 @@ def _opportunity_finding(rows):
             slot["pages"] += 1
             savings = _int(opp.get("savings_ms"))
             slot["savings"] += max(0, savings or 0)
+            slot["bytes"] = slot.get("bytes", 0) + max(0, _int(opp.get("savings_bytes")) or 0)
     if not totals or not pages_with:
         return None
-    ranked = sorted(totals.items(), key=lambda kv: (-kv[1]["savings"], -kv[1]["pages"], kv[0]))
+    ranked = sorted(totals.items(), key=lambda kv: (-kv[1]["savings"], -kv[1].get("bytes", 0), -kv[1]["pages"], kv[0]))
     top = ranked[0][1]
-    detail = ("Biggest win: '%s' saves an estimated %d ms across %d page%s."
-              % (top["title"], top["savings"], top["pages"], _plural(top["pages"])))
+    gain = ("an estimated %d ms" % top["savings"]) if top["savings"] else ("about %d KB" % (top.get("bytes", 0) // 1024))
+    detail = ("Biggest win: '%s' saves %s across %d page%s."
+              % (top["title"], gain, top["pages"], _plural(top["pages"])))
     data = {"opportunities": [[oid, slot["title"], slot["pages"], slot["savings"]] for oid, slot in ranked[:MAX_LIST]],
             "pages_with_opportunities": len(pages_with)}
     return {"code": "perf_opportunity", "urls": pages_with[:MAX_URLS], "detail": detail, "data": data}
@@ -606,7 +618,7 @@ def selftest() -> int:
                   timeout=7, chrome_path="/bin/chrome")
     chk(got.get("lighthouseVersion") == "13.6.0", "run_cli returns the parsed LHR")
     chk(calls and calls[0]["argv"][:2] == ["lighthouse", public], "run_cli passes the cmd then the url")
-    chk("--only-categories=performance" in calls[0]["argv"] and "--chrome-flags=--headless=new" in calls[0]["argv"],
+    chk("--only-categories=performance" in calls[0]["argv"] and any(a.startswith("--chrome-flags=--headless=new --host-resolver-rules=MAP ") for a in calls[0]["argv"]),
         "run_cli adds the performance flags")
     chk(calls[0]["timeout"] == 7 and calls[0]["env"].get("CHROME_PATH") == "/bin/chrome",
         "run_cli forwards the timeout and CHROME_PATH")
@@ -652,7 +664,8 @@ def selftest() -> int:
     chk(got.get("lighthouseVersion") == "13.6.0", "run_psi returns the lighthouseResult")
     chk(seen[0]["method"] == "GET" and "runPagespeed" in seen[0]["url"] and "strategy=mobile" in seen[0]["url"],
         "run_psi calls the v5 endpoint with the mobile strategy")
-    chk("KEY-abc-123" in seen[0]["url"] and "93.184.216.34" in seen[0]["url"], "the key and the target url travel in the query")
+    chk("KEY-abc-123" not in seen[0]["url"] and "93.184.216.34" in seen[0]["url"]
+        and seen[0]["headers"].get("X-Goog-Api-Key") == "KEY-abc-123", "the key travels in a header, never in the URL")
     try:
         run_psi(public, "KEY-abc-123", http_of(403, b'{"error": {"code": 403}}'))
         chk(False, "a 403 should raise")

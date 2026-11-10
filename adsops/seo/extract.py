@@ -98,6 +98,23 @@ def normalize(url, base=None):
     return urllib.parse.urlunsplit((scheme, netloc, u.path or "/", u.query, ""))
 
 
+TRACKING_PARAMS = ("gclid", "gbraid", "wbraid", "fbclid", "msclkid", "dclid", "yclid", "mc_cid", "mc_eid")
+
+
+def strip_tracking(url):
+    """-> `url` without utm_* and ad click-id parameters (gclid, fbclid, ...); other query parameters keep their order.
+    The crawler fetches each page once under this key; the links that carried the tags are still reported."""
+    if not isinstance(url, str) or "?" not in url:
+        return url if isinstance(url, str) else ""
+    try:
+        u = urllib.parse.urlsplit(url)
+        keep = [(k, v) for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+                if not (k.lower().startswith("utm_") or k.lower() in TRACKING_PARAMS)]
+        return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, urllib.parse.urlencode(keep), ""))
+    except ValueError:
+        return url
+
+
 def _resolve(raw, base):
     """Resolve a raw href/attribute value against `base`; '' when it is not an absolute http(s) URL."""
     if not raw or not isinstance(raw, str):
@@ -404,6 +421,9 @@ class _PageParser(HTMLParser):
 
     def _add_type(self, value):
         t = _clean(value)
+        for prefix in ("https://schema.org/", "http://schema.org/", "schema:"):
+            if t.lower().startswith(prefix):
+                t = t[len(prefix):]
         if t and t not in self._seen_types and len(self.jsonld_types) < MAX_IMAGES:
             self._seen_types.add(t)
             self.jsonld_types.append(t)
@@ -583,6 +603,9 @@ def selftest():
     chk(normalize("/a", "https://x.com/dir/page") == "https://x.com/a", "relative URL joined to base")
     chk(normalize("https://x.com:8443/a") == "https://x.com:8443/a", "non-default port kept")
     chk(normalize("mailto:a@b.c") == "", "non-http scheme gives ''")
+    chk(strip_tracking("https://x.com/o/?utm_source=a&id=3&gclid=z&UTM_medium=b") == "https://x.com/o/?id=3"
+        and strip_tracking("https://x.com/o/?utm_source=a") == "https://x.com/o/"
+        and strip_tracking("https://x.com/p") == "https://x.com/p", "strip_tracking keeps real parameters only")
     chk(normalize("javascript:void(0)") == "", "javascript gives ''")
     try:
         template_of(None)

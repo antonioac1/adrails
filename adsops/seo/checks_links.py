@@ -15,7 +15,7 @@ import re
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from adsops.errors import ToolError
-from adsops.seo.extract import template_of
+from adsops.seo.extract import strip_tracking, template_of
 from adsops.seo.checks_content import is_indexable, html_pages
 
 MAX_LIST = 20
@@ -25,8 +25,8 @@ DAMPING = 0.85
 PR_ITERATIONS = 50
 DEEP_DEPTH = 3
 DEFAULT_STARVED = 3
-DEFAULT_SKEW_SHARE = 0.8
-SKEW_MEDIAN_MAX = 0.3
+DEFAULT_SKEW_SHARE = 0.5     # acceptance 2026-11-10: Wesley Chapel was hard-coded on 13 of 23 Baytown city pages (59%)
+SKEW_MEDIAN_MAX = 0.2
 MIN_TEMPLATE_PAGES = 4
 HUB_MIN_CHILDREN = 2
 REDIRECT_CODES = (301, 302, 303, 307, 308)
@@ -91,6 +91,14 @@ def _path(url):
     """Path part of `url` ('/' when empty, '' when unparsable)."""
     try:
         return urlsplit(url).path or "/"
+    except ValueError:
+        return ""
+
+
+def _host(url):
+    """Lowercased hostname of `url` ('' when unparsable)."""
+    try:
+        return (urlsplit(url).hostname or "").lower()
     except ValueError:
         return ""
 
@@ -230,6 +238,10 @@ def resolve(crawl, url):
         raise ToolError("checks_links.resolve: crawl must be a dict")
     pages = _pages(crawl)
     current = url.split("#")[0] or url
+    if current not in pages:                       # the crawler queues URLs without tracking parameters
+        stripped = strip_tracking(current)
+        if stripped in pages:
+            current = stripped
     seen = {current}
     while True:
         page = _page(pages, current)
@@ -276,12 +288,12 @@ def graph(crawl):
     if crawl is not None and not isinstance(crawl, dict):
         raise ToolError("checks_links.graph: crawl must be a dict")
     crawl = crawl if isinstance(crawl, dict) else {}
-    nodes = []
+    nodes, node_set = [], set()
     for page in html_pages(crawl):
         url = _url(page)
-        if url and url not in nodes:
+        if url and url not in node_set:
             nodes.append(url)
-    node_set = set(nodes)
+            node_set.add(url)
     pairs = []
     seen = set()
     for src, dst, _anchor, rel, _in_nav in _edge_rows(crawl):
@@ -363,20 +375,24 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
         "deep_pages", [row[0] for row in deep],
         "%d indexable pages sit deeper than %d clicks from the home page (e.g. %s is %d clicks deep)"
         % (len(deep), DEEP_DEPTH, deep[0][0] if deep else "(none)", deep[0][1] if deep else 0),
-        {"count": len(deep), "examples": deep[:cap], "limit": DEEP_DEPTH}), ran=bool(idx_pages))
+        {"count": len(deep), "examples": deep[:cap], "limit": DEEP_DEPTH}),
+        ran=any(isinstance(p.get("depth"), int) for p in idx_pages))
 
     # --- starved_pages --------------------------------------------------------------------------------------
     crawled_urls = _uniq([key for key in pages.keys() if isinstance(key, str)])
     sorted_paths = sorted(set(_path(url) for url in crawled_urls))
 
+    below = {}                                    # one pass: every crawled path credits each of its parent folders
+    for path in sorted_paths:
+        cut = path.rstrip("/").rfind("/")
+        while cut > 0:
+            below[path[:cut + 1]] = below.get(path[:cut + 1], 0) + 1
+            cut = path[:cut].rfind("/")
+
     def children_below(url):
         """Number of distinct crawled paths strictly under the path of `url`."""
         base = _path(url)
-        if not base:
-            return 0
-        lo = bisect.bisect_left(sorted_paths, base)
-        hi = bisect.bisect_left(sorted_paths, base + "\U0010ffff")
-        return sum(1 for path in sorted_paths[lo:hi] if len(path) > len(base))
+        return below.get(base if base.endswith("/") else base + "/", 0) if base else 0
 
     rows = []
     for page in idx_pages:
@@ -418,11 +434,15 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
         total = len(members)
         if total < MIN_TEMPLATE_PAGES:
             continue
-        linked_from = {}
-        for target in members:
-            linked_from[target] = sum(1 for src in members if src != target and target in resolved_out.get(src, ()))
+        member_set = set(members)
+        linked_from = {target: 0 for target in members}
+        for src in members:                       # single pass over each member's own links
+            for target in resolved_out.get(src, ()):
+                if target in member_set and target != src:
+                    linked_from[target] += 1
         shares = [linked_from[target] / float(total - 1) for target in members]
-        top = [target for target in members if linked_from[target] / float(total - 1) >= share_limit]
+        top = [target for target in members
+               if linked_from[target] / float(total - 1) >= share_limit and linked_from[target] >= 3]
         median_share = _median(shares)
         if not top or median_share > SKEW_MEDIAN_MAX:
             continue
@@ -443,7 +463,9 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
         detail = ("%d of %d %s pages link to %s while the median sibling is linked from %d%% of them"
                   % (top_target[1], first["pages"], first["template"], top_target[0], int(round(first["median_share"] * 100))))
         if len(skew_templates) > 1:
-            detail = "%d templates hardcode the same sibling links: " % len(skew_templates) + detail
+            detail = "%d templates hard-code the same sibling links: %s" % (len(skew_templates), "; ".join(
+                "%d of %d %s pages link to %s" % (row["targets"][0][1], row["pages"], row["template"], row["targets"][0][0])
+                for row in skew_templates[:4]))
     else:
         detail = ""
     settle("hardcoded_sibling_skew", emit(
@@ -455,6 +477,8 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
         ran=bool(skew_templates) or any(len(_uniq(v)) >= MIN_TEMPLATE_PAGES for v in templates.values()))
 
     # --- internal_links_to_redirects --------------------------------------------------------------------------
+    settings = crawl.get("settings") if isinstance(crawl.get("settings"), dict) else {}
+    scope_hosts = {h.lower() for h in _list(settings.get("scope_hosts")) if isinstance(h, str)}
     redirect_rows = []
     for src, dst, _anchor, _rel, _in_nav in edges:
         page = _page(pages, dst)
@@ -463,6 +487,8 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
         final = page.get("final") if isinstance(page.get("final"), str) else ""
         if not final or final == dst:
             continue
+        if scope_hosts and _host(final) not in scope_hosts:
+            continue                                   # a deliberate hop to another site (portal, app): not a crawl-waste issue
         if _first_status(page, dst) in REDIRECT_CODES:
             redirect_rows.append([src, dst, final])
     settle("internal_links_to_redirects", emit(
@@ -480,7 +506,8 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
             continue
         status = _int(page.get("status"), 0)
         error = _text(page.get("error"), 200).lower()
-        if status >= 400 or (status == 0 and not error.startswith("refused")):
+        if status in (404, 410) or status >= 500 or (status == 0 and error and not error.startswith(
+                ("refused", "request budget", "crawl deadline", "robots.txt"))):     # 401/403/429 are not "broken"
             error_rows.append([src, dst, status])
     settle("internal_links_to_errors", emit(
         "internal_links_to_errors", [row[0] for row in error_rows],
@@ -501,7 +528,7 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
     # --- internal_utm_links -----------------------------------------------------------------------------------
     utm_rows = []
     for src, dst, _anchor, _rel, _in_nav in edges:
-        if not _has_utm(dst):
+        if not _has_utm(dst) and strip_tracking(dst) == dst:     # utm_* or ad click ids (gclid, fbclid, ...)
             continue
         utm_rows.append([src, dst, _bare(dst)])
     target_links = {}
@@ -535,8 +562,12 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
     # --- noindex_with_inlinks ---------------------------------------------------------------------------------
     idx_set = set(_url(page) for page in idx_pages)
     indexable_inlinks = {}
+    followed = {}
+    for src, dst, _anchor, rel, _in_nav in edges:            # nofollow links pass no equity: not counted here
+        if src in idx_set and "nofollow" not in _rel_tokens(rel):
+            followed.setdefault(src, set()).add(resolve(crawl, dst))
     for src in idx_set:
-        for target in resolved_out.get(src, ()):
+        for target in followed.get(src, ()):
             if target != src:
                 indexable_inlinks[target] = indexable_inlinks.get(target, 0) + 1
     noindex_rows = []
@@ -550,8 +581,8 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
     noindex_rows.sort(key=lambda row: (-row[1], row[0]))
     settle("noindex_with_inlinks", emit(
         "noindex_with_inlinks", [row[0] for row in noindex_rows],
-        "%d noindex pages still receive links from indexable pages, wasting link equity (e.g. %s <- %d links)"
-        % (len(noindex_rows), _first_pair(noindex_rows), noindex_rows[0][1] if noindex_rows else 0),
+        "%d noindex pages still receive links from indexable pages, wasting link equity (e.g. %s from %d pages)"
+        % (len(noindex_rows), noindex_rows[0][0] if noindex_rows else "(none)", noindex_rows[0][1] if noindex_rows else 0),
         {"count": len(noindex_rows), "examples": noindex_rows[:cap]}), ran=bool(h_pages))
 
     # --- empty_anchors / generic_anchors / nofollow_internal --------------------------------------------------

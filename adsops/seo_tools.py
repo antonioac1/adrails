@@ -20,7 +20,9 @@ CLI: `adsops-mcp site-audit --url https://example.com/ [--max-pages N] [--format
 """
 import datetime as dt
 import json
+import math
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -31,6 +33,8 @@ from .seo import adguard, checks_content, checks_links, checks_site, crawl as cr
 MAX_PAGES_TOOL = 2000
 DEFAULT_MAX_PAGES = 200
 MIN_RATE_TOOL = 0.5
+MAX_AD_URLS = 500
+_UA_OK = re.compile(r"^[\x20-\x7e]{1,300}$")
 
 
 def store_dir(cfg):
@@ -47,10 +51,12 @@ def _page_snapshot(crawl, graph, perf_by_url):
     out = {}
     for url, p in (crawl.get("pages") or {}).items():
         doc = p.get("doc") or {}
-        noindex = any("noindex" in (r or "") for r in doc.get("robots") or []) or \
-            "noindex" in (p.get("headers") or {}).get("x-robots-tag", "").lower()
+        meta_ni = any("noindex" in (r or "") or (r or "").strip() == "none" for r in doc.get("robots") or [])
+        head_ni = "noindex" in (p.get("headers") or {}).get("x-robots-tag", "").lower()
+        noindex = meta_ni or head_ni
         out[url] = {"status": p.get("status"), "final": p.get("final"), "ctype": p.get("ctype"),
                     "indexable": checks_content.is_indexable(p), "noindex": bool(noindex),
+                    "noindex_header": bool(head_ni),
                     "canonical": (doc.get("canonicals") or [None])[0], "why": checks_content.why_not_indexable(p),
                     "inlinks": (graph.get("inlinks") or {}).get(url), "depth": p.get("depth"),
                     "in_sitemap": bool(p.get("in_sitemap")),
@@ -65,8 +71,11 @@ def _crawl_from_run(run):
         doc = None
         if s.get("status") == 200 and (s.get("ctype") or "").startswith(("text/html", "application/xhtml")):
             doc = {"robots": ["noindex"] if s.get("noindex") else [], "canonicals": [s["canonical"]] if s.get("canonical") else []}
+        if doc is not None and s.get("noindex_header"):
+            doc["robots"] = []                     # the noindex came from the X-Robots-Tag header: keep that reason
         pages[url] = {"url": url, "status": s.get("status"), "final": s.get("final") or url, "ctype": s.get("ctype") or "",
-                      "headers": {}, "doc": doc, "depth": s.get("depth"), "in_sitemap": s.get("in_sitemap")}
+                      "headers": {"x-robots-tag": "noindex"} if s.get("noindex_header") else {}, "doc": doc,
+                      "depth": s.get("depth"), "in_sitemap": s.get("in_sitemap")}
     return {"settings": run.get("settings") or {}, "pages": pages}
 
 
@@ -83,18 +92,24 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
           fetch=None, sleep=time.sleep, now=time.time, store=None, perf_runner=None, render_factory=None,
           render_allow=None, starved_threshold=3, today=None):
     """Run the whole audit and return the stored run (+ 'diff' vs the previous run of the host, + 'files')."""
-    start = extract.normalize(url or "")
+    start = extract.normalize(url) if isinstance(url, str) else ""
     if not start:
         raise ToolError("url must be an absolute http(s) URL")
+    if not isinstance(user_agent, str) or not _UA_OK.match(user_agent):
+        raise ToolError("user_agent must be 1-300 printable ASCII characters")
+    if not isinstance(rate_limit_s, (int, float)) or not math.isfinite(rate_limit_s):
+        raise ToolError("rate_limit_s must be a number of seconds")
+    if len(ad_urls or ()) > MAX_AD_URLS:
+        raise ToolError("at most %d ad_urls" % MAX_AD_URLS)
     if fetch is None:                                    # the real thing: public addresses only, pinned connection
         fetcher.check_url(start)
     notes, passed, findings = [], [], []
 
     # ad landing pages: explicit list + the desired-state files this deployment already manages
-    ads = [u for u in (ad_urls or []) if isinstance(u, str)]
+    ads = [u for u in (ad_urls or []) if isinstance(u, str) and len(u) <= 2048]
     if ad_states and cfg:
         from_cfg = adguard.final_urls_from_config(cfg)
-        ads += from_cfg["urls"]
+        ads += from_cfg["urls"][:MAX_AD_URLS]
         notes += from_cfg["errors"]
     scope = {_host(start), _host(start)[4:] if _host(start).startswith("www.") else "www." + _host(start)}
     ads = [u for u in dict.fromkeys(extract.normalize(a) for a in ads) if u and _host(u) in scope]
@@ -126,8 +141,11 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
         else:
             picked = perf_mod.pick_pages(cr, max_pages=render_pages)
             try:
-                rendered = render_mod.render_pages(picked, user_agent=user_agent, max_pages=render_pages,
-                                                   playwright_factory=render_factory, allow=render_allow)
+                if render_factory is None:            # real browser: in a child process with a hard time limit
+                    rendered = render_mod.render_isolated(picked, user_agent=user_agent, max_pages=render_pages)
+                else:
+                    rendered = render_mod.render_pages(picked, user_agent=user_agent, max_pages=render_pages,
+                                                       playwright_factory=render_factory, allow=render_allow)
                 f, p = render_mod.parity(cr, rendered)
                 findings += f
                 passed += p
@@ -272,11 +290,11 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, sleep=time.sleep):
                   "limit": {"type": "integer", "description": "issue rows to return (default 40; all rows are stored)"}},
                "required": ["url"], "additionalProperties": False})
     def run_tool(args):
-        mp = int(args.get("max_pages") or DEFAULT_MAX_PAGES)
+        mp = int(args.get("max_pages") or DEFAULT_MAX_PAGES)          # types are enforced by the protocol layer
         if not 1 <= mp <= MAX_PAGES_TOOL:
             raise ToolError("max_pages must be 1..%d" % MAX_PAGES_TOOL)
         rate = float(args.get("rate_limit_s") or 1.0)
-        if rate < MIN_RATE_TOOL:
+        if not math.isfinite(rate) or rate < MIN_RATE_TOOL:
             raise ToolError("rate_limit_s must be >= %.1f (be polite to the site)" % MIN_RATE_TOOL)
         mi = int(args.get("max_inspect") or 50)
         if not 0 <= mi <= 500:
@@ -479,6 +497,14 @@ def selftest():
         ck(r["diff"]["previous"] is None and r["diff"]["summary"]["regressions"] == 0, "first run: nothing to diff")
         ck(sleeps and min(sleeps) > 0 and "JS render parity not run" in " ".join(r["notes"]), "rate limit slept; notes say what did not run")
         ck("hsts_missing" not in codes, "HSTS not demanded of an http-only site")
+        ck("server_errors" not in codes and all(base + "/tenants/" != ex[1] for ex in
+                                                 codes["internal_links_to_errors"]["data"]["examples"])
+           and all(base + "/tenants/" != ex[1] for ex in codes["internal_links_to_redirects"]["data"]["examples"]),
+           "a redirect to another site (tenant portal) is neither an error nor a crawl-waste redirect")
+        ck(r["pages"][base + "/tenants/"]["status"] == 302 and not any("utm_" in u for u in r["pages"]),
+           "off-site redirect keeps its 302; utm-tagged URLs are not crawled as separate pages")
+        ck(not any(p[1] in ("ImageObject", "Organization") for p in codes["schema_gaps"]["data"]["partial"]),
+           "schema gaps compare page-level types only")
         # change the site: /services/b/ becomes noindex, the guide duplicate is fixed
         p = site["pages"]
         st_b, h_b, body_b = p["/services/b/"]
@@ -520,6 +546,10 @@ def selftest():
         bad = call("seo_audit_run", {"url": base + "/", "rate_limit_s": 0.1})
         ck(bad["isError"] and "polite" in bad["content"][0]["text"], "tool refuses a rate faster than 0.5 s")
         ck(call("seo_audit_run", {"url": base + "/", "max_pages": 5000})["isError"], "tool refuses max_pages > 2000")
+        ck(call("seo_audit_run", {"url": base + "/", "user_agent": "x\r\nX-Injected: 1"})["isError"]
+           and call("seo_audit_run", {"url": "http://[::1"})["isError"]
+           and call("seo_audit_run", {"url": base + "/", "ad_urls": [base + "/"] * 501})["isError"],
+           "header-injecting user agents, malformed URLs and oversized ad lists are refused cleanly")
         t = call("seo_audit_run", {"url": base + "/", "rate_limit_s": 0.5, "limit": 5, "max_pages": 50})
         ck(not t["isError"] and len(t["structuredContent"]["issues"]) == 5, "seo_audit_run via MCP returns the top rows")
         iss = call("seo_audit_issues", {"url": base + "/", "priority": 2, "format": "json"})["structuredContent"]
