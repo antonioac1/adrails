@@ -253,6 +253,8 @@ def selftest():
     ck(seen["ip"] == "93.184.216.34" and seen["host"] == "a.example" and seen["req"] == ("GET", "/x?y=1"),
        "connects to the pinned address, fragment dropped")
     ck(("User-Agent", GOOGLEBOT_UA) in seen["headers"] and seen.get("closed"), "Googlebot UA by default, closed")
+    r = fetch("https://a.example/", resolver=pub, connector=conn_for(Resp(200, [("Strict-Transport-Security", "max-age=15552000")], b"x")))
+    ck(r["headers"].get("strict-transport-security") == "max-age=15552000", "HSTS header kept under its lowercase name")
     ck("set-cookie" not in r["headers"] and "strict-transport-security" in r["headers"], "only audit headers kept")
     r = fetch("https://a.example/", resolver=pub, user_agent="X-Bot/1",
               connector=conn_for(Resp(301, [("Location", "/new")], b"")))

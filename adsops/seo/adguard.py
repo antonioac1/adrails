@@ -394,13 +394,52 @@ def run(crawl, final_urls, dup_threshold=DEFAULT_DUP_THRESHOLD):
            bad[0][2] if bad else "(none)"),
         {"count": len(bad), "crawled": len(rows), "examples": bad[:MAX_LIST]}))
 
-    # --- ad_lp_noindex: fine for the ads, only needs to be deliberate ---------------------------------------
+    # --- organic links into non-indexable ad pages (used by ad_lp_noindex and ad_lp_equity_sink) ----------
+    idx_src = set()
+    for _key, page in _pages(crawl).items():
+        purl = _url(page)
+        if purl and is_indexable(page):
+            idx_src.add(purl)
+    sink_links, sink_reasons, source_urls, seen_pages, sink_sources = [], {}, [], set(), {}
+    crawl_edges = _edges(crawl)
+    for url, page in rows:
+        purl = _url(page)
+        reason = _sink_reason(page)
+        if not purl or not reason or is_indexable(page) or purl in seen_pages:
+            continue
+        seen_pages.add(purl)
+        links, sources, per_source = 0, [], set()
+        for edge in crawl_edges:
+            src = edge[0]
+            if src not in idx_src or not _links_to(crawl, edge[1], purl):
+                continue
+            links += 1
+            if src not in per_source:
+                per_source.add(src)
+                sources.append(src)
+        if links:
+            sink_links.append([url, links, len(sources)])
+            sink_reasons[url] = reason
+            sink_sources[url] = sources
+            source_urls.extend(sources)
+    # --- ad_lp_noindex (+ the organic links into it): fine for the ads, only needs to be deliberate ----------
+    # Review 2026-11-10 (Fable): a noindex ad page that organic pages link to is ONE P4 row, not three overlapping rows.
     noinx = [url for url, page in rows if _is_html_200(page) and _noindex(page)]
+    linked = {row[0]: row for row in sink_links if row[0] in noinx}
+    organic = len({src for url in linked for src in sink_sources.get(url, [])})
+    if linked:
+        top = max(linked.values(), key=lambda row: row[2])
+        detail = ("%d ad landing page%s noindex and linked from %d organic page%s (e.g. %s from %d); that is fine for the "
+                  "ads themselves (paid clicks still land) if it is deliberate"
+                  % (len(noinx), " is" if len(noinx) == 1 else "s are", organic, "" if organic == 1 else "s",
+                     _path(top[0]), top[2]))
+    else:
+        detail = ("%d ad landing pages are noindex: that is fine for the ads themselves (paid clicks still land), so it "
+                  "only needs to be deliberate rather than accidental" % len(noinx))
     settle("ad_lp_noindex", emit(
-        "ad_lp_noindex", noinx,
-        "%d ad landing pages are noindex: that is fine for the ads themselves (paid clicks still land), so it "
-        "only needs to be deliberate rather than accidental" % len(noinx),
-        {"count": len(noinx), "examples": noinx[:MAX_LIST]}))
+        "ad_lp_noindex", noinx, detail,
+        {"count": len(noinx), "examples": noinx[:MAX_LIST], "organic_pages_linking": organic,
+         "linked_from": [linked[u] for u in noinx if u in linked][:MAX_LIST]}))
 
     # --- ad_lp_canonical_elsewhere: the ad URL is never the indexed page -------------------------------------
     canon_bad = []
@@ -451,33 +490,9 @@ def run(crawl, final_urls, dup_threshold=DEFAULT_DUP_THRESHOLD):
                                           int(round(dup_rows[0][2] * 100)) if dup_rows else 0),
         {"count": len(dup_rows), "threshold": round(thr, 2), "pairs": dup_rows[:MAX_LIST]}))
 
-    # --- ad_lp_equity_sink: indexable pages linking at an ad-only page waste their equity -------------------
-    idx_src = set()
-    for _key, page in _pages(crawl).items():
-        purl = _url(page)
-        if purl and is_indexable(page):
-            idx_src.add(purl)
-    sink_links, sink_reasons, source_urls, seen_pages = [], {}, [], set()
-    crawl_edges = _edges(crawl)
-    for url, page in rows:
-        purl = _url(page)
-        reason = _sink_reason(page)
-        if not purl or not reason or is_indexable(page) or purl in seen_pages:
-            continue
-        seen_pages.add(purl)
-        links, sources, per_source = 0, [], set()
-        for edge in crawl_edges:
-            src = edge[0]
-            if src not in idx_src or not _links_to(crawl, edge[1], purl):
-                continue
-            links += 1
-            if src not in per_source:
-                per_source.add(src)
-                sources.append(src)
-        if links:
-            sink_links.append([url, links, len(sources)])
-            sink_reasons[url] = reason
-            source_urls.extend(sources)
+    # --- ad_lp_equity_sink: only ad pages that canonicalise elsewhere (noindex ones are in ad_lp_noindex) -----
+    sink_links = [row for row in sink_links if row[0] not in noinx]
+    source_urls = [src for row in sink_links for src in sink_sources.get(row[0], [])]
     first = sink_links[0] if sink_links else [None, 0, 0]
     total_links = sum(row[1] for row in sink_links)
     total_sources = len(set(source_urls))                     # a page linking to two sinks counts once
@@ -646,9 +661,9 @@ def selftest() -> int:
            "https://ex.com/never-seen/"]
     findings, passed = run(crawl, ads)
     found = {f["code"]: f for f in findings}
-    chk(sorted(found) == ["ad_lp_canonical_elsewhere", "ad_lp_duplicates_organic", "ad_lp_equity_sink",
-                          "ad_lp_noindex", "ad_lp_non_200"], "every guard check fires on the fixture crawl")
-    chk(passed == [], "nothing is reported as passing when every check fires")
+    chk(sorted(found) == ["ad_lp_canonical_elsewhere", "ad_lp_duplicates_organic", "ad_lp_noindex", "ad_lp_non_200"],
+        "every guard check fires on the fixture crawl (noindex + its organic links are one row)")
+    chk(passed == ["ad_lp_equity_sink"], "no separate equity-sink row for a noindex ad page")
     chk(all(f["urls"] for f in findings), "no finding has an empty URL list")
     chk(all(set(f) == {"code", "urls", "detail", "data"} for f in findings), "findings follow the shared contract")
     chk(all(f["detail"].endswith(".") for f in findings), "every detail is one full sentence")
@@ -668,6 +683,8 @@ def selftest() -> int:
     chk(noindex.get("urls") == [owners], "the noindex ad URL is reported")
     chk("deliberate" in noindex.get("detail", ""), "the noindex detail says it only needs to be deliberate")
     chk("fine for the ads themselves" in noindex.get("detail", ""), "the noindex detail says it is fine for the ads")
+    chk(noindex.get("data", {}).get("linked_from") == [[owners, 3, 2]] and "linked from 2 organic pages" in noindex["detail"],
+        "the merged noindex row carries the organic links into the ad page")
     canon = found.get("ad_lp_canonical_elsewhere", {})
     chk(canon.get("urls") == [special], "the canonical-elsewhere ad URL is reported")
     chk(canon.get("data", {}).get("pairs") == [[special, pricing]], "the canonical pair is reported")
@@ -677,10 +694,13 @@ def selftest() -> int:
     chk(dups.get("urls") == [lp + "?utm_source=chatgpt"], "the near-duplicate ad URL is reported with its query")
     chk(dups.get("data", {}).get("pairs") == [[lp + "?utm_source=chatgpt", pricing, expected_j]],
         "the duplicate pair carries the similarity score")
-    sink = found.get("ad_lp_equity_sink", {})
-    chk(sink.get("data", {}).get("targets") == [[owners, 3, 2]], "three utm links from two indexable pages")
+    # equity sink: an ad page that canonicalises elsewhere and still collects organic links
+    crawl2 = json.loads(json.dumps(crawl))
+    crawl2["edges"] = crawl2["edges"] + [[home, special, "Special", "", False], [about, special, "Special", "", False]]
+    f2 = {f["code"]: f for f in run(crawl2, ads)[0]}
+    sink = f2.get("ad_lp_equity_sink", {})
+    chk(sink.get("data", {}).get("targets") == [[special, 2, 2]], "two organic links into the canonical-elsewhere ad page")
     chk(sorted(sink.get("urls", [])) == sorted([home, about]), "the linking pages are the finding sources")
-    chk(sink.get("data", {}).get("links") == 3, "the sink total counts the utm links")
     chk("equity is lost" in sink.get("detail", ""), "the sink detail explains the lost equity")
 
     # --- summary ------------------------------------------------------------------------------------------

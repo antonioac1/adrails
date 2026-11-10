@@ -30,6 +30,17 @@ SKEW_MEDIAN_MAX = 0.2
 MIN_TEMPLATE_PAGES = 4
 HUB_MIN_CHILDREN = 2
 REDIRECT_CODES = (301, 302, 303, 307, 308)
+# Legal and utility pages are never "strategic" (review 2026-11-10: /sms-consent was listed as a starved strategic page).
+UTILITY_RX = re.compile(r"(^|[/_.-])(privacy|terms|tos|legal|cookies?|consent|sms|gdpr|ccpa|disclaimer|accessibility|imprint|"
+                        r"login|log-in|signin|sign-in|signup|sign-up|register|account|my-account|cart|checkout|basket|"
+                        r"thank-you|thanks|thankyou|unsubscribe|search|404|sitemap)([/_.-]|$)", re.I)
+
+
+def is_utility(url):
+    """True for legal/utility URLs (privacy, terms, sms-*, consent, cookie, login, cart, thank-you ...)."""
+    return bool(UTILITY_RX.search(_path(url) if isinstance(url, str) else ""))
+
+
 GENERIC_ANCHORS = frozenset({"click here", "here", "read more", "learn more", "more", "details", "view", "this",
                              "link", "go"})
 _TRIM_RX = re.compile(r"^[\s»›→>…\.\!\?,:;\-–—]+|[\s»›→>…\.\!\?,:;\-–—]+$")
@@ -395,9 +406,9 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
         return below.get(base if base.endswith("/") else base + "/", 0) if base else 0
 
     rows = []
-    for page in idx_pages:
+    for page in idx_pages:                         # indexable only: noindex pages are never "strategic"
         url = _url(page)
-        if url == start:
+        if url == start or is_utility(url):
             continue
         count = _int(inlinks.get(url), 0)
         if count <= thr:
@@ -407,11 +418,12 @@ def run(crawl, starved_threshold=DEFAULT_STARVED, skew_share=DEFAULT_SKEW_SHARE,
     hubs = [row for row in rows if row[2]]
     others = [row for row in rows if not row[2]]
     if hubs:
-        detail = ("%d hub pages have %d or fewer internal links (%s has %d) and %d other indexable pages are "
-                  "equally starved (e.g. %s)") % (len(hubs), thr, hubs[0][0], hubs[0][1], len(others),
-                                                  _ex([row[0] for row in others]))
+        detail = ("%d hub pages have %d or fewer internal links from other pages (%s has %d) and %d other indexable "
+                  "content pages are equally starved (e.g. %s); threshold: %d, legal/utility pages excluded")\
+            % (len(hubs), thr, hubs[0][0], hubs[0][1], len(others), _ex([row[0] for row in others]), thr)
     else:
-        detail = "%d indexable pages have %d or fewer internal links (e.g. %s)" % (len(rows), thr, _ex(starved_urls))
+        detail = ("%d indexable content pages have %d or fewer internal links from other pages (e.g. %s); threshold: %d, "
+                  "legal/utility pages excluded" % (len(rows), thr, _ex(starved_urls), thr))
     settle("starved_pages", emit(
         "starved_pages", starved_urls, detail,
         {"count": len(rows), "hubs": len(hubs), "threshold": thr,
@@ -813,4 +825,15 @@ def selftest() -> int:
     chk(all(len(v) <= 1 for f in capped for v in f["data"].values() if isinstance(v, list)),
         "data lists honour max_examples")
 
+    for u in ("https://ex.com/sms-consent", "https://ex.com/privacy/", "https://ex.com/terms-of-service/",
+              "https://ex.com/legal/cookies/", "https://ex.com/account/login/", "https://ex.com/thank-you/"):
+        chk(is_utility(u), "utility page recognised: " + u)
+    for u in ("https://ex.com/property-management/tampa/", "https://ex.com/owners-guide/", "https://ex.com/searchlight/"):
+        chk(not is_utility(u), "content page is not utility: " + u)
+    util = {home: mkpage(home, depth=0), "https://ex.com/sms-consent": mkpage("https://ex.com/sms-consent"),
+            "https://ex.com/guide/": mkpage("https://ex.com/guide/")}
+    f_u = {f["code"]: f for f in run(crawl_of(util, [[home, "https://ex.com/sms-consent", "SMS", "", False],
+                                                     [home, "https://ex.com/guide/", "Guide", "", False]]))[0]}
+    chk(f_u["starved_pages"]["urls"] == ["https://ex.com/guide/"] and "threshold: 3" in f_u["starved_pages"]["detail"],
+        "starved pages skip legal/utility pages and state the threshold")
     return n

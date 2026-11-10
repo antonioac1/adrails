@@ -42,8 +42,8 @@ If the run says `cap_reached`, the site has more pages than `max_pages`. Raise i
 | Priority | Means | Typical rows | What to do |
 |---|---|---|---|
 | 1 | Blocks discovery or indexing | robots.txt blocks Googlebot, http does not redirect, 5xx pages, broken internal links, sitemap URLs Google cannot index, canonicals to dead URLs, ad landing pages that do not answer 200 | Fix this week |
-| 2 | Wastes crawl or splits signals | starved hub pages, a template that hard-codes the same sibling link, near-duplicates that are both self-canonical, internal links with utm_ tags, noindex pages that collect internal links, missing doctype | Fix this month |
-| 3 | Weakens pages | thin content, schema gaps per template, slow LCP opportunities, deep pages | Plan |
+| 2 | Wastes crawl or splits signals | starved hub and content pages (legal/utility pages are never counted), a template that hard-codes the same sibling link, near-duplicates that are both self-canonical, internal links with utm_ tags, missing doctype | Fix this month |
+| 3 | Weakens pages, or needs a decision | thin content, schema gaps per template, slow LCP opportunities, deep pages, noindex pages that indexable pages link to (often deliberate) | Plan |
 | 4 | Polish | long titles and descriptions, missing alt text, security headers, HSTS | When convenient |
 
 Each row has `detail` (the specifics: counts and an example) and `data` (pairs, targets, per-template numbers). Use `seo_audit_issues` with `format=markdown` to paste the table into a ticket, or `format=csv` for a spreadsheet.
@@ -53,8 +53,8 @@ Each row has `detail` (the specifics: counts and an example) and `data` (pairs, 
 | Row | Why it matters for ads | Fix |
 |---|---|---|
 | `internal_utm_links` | A utm-tagged link between your own pages starts a new session and overwrites the real source, so Google Ads and ChatGPT Ads conversions get credited to "site / organic" or whatever the tag says. | Remove utm_ tags from internal links. Tag only links on other sites and in ads. If an owner deliberately uses them for funnel A/B reports, record that decision and accept the row. |
-| `ad_lp_noindex` | Fine for the ads: Google Ads does not need the landing page indexed. It only needs to be deliberate. | Confirm with the owner, keep the page out of the sitemap. |
-| `ad_lp_equity_sink` | Organic pages that link to an ad-only (noindex) page hand it link equity it cannot pass on. | Link organic pages to the indexable equivalent instead. |
+| `ad_lp_noindex` | Fine for the ads: Google Ads does not need the landing page indexed. It only needs to be deliberate. The same row says how many organic pages link to it (one row, P4). | Confirm with the owner, keep the page out of the sitemap; organic pages can link to an indexable equivalent instead. |
+| `ad_lp_equity_sink` | An ad page that canonicalises to another URL but still collects organic links. | Link organic pages to the canonical page instead. |
 | `ad_lp_duplicates_organic` | An indexable ad page that is a near-copy of an organic page competes with it for the same queries. | Make the ad page noindex, or canonical to the organic page, or rewrite it. |
 | `ad_lp_non_200` | An ad that lands on a redirect or an error wastes the click and can get the ad disapproved. | Point the final URL at the page that answers 200. |
 

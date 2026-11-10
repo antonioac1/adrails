@@ -129,6 +129,18 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
         f, p = adguard.run(cr, ads)
         findings += f
         passed += p
+        # Review 2026-11-10: a noindex ad landing page is reported once, in the P4 ad_lp_noindex row (with its organic
+        # inlinks); it must not also appear as a generic "noindex page with inlinks".
+        ad_keys = set(ads) | {extract.strip_tracking(u).split("?")[0] for u in ads}
+        for fnd in [x for x in findings if x["code"] == "noindex_with_inlinks"]:
+            fnd["urls"] = [u for u in fnd["urls"] if u not in ad_keys]
+            fnd["data"]["examples"] = [e for e in fnd["data"].get("examples", []) if e and e[0] not in ad_keys]
+            if not fnd["urls"]:
+                findings.remove(fnd)
+            elif fnd["data"]["examples"]:
+                e = fnd["data"]["examples"][0]
+                fnd["detail"] = ("%d noindex pages that are not ad landing pages still receive links from indexable pages "
+                                 "(e.g. %s from %d pages)." % (len(fnd["urls"]), e[0], e[1]))
     ad_summary = adguard.summary(cr, ads) if ads else {"ad_urls": 0}
 
     # optional: JS render parity
@@ -234,6 +246,9 @@ def audit(url, cfg=None, *, max_pages=DEFAULT_MAX_PAGES, rate_limit_s=1.0, user_
     prev = st.latest(host)
     run_id = st.save(run)
     run["diff"] = runs.diff(prev, run)
+    if prev is None:
+        run["diff"]["first_run"] = True
+        run["diff"]["note"] = "first run, nothing to compare"
     run["files"] = _write_reports(st, host, run_id, run)
     return run
 
@@ -253,6 +268,14 @@ def _write_reports(st, host, run_id, run):
             fh.write(text)
         out[ext] = path
     return out
+
+
+def diff_line(r):
+    """One line for the CLI: 'first run, nothing to compare' or the diff counts."""
+    d = r.get("diff") or {}
+    if d.get("first_run") or d.get("previous") is None:
+        return "first run, nothing to compare"
+    return json.dumps(d.get("summary")) + (" (" + d["note"] + ")" if d.get("note") else "")
 
 
 def _filter_rows(rows, priority=None, code=None, limit=50):
@@ -326,7 +349,9 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, sleep=time.sleep):
                   today=dt.date.fromtimestamp(now()))
         return {"run_id": r["run_id"], "host": r["host"], "summary": r["summary"],
                 "issues": [_brief_row(x) for x in _filter_rows(r["rows"], limit=args.get("limit") or 40)],
-                "diff": r["diff"]["summary"], "regressions": r["diff"]["regressions"][:20], "files": r["files"],
+                "diff": ({"first_run": True, "note": "first run, nothing to compare"} if r["diff"].get("first_run")
+                         else dict(r["diff"]["summary"], note=r["diff"].get("note"))),
+                "regressions": r["diff"]["regressions"][:20], "files": r["files"],
                 "lighthouse": r["lighthouse"], "render": r["render"], "gsc": r["gsc"], "notes": r["notes"],
                 "settings": r["settings"]}
 
@@ -439,8 +464,7 @@ def main(argv=None, cfg=None):
         print(issues.to_csv(r["rows"]), end="")
     else:
         print(issues.to_markdown(r["rows"], title="Site audit: %s (%s)" % (r["host"], r["run_id"]), summary=r["summary"]))
-        print("\nStored: %s\nDiff vs previous run: %s\nNotes: %s" % (r["files"]["json"], json.dumps(r["diff"]["summary"]),
-                                                                    "; ".join(r["notes"])))
+        print("\nStored: %s\nDiff vs previous run: %s\nNotes: %s" % (r["files"]["json"], diff_line(r), "; ".join(r["notes"])))
     return 0
 
 
@@ -487,7 +511,7 @@ def selftest():
         for code in ("starved_pages", "hardcoded_sibling_skew", "near_duplicate_self_canonical", "internal_utm_links",
                      "doctype_missing", "lang_missing", "schema_gaps", "redirect_chain", "internal_links_to_redirects",
                      "internal_links_to_errors", "sitemap_non_indexable", "sitemap_orphans", "ad_lp_noindex",
-                     "ad_lp_equity_sink", "noindex_with_inlinks", "security_headers_missing", "empty_anchors"):
+                     "security_headers_missing", "empty_anchors"):
             ck(code in codes, "fixture defect found: " + code)
         ck(base + "/services/" in codes["starved_pages"]["urls"]
            and [base + "/services/", 1, True] in codes["starved_pages"]["data"]["pages"], "hub /services/ starved, flagged as hub")
@@ -501,7 +525,14 @@ def selftest():
         ck(any(p[0] == "/services/*/" and p[1] == "Service" and p[2:] == [4, 5] for p in codes["schema_gaps"]["data"]["partial"])
            and "/guides/*/" in codes["schema_gaps"]["data"]["article_templates"], "schema gaps: 4/5 Service, guides no Article")
         ck(codes["internal_links_to_errors"]["data"]["examples"][0][1:] == [base + "/missing/", 404], "link to the 404 found")
-        ck(codes["ad_lp_equity_sink"]["data"]["targets"][0][1] == 6, "ad page equity sink counts the 6 utm links")
+        ck(codes["ad_lp_noindex"]["priority"] == 4 and codes["ad_lp_noindex"]["data"]["linked_from"][0][:2]
+           == [base + "/owners/", 6] and "linked from" in codes["ad_lp_noindex"]["detail"]
+           and "noindex_with_inlinks" not in codes and "ad_lp_equity_sink" not in codes,
+           "a noindex ad page linked from organic pages is ONE P4 row (no generic noindex / equity-sink duplicates)")
+        for row in r["rows"]:
+            ck(row["template"] == extract.template_of(row["example_url"]) or row["template"].startswith("several ("),
+               "template column matches the example URL: " + row["code"])
+        ck(codes["internal_utm_links"]["template"].startswith("several (") , "mixed-template row says 'several'")
         ck(codes["redirect_chain"]["data"]["chains"][0][1] == [301, 301, 200], "two-hop redirect chain recorded")
         ck(r["summary"]["ad_landing_pages"]["ad_urls"] == 1, "off-site ad URL ignored, on-site one audited")
         ck(r["pages"][base + "/about/"]["depth"] == 1 and r["pages"][base + "/orphan/"]["depth"] is None, "click depth")
@@ -512,7 +543,13 @@ def selftest():
         ck(os.path.isfile(r["files"]["md"]) and "| # | Priority |" in open(r["files"]["md"]).read()
            and open(r["files"]["csv"]).read().startswith("priority,hours,issue"), "markdown + csv written")
         ck(oct(os.stat(r["files"]["json"]).st_mode & 0o777) == "0o600", "stored run is private (0600)")
-        ck(r["diff"]["previous"] is None and r["diff"]["summary"]["regressions"] == 0, "first run: nothing to diff")
+        ck(r["diff"]["previous"] is None and r["diff"]["summary"]["regressions"] == 0 and r["diff"]["first_run"]
+           and diff_line(r) == "first run, nothing to compare", "first run says 'first run, nothing to compare'")
+        r0 = audit(base + "/", cfg, fetch=fx_fetch, sleep=fsleep, now=fnow, store=runs.RunStore(os.path.join(tmp, "no-ads"), now=fnow),
+                   rate_limit_s=0.2)
+        c0 = {row["code"]: row for row in r0["rows"]}
+        ck(c0["noindex_with_inlinks"]["priority"] == 3 and "decision" in c0["noindex_with_inlinks"]["issue"]
+           and "ad_lp_noindex" not in c0, "without ad data the noindex row is a P3 decision, not a defect")
         ck(sleeps and min(sleeps) > 0 and "JS render parity not run" in " ".join(r["notes"]), "rate limit slept; notes say what did not run")
         ck("hsts_missing" not in codes, "HSTS not demanded of an http-only site")
         ck(codes["sitemap_non_indexable"]["urls"] == [base + "/owners/"]

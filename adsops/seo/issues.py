@@ -82,9 +82,9 @@ CATALOG = {
         "Remove utm_ parameters from internal links; tag only links on other sites and ads, because internal UTMs "
         "start a new session and overwrite the real ad/organic source in analytics"),
     "noindex_with_inlinks": _c(
-        2, 1, "Noindex pages still receive internal links",
-        "Decide per page: remove the noindex tag when the page should rank, otherwise remove the internal links "
-        "that spend crawl budget on it"),
+        3, 1, "Noindex pages that indexable pages link to (a decision, not necessarily a defect)",
+        "Decide per page: if it should rank, remove the noindex; if it is deliberately kept out of search (ad, "
+        "thank-you or account page) that is fine, and organic pages can link to an indexable equivalent instead"),
     "canonical_to_non_200": _c(
         1, 1, "Canonical URL does not return 200",
         "Point the canonical at the live, indexable version of the page (status 200, same content) or remove the "
@@ -157,7 +157,7 @@ CATALOG = {
         "Link the listed deep URLs from the home page or main navigation so they are at most three clicks from the "
         "start"),
     "starved_pages": _c(
-        2, 2, "Strategic pages with too few internal links",
+        2, 2, "Strategic pages with too few internal links (3 or fewer by default)",
         "Link the listed pages from the home page, their hub page and two or three related pages, so each has several "
         "internal entry points instead of the few it has now"),
     "hardcoded_sibling_skew": _c(
@@ -324,9 +324,12 @@ def build_table(findings, status="open"):
         for url in urls:
             templ = _template_of(url)
             templ_counts[templ] = templ_counts.get(templ, 0) + 1
+        # Review 2026-11-10: the Template column must describe the example URL, never an unrelated majority template.
         top_template = ""
-        if templ_counts:
-            top_template = sorted(templ_counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        if len(templ_counts) == 1:
+            top_template = next(iter(templ_counts))
+        elif templ_counts:
+            top_template = "several (%d templates)" % len(templ_counts)
         rows.append({
             "id": _row_id(code, urls),
             "priority": priority,
@@ -527,10 +530,11 @@ def selftest() -> int:
     templ = build_table([finding("thin_content", ["https://x.com/", "https://x.com/a/b/", "https://x.com/a/c/"])])[0]
     assert templ["templates"] == {"home": 1, "/a/*/": 2}, "seo.issues.selftest: templates counted wrong"
     n += 1
-    assert templ["template"] == "/a/*/", "seo.issues.selftest: most common template must win"
+    assert templ["template"] == "several (2 templates)", "seo.issues.selftest: mixed templates say 'several'"
     n += 1
-    tie = build_table([finding("thin_content", ["https://x.com/", "https://x.com/faq/"])])[0]
-    assert tie["template"] == "/faq/", "seo.issues.selftest: template ties must break alphabetically"
+    one_t = build_table([finding("thin_content", ["https://x.com/a/b/", "https://x.com/a/c/"])])[0]
+    assert one_t["template"] == "/a/*/" and _template_of(one_t["example_url"]) == one_t["template"], \
+        "seo.issues.selftest: a single template is the example URL's template"
     n += 1
     assert templ["pages_affected"] == 3, "seo.issues.selftest: pages_affected counts unique urls"
     n += 1

@@ -688,6 +688,13 @@ def selftest() -> int:
     chk("server_errors" in names(c), "a 503 fires server_errors")
 
     # --- headers --------------------------------------------------------------------------------------------
+    # regression 2026-11-10 (Fable): baytownpm.com sends "strict-transport-security: max-age=15552000" (no
+    # includeSubDomains, no preload): that IS HSTS and must never be reported missing.
+    c = base()
+    c["pages"]["https://ex.test/"]["headers"]["strict-transport-security"] = "max-age=15552000"
+    chk("hsts_missing" not in names(c) and "hsts_missing" in run(c)[1], "max-age=15552000 alone counts as HSTS")
+    c["pages"]["https://ex.test/"]["headers"]["strict-transport-security"] = "max-age=0"
+    chk("hsts_missing" in names(c), "max-age=0 switches HSTS off and is reported")
     c = base()
     c["pages"]["https://ex.test/"] = page("https://ex.test/", depth=0, drop=("strict-transport-security",))
     got = of(c, "hsts_missing")
