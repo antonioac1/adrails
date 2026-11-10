@@ -131,11 +131,17 @@ def _sources(draft):
     return out
 
 
+def _one_line(value, limit):
+    """PM: text that lands in IMPLEMENT.md (read by the customer's AI agent) is one plain line: no newlines, backticks
+    or markdown that could start a new instruction block."""
+    return " ".join(_cap(value, limit * 2).replace("`", "'").split())[:limit]
+
+
 def _links(draft):
     out = []
     for item in _lst(draft.get("internal_links"), 50):
         if isinstance(item, dict):
-            out.append({"from": _cap(item.get("from"), 300), "anchor": _cap(item.get("anchor"), 200)})
+            out.append({"from": _one_line(item.get("from"), 300), "anchor": _one_line(item.get("anchor"), 200)})
     return out
 
 
@@ -285,9 +291,9 @@ def implement_md(draft, profile, review, meta):
             add("Declared live changes (%d). Each one is a single live sentence, before -> after:" % len(changes))
             add()
             for i, ch in enumerate(changes, 1):
-                add('%d. before: "%s"' % (i, _cap(ch.get("before"), 400)))
-                add('   after:  "%s"' % _cap(ch.get("after"), 400))
-                add('   reason: "%s"' % _cap(ch.get("reason"), 200))
+                add('%d. before: "%s"' % (i, _one_line(ch.get("before"), 400)))
+                add('   after:  "%s"' % _one_line(ch.get("after"), 400))
+                add('   reason: "%s"' % _one_line(ch.get("reason"), 200))
                 add()
             add("Change nothing else. Every change you make must appear in the list above, word for word.")
     add()
@@ -587,12 +593,21 @@ def verify(path):
             continue
         try:
             with open(full, "rb") as fh:
-                actual = hashlib.sha256(fh.read(4 * 1024 * 1024)).hexdigest()
+                data = fh.read(8 * 1024 * 1024 + 1)
+            if len(data) > 8 * 1024 * 1024:          # PM: was hashing only the first 4 MB (a tail could be appended)
+                errors.append("bundle.verify: %s is larger than 8 MB" % name)
+                continue
+            actual = hashlib.sha256(data).hexdigest()
         except OSError as exc:
             errors.append("bundle.verify: %s is unreadable (%s)" % (name, scrub(exc)))
             continue
         if actual != digest.lower():
             errors.append("bundle.verify: %s does not match its manifest hash" % name)
+    for required in ("page.md", "IMPLEMENT.md", "review.json", "checks.json"):     # PM: a manifest must cover these
+        if required not in listed:
+            errors.append("bundle.verify: MANIFEST.json does not list %s" % required)
+    if manifest.get("verdict") != "approve":
+        errors.append("bundle.verify: MANIFEST.json verdict is not approve")
     for entry in sorted(os.listdir(path)):
         if entry == "MANIFEST.json" or entry in listed or entry.startswith(".bundle-"):
             continue

@@ -62,6 +62,9 @@ def settings(profile):
         if not m or not 1 <= out["max_per_day"] <= 10 or not 1 <= out["max_per_week"] <= 50:
             raise ToolError("auto caps: max_per_day 1..10, max_per_week 1..50, window HH:MM-HH:MM")
         out["window"] = ((int(m.group(1)), int(m.group(2))), (int(m.group(3)), int(m.group(4))))
+        (h1, m1), (h2, m2) = out["window"]
+        if not (0 <= h1 <= 23 and 0 <= h2 <= 23 and 0 <= m1 <= 59 and 0 <= m2 <= 59 and h1 * 60 + m1 < h2 * 60 + m2):
+            raise ToolError("auto.window must be HH:MM-HH:MM within one day, start before end (review D#13)")
         try:
             from zoneinfo import ZoneInfo
             ZoneInfo(out["tz"])
@@ -75,9 +78,15 @@ def state_files(state_dir):
             "lock": os.path.join(state_dir, "content-publish.lock"), "log": os.path.join(state_dir, "content-published.jsonl")}
 
 
-def plan_id_for(bundle_dir):
+def plan_id_for(bundle_dir, profile=None):
+    """The approval key: hash of the bundle's MANIFEST plus WHERE it would be published (site, target, dir), so an
+    approval cannot be replayed against another destination (review D#22)."""
     with open(os.path.join(bundle_dir, "MANIFEST.json"), "rb") as f:
-        return "seo-content:" + hashlib.sha256(f.read()).hexdigest()[:32]
+        h = hashlib.sha256(f.read())
+    if profile is not None:
+        st = settings(profile)
+        h.update(json.dumps([profile.get("site"), st["target"], st.get("dir")]).encode())
+    return "seo-content:" + h.hexdigest()[:32]
 
 
 def _read_json(path):
@@ -87,6 +96,8 @@ def _read_json(path):
 
 def check_bundle(bundle_dir):
     """-> (manifest, review) for an approved, intact bundle, else RailViolation."""
+    if os.path.islink(bundle_dir.rstrip("/")):
+        raise RailViolation("bundle directory is a symlink")
     ok, errs = bundle_mod.verify(bundle_dir)
     if not ok:
         raise RailViolation("bundle failed its integrity check: " + "; ".join(str(e) for e in errs)[:400])
@@ -97,8 +108,14 @@ def check_bundle(bundle_dir):
         raise RailViolation("bundle is not approved by the adversarial review")
     if ch.get("ok") is not True:
         raise RailViolation("bundle did not pass the deterministic checks")
-    if not (rv.get("reviewer") or {}).get("model_answered"):
+    rev = rv.get("reviewer") or {}
+    if not rev.get("model_answered"):
         raise RailViolation("bundle has no verified reviewer model on record")
+    wf, rf = rv.get("writer_family"), rev.get("family")      # review D#2: independence re-asserted at publish time
+    if not wf or not rf or wf == rf:
+        raise RailViolation("bundle does not record an independent review (writer family %r, reviewer family %r)" % (wf, rf))
+    if man.get("reviewer_model") and man["reviewer_model"] != rev["model_answered"]:
+        raise RailViolation("MANIFEST reviewer model does not match review.json")
     return man, rv
 
 
@@ -137,8 +154,11 @@ def _auto_gate(st, rows, now):
 
 
 class _Lock:
+    """O_EXCL lock file with a random token; a stale lock (older than stale_s) may be taken over, and we only remove
+    the file if it still holds OUR token (review D#11)."""
+
     def __init__(self, path, stale_s=3600):
-        self.path, self.stale_s, self.fd = path, stale_s, None
+        self.path, self.stale_s, self.token = path, stale_s, None
 
     def __enter__(self):
         try:
@@ -147,23 +167,30 @@ class _Lock:
         except OSError:
             pass
         try:
-            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            raise RailViolation("another publish is running (lock %s)" % self.path) from None
-        os.write(self.fd, str(os.getpid()).encode())
+            raise RailViolation("another publish or run is in progress (lock %s)" % self.path) from None
+        self.token = "%d-%s" % (os.getpid(), os.urandom(8).hex())
+        os.write(fd, self.token.encode())
+        os.close(fd)
         return self
 
     def __exit__(self, *a):
-        os.close(self.fd)
         try:
-            os.unlink(self.path)
+            with open(self.path, encoding="utf-8") as f:
+                mine = f.read(100) == self.token
+            if mine:
+                os.unlink(self.path)
         except OSError:
             pass
 
 
+_SLUG_FULL = re.compile(r"/[a-z0-9-]+(?:/[a-z0-9-]+)*/")
+
+
 def _target_path(base, slug, name):
     """Path for `name` under base/<slug>/, refusing traversal and symlinks anywhere on the way."""
-    if not isinstance(slug, str) or not re.match(r"^/[a-z0-9/-]{1,120}/$", slug) or ".." in slug or "//" in slug:
+    if not isinstance(slug, str) or len(slug) > 122 or not _SLUG_FULL.fullmatch(slug):
         raise RailViolation("unsafe slug %r" % scrub(str(slug), 120))
     cur = base
     for seg in slug.strip("/").split("/"):
@@ -179,21 +206,50 @@ def _target_path(base, slug, name):
     return path
 
 
-def _write(path, data):
+def _write(path, data, base):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".adrails-tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
+    if os.path.commonpath([os.path.realpath(os.path.dirname(path)), base]) != base:
+        raise RailViolation("target directory escapes publish.dir")
+    tmp = "%s.adrails-%s.tmp" % (path, os.urandom(6).hex())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)   # review D#10
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.islink(path):
+            raise RailViolation("refusing to overwrite a symlink: %s" % path)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+_GIT_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "TMPDIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                 "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")
 
 
 def _git(argv, cwd, run=None):
-    env = {k: v for k, v in os.environ.items() if not k.endswith(("_KEY", "_TOKEN", "_SECRET"))}
-    env["GIT_TERMINAL_PROMPT"] = "0"
+    """git with an allowlisted environment (no API keys reach it) and hooks/fsmonitor disabled (review D#5)."""
+    full = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + argv
     if run:
         return run(["git"] + argv, cwd)
-    p = subprocess.run(["git"] + argv, cwd=cwd, capture_output=True, text=True, timeout=120, env=env)
+    env = {k: os.environ[k] for k in _GIT_ENV_KEEP if k in os.environ}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    p = subprocess.run(full, cwd=cwd, capture_output=True, text=True, timeout=120, env=env)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def _read_verified(bundle_dir, man, name):
+    """Read a bundle file ONCE and check those exact bytes against the manifest (review D#6: no swap after verify)."""
+    with open(os.path.join(bundle_dir, name), "rb") as f:
+        data = f.read(8 * 1024 * 1024 + 1)
+    if hashlib.sha256(data).hexdigest() != str((man.get("files") or {}).get(name, "")).lower():
+        raise RailViolation("%s changed after verification" % name)
+    return data
 
 
 def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time, actor="agent", fetch=None, git_run=None,
@@ -211,47 +267,46 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
         return data
 
     try:
-        if os.path.exists(files["stop"]):
-            raise RailViolation("kill switch is on (%s): nothing is published" % files["stop"])
-        if os.path.exists(files["hold"]):
-            with open(files["hold"], encoding="utf-8", errors="replace") as f:
-                why = f.read(400)
-            raise RailViolation("publishing is on HOLD after a failed post-publish check (%s). A human must read it and "
-                                "delete %s." % (scrub(why.strip(), 300), files["hold"]))
         if st["target"] == "none":
             raise RailViolation("publish.target is \"none\": this site takes Markdown bundles only (give IMPLEMENT.md "
                                 "to your own agent)")
-        man, rv = check_bundle(bundle_dir)
-        pid = plan_id_for(bundle_dir)
-        record.update(plan_id=pid, bundle_id=man.get("bundle_id"), reviewer=(rv.get("reviewer") or {}).get("model_answered"))
-        rows = published(files["log"])
-        if any(r.get("plan_id") == pid for r in rows):
-            raise RailViolation("this bundle was already published")
-        if st["mode"] == "human":
-            if queue is None:
-                raise RailViolation("human approval is required: configure approvals (ADRAILS_APPROVAL_SECRET) and "
-                                    "request approval for plan_id %s" % pid)
-            queue.require_approved(pid)
-        else:
-            _auto_gate(st, rows, now())
-        with open(os.path.join(bundle_dir, "page.md"), "rb") as f:
-            page = f.read()
-        fm = bundle_mod.read_front_matter(page.decode("utf-8"))
-        slug, mode = fm.get("slug"), fm.get("mode")
-        if not slug:
-            raise RailViolation("page.md front matter has no slug")
-        record.update(slug=slug)
-        targets = [(_target_path(st["dir"], slug, "index.md"), page)]
-        if st["html"] and os.path.exists(os.path.join(bundle_dir, "page.html")):
-            with open(os.path.join(bundle_dir, "page.html"), "rb") as f:
-                targets.append((_target_path(st["dir"], slug, "index.html"), f.read()))
-        for path, _ in targets:
-            if os.path.exists(path) and mode != "extend":
-                raise RailViolation("a page already exists at %s and this bundle is not an extension of it" % path)
-        if dry_run:
-            return audit(True, would_write=[p for p, _ in targets], note="dry run: nothing written")
-        with _Lock(files["lock"]):
-            branch = None
+        with _Lock(files["lock"]):                       # review D#3: every gate is evaluated INSIDE the lock
+            if os.path.exists(files["stop"]):
+                raise RailViolation("kill switch is on (%s): nothing is published" % files["stop"])
+            if os.path.exists(files["hold"]):
+                with open(files["hold"], encoding="utf-8", errors="replace") as f:
+                    why = f.read(400)
+                raise RailViolation("publishing is on HOLD after a failed post-publish check (%s). A human must read "
+                                    "it and delete %s." % (scrub(why.strip(), 300), files["hold"]))
+            man, rv = check_bundle(bundle_dir)
+            pid = plan_id_for(bundle_dir, profile)
+            record.update(plan_id=pid, bundle_id=man.get("bundle_id"),
+                          reviewer=(rv.get("reviewer") or {}).get("model_answered"))
+            rows = published(files["log"])
+            if any(r.get("plan_id") == pid for r in rows):
+                raise RailViolation("this bundle was already published")
+            if st["mode"] == "human":
+                if queue is None:
+                    raise RailViolation("human approval is required: configure approvals (ADRAILS_APPROVAL_SECRET) and "
+                                        "request approval for plan_id %s" % pid)
+                queue.require_approved(pid)
+            else:
+                _auto_gate(st, rows, now())
+            page = _read_verified(bundle_dir, man, "page.md")
+            fm = bundle_mod.read_front_matter(page.decode("utf-8", "replace"))
+            slug, mode = fm.get("slug"), fm.get("mode")
+            if not slug:
+                raise RailViolation("page.md front matter has no slug")
+            record.update(slug=slug)
+            targets = [(_target_path(st["dir"], slug, "index.md"), page)]
+            if st["html"] and "page.html" in (man.get("files") or {}):
+                targets.append((_target_path(st["dir"], slug, "index.html"), _read_verified(bundle_dir, man, "page.html")))
+            for path, _ in targets:
+                if os.path.exists(path) and mode != "extend":
+                    raise RailViolation("a page already exists at %s and this bundle is not an extension of it" % path)
+            if dry_run:
+                return audit(True, would_write=[p for p, _ in targets], note="dry run: nothing written")
+            branch, commit, backups, problems, url = None, None, [], [], None
             if st["target"] == "git":
                 rc, out = _git(["status", "--porcelain"], st["dir"], git_run)
                 if rc != 0 or out.strip():
@@ -260,38 +315,45 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                 rc, out = _git(["checkout", "-b", branch], st["dir"], git_run)
                 if rc != 0:
                     raise RailViolation("could not create branch %s: %s" % (branch, scrub(out, 200)))
-            backups = []
-            for path, data in targets:
-                if os.path.exists(path):
-                    bak = path + ".bak-%d" % int(now())
-                    os.replace(path, bak)
-                    backups.append(bak)
-                _write(path, data)
-            commit = None
-            if st["target"] == "git":
-                rels = [os.path.relpath(p, st["dir"]) for p, _ in targets]
-                rc, out = _git(["add", "--"] + rels, st["dir"], git_run)
-                if rc == 0:
-                    msg = "AdRails content: %s (bundle %s, reviewed by %s)" % (slug, man.get("bundle_id"), record["reviewer"])
-                    rc, out = _git(["commit", "-m", msg, "--"] + rels, st["dir"], git_run)
-                if rc != 0:
-                    raise RailViolation("git commit failed: %s" % scrub(out, 200))
-                rc, out = _git(["rev-parse", "HEAD"], st["dir"], git_run)
-                commit = out.strip()[:40] if rc == 0 else None
-            problems = []
-            for path, data in targets:
-                with open(path, "rb") as f:
-                    if hashlib.sha256(f.read()).digest() != hashlib.sha256(data).digest():
-                        problems.append("written file differs from the bundle: %s" % path)
-            url = None
-            if st["verify_url"] and not problems:
-                url = (profile.get("site") or "").rstrip("/") + slug
-                r = (fetch or _default_fetch)(url)
-                title = str(fm.get("title") or "")
-                if (r or {}).get("status") != 200 or (title and title not in str((r or {}).get("body") or "")):
-                    problems.append("live check failed for %s (status %s)" % (url, (r or {}).get("status")))
-            row = dict(record, ok=not problems, at=now(), files=[p for p, _ in targets], backups=backups, branch=branch,
-                       commit=commit, url=url, problems=problems)
+            try:                                          # review D#4/#12: anything after this point fails CLOSED
+                for path, data in targets:
+                    if os.path.exists(path):
+                        bak = path + ".bak-%d" % int(now())
+                        os.replace(path, bak)
+                        backups.append((path, bak))
+                    _write(path, data, st["dir"])
+                if st["target"] == "git":
+                    rels = [os.path.relpath(p, st["dir"]) for p, _ in targets]
+                    rc, out = _git(["add", "--"] + rels, st["dir"], git_run)
+                    if rc == 0:
+                        msg = "AdRails content: %s (bundle %s, reviewed by %s)" % (slug, man.get("bundle_id"),
+                                                                                 record["reviewer"])
+                        rc, out = _git(["commit", "--no-verify", "-m", msg, "--"] + rels, st["dir"], git_run)
+                    if rc != 0:
+                        raise RailViolation("git commit failed: %s" % scrub(out, 200))
+                    rc, out = _git(["rev-parse", "HEAD"], st["dir"], git_run)
+                    commit = out.strip()[:40] if rc == 0 else None
+                for path, data in targets:
+                    with open(path, "rb") as f:
+                        if hashlib.sha256(f.read()).digest() != hashlib.sha256(data).digest():
+                            problems.append("written file differs from the bundle: %s" % path)
+                if st["verify_url"] and not problems:
+                    url = (profile.get("site") or "").rstrip("/") + slug
+                    r = (fetch or _default_fetch)(url)
+                    r = r if isinstance(r, dict) else {}
+                    title = str(fm.get("title") or "")
+                    if r.get("status") != 200 or r.get("error") or (title and title not in str(r.get("body") or "")):
+                        problems.append("live check failed for %s (status %s)" % (url, r.get("status")))
+            except Exception as e:                        # noqa: BLE001 - convert, restore, HOLD
+                problems.append("publish failed after writing started: %s" % scrub(str(e) or type(e).__name__, 200))
+                if st["target"] == "static":
+                    for path, bak in backups:
+                        try:
+                            os.replace(bak, path)
+                        except OSError:
+                            pass
+            row = dict(record, ok=not problems, at=now(), files=[p for p, _ in targets], backups=[b for _, b in backups],
+                       branch=branch, commit=commit, url=url, problems=problems)
             with open(files["log"], "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, sort_keys=True) + "\n")
             if problems:
@@ -347,13 +409,14 @@ def selftest() -> int:
         draft = {"mode": "new", "slug": "/guides/flat-fee/", "title": "Flat fee guide", "description": "d" * 80,
                  "content_type": "guide", "body_md": "Body text here.", "faq": [], "sources": [], "live_changes": [],
                  "internal_links": [], "jsonld": None}
-        rv = {"verdict": "approve", "reviewer": {"model_answered": "openai/gpt-5", "family": "openai"}, "findings": []}
+        rv = {"verdict": "approve", "reviewer": {"model_answered": "openai/gpt-5", "family": "openai"}, "findings": [],
+              "writer_family": "zhipu"}
         meta = {"bundle_id": "b1", "today": "2026-11-10", "writer_model": "glm-5.3", "reviewer_model": "openai/gpt-5",
                 "run_id": "r1"}
         out = bundle_mod.write(os.path.join(tmp, "bundles"), draft, rv, {"ok": True, "errors": [], "warnings": []}, {},
                                prof, meta)
         bdir = out["path"]
-        pid = plan_id_for(bdir)
+        pid = plan_id_for(bdir, prof)
         refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q), "no request on file",
                 "human mode needs an approval")
         req = q.request(pid, "example.com", "publish /guides/flat-fee/")
@@ -378,7 +441,7 @@ def selftest() -> int:
         # existing page + new mode refused; symlink refused
         out3 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/flat-fee/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b3"))
-        p3 = plan_id_for(out3["path"])
+        p3 = plan_id_for(out3["path"], prof)
         q.decide(q.request(p3, "example.com", "x")["approve_token"])
         refused(lambda: publish(out3["path"], prof, state_dir=state, chain=chain, queue=q), "already exists",
                 "new bundle may not overwrite a page")
@@ -386,7 +449,7 @@ def selftest() -> int:
         os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(site, "evil"))
         out4 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/evil/x/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b4"))
-        q.decide(q.request(plan_id_for(out4["path"]), "example.com", "x")["approve_token"])
+        q.decide(q.request(plan_id_for(out4["path"], prof), "example.com", "x")["approve_token"])
         refused(lambda: publish(out4["path"], prof, state_dir=state, chain=chain, queue=q), "symlink", "symlink refused")
         # kill switch and HOLD
         open(state_files(state)["stop"], "w").close()
@@ -427,6 +490,22 @@ def selftest() -> int:
             ck(False, "held review must not produce a bundle")
         except ToolError:
             ck(True, "held review produces no bundle")
+        for bad_window in ("00:00-99:99", "22:00-06:00", "09:00-09:00"):
+            try:
+                settings(dict(prof, publish={"target": "static", "dir": "site", "mode": "auto",
+                                             "auto": {"max_per_day": 1, "max_per_week": 1, "window": bad_window}}))
+                ck(False, "bad window %s must be refused" % bad_window)
+            except ToolError:
+                ck(True, "bad window %s refused" % bad_window)
+        try:
+            bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/samefam/"),
+                             dict(rv, writer_family="openai"), {"ok": True, "errors": [], "warnings": []}, {}, prof,
+                             dict(meta, bundle_id="bsf"))
+            sf = [d for d in os.listdir(os.path.join(tmp, "bundles")) if "samefam" in d][0]
+            refused(lambda: check_bundle(os.path.join(tmp, "bundles", sf)), "independent", "same-family bundle refused")
+        except ToolError:
+            ck(True, "same-family bundle not even written")
+        ck(_SLUG_FULL.fullmatch("/x/\n") is None and _SLUG_FULL.fullmatch("/a/b-c/") is not None, "slug fullmatch")
         # git publisher: new branch + one commit, never a push
         calls = []
 
@@ -442,7 +521,7 @@ def selftest() -> int:
         gprof = dict(prof, publish={"target": "git", "dir": "gsite"})
         out9 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/git-one/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b9"))
-        q.decide(q.request(plan_id_for(out9["path"]), "example.com", "x")["approve_token"])
+        q.decide(q.request(plan_id_for(out9["path"], gprof), "example.com", "x")["approve_token"])
         os.unlink(state_files(state)["hold"])
         r = publish(out9["path"], gprof, state_dir=state, chain=chain, queue=q, git_run=git_run)
         ck(r["ok"] and r["branch"].startswith("adrails/content-") and r["commit"] == "abc123", "git branch + commit")

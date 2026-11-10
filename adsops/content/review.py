@@ -127,6 +127,7 @@ def review(draft, ctx, writer_family, reviewers, budget, *, editor=None, lessons
     """-> {"verdict": "approve"|"reject"|"hold", "hold_reasons", "reviewer", "editor", "attempts", "findings",
     "edited", "draft", "checks"}. Never raises for model trouble: every failure is a recorded hold."""
     check_fn = check_fn or checks_mod.run
+    writer_family = str(writer_family).strip().lower() if writer_family else None       # review D-a#7
     out = {"verdict": "hold", "hold_reasons": [], "reviewer": None, "editor": None, "attempts": [], "findings": [],
            "edited": False, "draft": draft, "checks": None, "writer_family": writer_family}
 
@@ -151,6 +152,8 @@ def review(draft, ctx, writer_family, reviewers, budget, *, editor=None, lessons
     except (writers.BackendError, writers.Refused, writers.CapExceeded) as e:
         out["attempts"] = getattr(e, "attempts", [])
         return hold("no independent review: " + str(e))
+    except Exception as e:                                 # noqa: BLE001 - review D-a#16: anything else is a hold too
+        return hold("no independent review: unexpected %s" % type(e).__name__)
     out["attempts"] = att
     out["reviewer"] = writers.public(rep)
     v = parse_verdict(rep["text"])
@@ -177,6 +180,8 @@ def review(draft, ctx, writer_family, reviewers, budget, *, editor=None, lessons
         except (writers.BackendError, writers.Refused, writers.CapExceeded) as e:
             out["attempts"] += getattr(e, "attempts", [])
             return hold("editor pass failed: " + str(e))
+        except Exception as e:                             # noqa: BLE001
+            return hold("editor pass failed: unexpected %s" % type(e).__name__)
         out["attempts"] += eatt
         out["editor"] = writers.public(erep)
         ev = parse_verdict(erep["text"])
@@ -185,6 +190,8 @@ def review(draft, ctx, writer_family, reviewers, budget, *, editor=None, lessons
             out["verdict"] = "reject"
             out["hold_reasons"].append("the editor rejected the draft")
             return out
+        if any(f["severity"] == "blocking" for f in ev["findings"]) and ev["edited_draft"] is None:
+            return hold("the editor approved but listed a blocking finding without fixing it")   # review D-a#5
         final2, res2, why2 = _apply_edit(final, ev["edited_draft"], ctx, check_fn)
         out["checks"] = res2
         if why2:

@@ -1,0 +1,10 @@
+[Unit]
+Description=AdRails guarded content pipeline, twice a week
+
+[Timer]
+OnCalendar=Mon,Thu 06:10
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

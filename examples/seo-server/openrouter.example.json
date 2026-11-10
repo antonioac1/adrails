@@ -1,0 +1,31 @@
+{
+  "_comment": "Customer default: one OpenRouter key (env OPENROUTER_API_KEY) for an Anthropic writer and an OpenAI adversarial reviewer (a different family, enforced in code). Copy to site-profile.json next to an APPROVED FACTS.json.",
+  "site": "https://www.example.com/",
+  "gsc_site": "sc-domain:example.com",
+  "facts_file": "FACTS.json",
+  "lessons_file": "LESSONS.md",
+  "author": {"name": "Jane Doe", "url": "/about/jane-doe/", "id": "https://www.example.com/about/jane-doe/#person"},
+  "rulings": {
+    "banned_phrases": ["guaranteed results", "risk-free"],
+    "excluded_areas": [],
+    "competitors": ["Competitor Name"],
+    "own_brand": ["Example Co"]
+  },
+  "allowed_source_domains": ["*.gov", "www.example.com"],
+  "reference_sources": [],
+  "min_words": {"new": 700, "extend": 150},
+  "extend": {"min_retention": 0.85, "max_changed_sentences": 3},
+  "writers": [
+    {"name": "writer", "kind": "openrouter", "model": "anthropic/claude-sonnet-4.5", "key_env": "OPENROUTER_API_KEY",
+     "max_tokens": 16000, "timeout_s": 600, "retries": 1},
+    {"name": "backup-writer", "kind": "openrouter", "model": "google/gemini-2.5-pro", "key_env": "OPENROUTER_API_KEY",
+     "max_tokens": 16000, "timeout_s": 600, "retries": 1}
+  ],
+  "reviewers": [
+    {"name": "reviewer", "kind": "openrouter", "model": "openai/gpt-5", "key_env": "OPENROUTER_API_KEY",
+     "max_tokens": 16000, "timeout_s": 600, "retries": 1}
+  ],
+  "editor": null,
+  "caps": {"max_cost_usd": 1.5, "max_tokens": 250000, "max_calls": 8, "deadline_s": 2400},
+  "publish": {"target": "none"}
+}

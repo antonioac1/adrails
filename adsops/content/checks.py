@@ -208,6 +208,9 @@ def visible_text(draft):
     for item in _mlist(draft.get("live_changes"))[:MAX_LIST]:
         if isinstance(item, dict):
             parts.append(_text(item.get("after"), 4000))
+    for item in _mlist(draft.get("internal_links"))[:MAX_LIST]:   # PM: anchors become visible text on other pages
+        if isinstance(item, dict):
+            parts.append(_text(item.get("anchor"), 300))
     return "\n".join(p for p in parts if p)[:MAX_TEXT]
 
 

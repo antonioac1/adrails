@@ -71,6 +71,16 @@ def make_io(cfg, profile, gsc_client=None, fetch=None, http=None, run_cmd=None, 
         except ToolError:
             client = None
     prop = profile.get("gsc_site") or profile["site"]
+    if fetch is None:                         # polite by default: at most 2 requests a second to any site
+        from .content import sources as sources_mod
+        last = [0.0]
+
+        def fetch(url, _rate=0.5):
+            wait = last[0] + _rate - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            last[0] = time.monotonic()
+            return sources_mod._default_fetch(url)
 
     def gsc(site, start, end, dims):
         return client.query(prop, start, end, dims)
@@ -104,6 +114,8 @@ def _bundle_path(profile, bundle_id):
     if not isinstance(bundle_id, str) or not bundle_id or "/" in bundle_id or bundle_id.startswith(".") or len(bundle_id) > 120:
         raise ToolError("bundle_id must be a bundle directory name from seo_content_bundle")
     path = os.path.join(p["bundles"], bundle_id)
+    if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) != os.path.realpath(p["bundles"]):
+        raise ToolError("bundle %s is not a plain directory inside the bundle dir" % bundle_id)   # review D#18
     if not os.path.isfile(os.path.join(path, "MANIFEST.json")):
         raise ToolError("no bundle %s" % bundle_id)
     return path
@@ -184,6 +196,7 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, http=None, run_cmd=None
         if not cands:
             raise ToolError("candidate %s is not in the current plan (run seo_content_plan)" % scrub(args["candidate_id"], 40))
         with pipeline._RunLock(pipeline.paths(profile)["lock"]):
+            pipeline.daily_gate(profile, pipeline.paths(profile), now())
             r = pipeline.draft(profile, facts, chains, io, candidate=cands[0])
         pipeline._log(pipeline.paths(profile), dict(pipeline._slim(r), at=now()))
         return r
@@ -197,6 +210,7 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, http=None, run_cmd=None
     def review_tool(args):
         profile, facts, chains, io = setup(args)
         with pipeline._RunLock(pipeline.paths(profile)["lock"]):
+            pipeline.daily_gate(profile, pipeline.paths(profile), now())
             r = pipeline.review_draft(profile, facts, chains, io, draft_id=args["draft_id"], html=bool(args.get("html")))
         pipeline._log(pipeline.paths(profile), dict(pipeline._slim(r), at=now()))
         return r
@@ -236,11 +250,14 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, http=None, run_cmd=None
         state = pipeline.paths(profile)["state"]
         q = _queue(cfg, ctx)
         if args["action"] == "request":
-            publish_mod.check_bundle(b)
             if q is None:
                 raise ToolError("approvals are not configured: set ADRAILS_APPROVAL_SECRET (32+ chars) so a human can "
                                 "approve publishes")
-            r = q.request(publish_mod.plan_id_for(b), profile["host"], "publish content bundle %s" % args["bundle_id"],
+            man, rv = publish_mod.check_bundle(b)
+            st = publish_mod.settings(profile)
+            r = q.request(publish_mod.plan_id_for(b, profile), profile["host"],
+                          "publish bundle %s to %s %s (reviewed by %s)" % (args["bundle_id"], st["target"], st.get("dir") or "",
+                                                                           (rv.get("reviewer") or {}).get("model_answered")),
                           risk="medium")
             return {"plan_id": r["plan_id"], "request_id": r["request_id"], "status": r["status"],
                     "note": "a human approves with adsops_approval_decide and the approve token; then call action=publish"}
@@ -323,7 +340,7 @@ def main(argv=None, cfg=None):
             q = _queue(cfg, None) if (profile.get("publish") or {}).get("mode", "human") == "human" else None
             for bid in ids:
                 b = _bundle_path(profile, bid)
-                if publish_mod.plan_id_for(b) in done:
+                if publish_mod.plan_id_for(b, profile) in done:
                     continue
                 try:
                     out["published"].append(publish_mod.publish(b, profile, state_dir=p["state"], chain=_chain(cfg),

@@ -7,7 +7,8 @@ Three backend kinds, all configured by the operator (profile "writers" / "review
                      cost (usage.cost) counts toward the run's cost cap.
   openai_compatible  any /chat/completions API: base_url + key_env (z.ai GLM, DeepSeek, OpenAI, a local server).
   command            a local CLI the operator configured (e.g. an OAuth/subscription login). The prompt goes through a
-                     0600 temp file ("{prompt_file}" in cmd) or stdin, NEVER argv. Its JSON output names the model.
+                     0600 temp file ("{prompt_file}" in cmd) or stdin, NEVER argv ("{nonce}" = a fresh id per
+                     call, e.g. a session id). Its JSON output names the model that answered.
 
 Rules enforced here:
   * Keys are read from the environment BY NAME at call time. They are never logged, returned, put in errors, or passed
@@ -152,7 +153,7 @@ def validate_backend(b, role="writer"):
         out["price_per_mtok"] = {"in": float(price.get("in", 0)), "out": float(price.get("out", 0))}
     if kind in ("openrouter", "openai_compatible"):
         env = b.get("key_env") or ("OPENROUTER_API_KEY" if kind == "openrouter" else None)
-        if not isinstance(env, str) or not _ENV_RE.match(env):
+        if not isinstance(env, str) or not _ENV_RE.match(env) or env == "ADRAILS_APPROVAL_SECRET":
             raise ToolError("%s backend %s: key_env must be an environment variable NAME (A-Z0-9_), never the key" % (role, name))
         out["key_env"] = env
         url = OPENROUTER_URL if kind == "openrouter" else str(b.get("base_url") or "").rstrip("/")
@@ -190,6 +191,11 @@ def validate_backend(b, role="writer"):
             out[key] = list(v)
         if b.get("cwd"):
             out["cwd"] = os.path.expanduser(str(b["cwd"]))
+        pe = b.get("pass_env") or []
+        if not isinstance(pe, list) or not all(isinstance(x, str) and _ENV_RE.match(x) for x in pe) or \
+                "ADRAILS_APPROVAL_SECRET" in pe:
+            raise ToolError("%s backend %s: pass_env must list env var NAMES (never the approval secret)" % (role, name))
+        out["pass_env"] = list(pe)
     return out
 
 
@@ -263,11 +269,22 @@ class Budget:
                 "caps": {"calls": self.max_calls, "tokens": self.max_tokens, "cost_usd": self.max_cost}}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Model APIs are never followed through a redirect: urllib would re-send the Authorization header to the new
+    location (review D-a#2)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _http(method, url, headers, body, timeout):
-    """-> (status, bytes). Error bodies are read (capped) but callers never put them in messages."""
+    """-> (status, bytes). Error bodies are never read into messages; redirects are not followed."""
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             return r.status, r.read(MAX_OUTPUT + 1)
     except urllib.error.HTTPError as e:
         return e.code, b""
@@ -306,13 +323,22 @@ def _first(obj, paths):
     return None
 
 
+def _nonneg_int(v):
+    try:
+        x = int(v or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, min(x, 10_000_000))
+
+
 def _cost(b, usage):
-    if isinstance(usage, dict) and isinstance(usage.get("cost"), (int, float)) and usage["cost"] >= 0:
-        return float(usage["cost"])
+    c = usage.get("cost") if isinstance(usage, dict) else None
+    if isinstance(c, (int, float)) and not isinstance(c, bool) and 0 <= c < 1e6:
+        return float(c)
     price = b.get("price_per_mtok")
-    if price:
-        return (int(usage.get("prompt_tokens") or 0) * price["in"] + int(usage.get("completion_tokens") or 0)
-                * price["out"]) / 1e6 if isinstance(usage, dict) else None
+    if price and isinstance(usage, dict):
+        return (_nonneg_int(usage.get("prompt_tokens")) * price["in"] + _nonneg_int(usage.get("completion_tokens"))
+                * price["out"]) / 1e6
     return None
 
 
@@ -340,6 +366,8 @@ def _call_http(b, system, user, budget, http, sleep):
             continue
         if status == 429 or status >= 500:
             if attempt < b["retries"] and budget.remaining_s() > 30:
+                budget.calls += 1                         # a retry is a request: it counts toward max_calls
+                budget.check()
                 sleep(min(20, 2 ** attempt * 2))
                 continue
         break
@@ -355,17 +383,25 @@ def _call_http(b, system, user, budget, http, sleep):
     except (ValueError, KeyError, IndexError, TypeError):
         raise BackendError("unparseable response from %s" % b["name"]) from None
     usage = d.get("usage") if isinstance(d.get("usage"), dict) else {}
-    return {"text": text if isinstance(text, str) else "", "model_answered": d.get("model"),
-            "provider": d.get("provider") if isinstance(d.get("provider"), str) else b["kind"],
-            "finish": choice.get("finish_reason"), "fallback_used": False,
-            "tokens_in": int(usage.get("prompt_tokens") or 0), "tokens_out": int(usage.get("completion_tokens") or 0),
+    model = d.get("model") if isinstance(d.get("model"), str) else None
+    return {"text": text if isinstance(text, str) else "", "model_answered": model[:128] if model else None,
+            "provider": scrub(d["provider"], 60) if isinstance(d.get("provider"), str) else b["kind"],
+            "finish": str(choice.get("finish_reason") or "")[:20].lower() or None, "fallback_used": False,
+            "tokens_in": _nonneg_int(usage.get("prompt_tokens")), "tokens_out": _nonneg_int(usage.get("completion_tokens")),
             "cost_usd": _cost(b, usage), "tools_used": []}
 
 
-def _child_env(secret_envs):
+_SECRETISH = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE|SESSION)", re.I)
+
+
+def _child_env(secret_envs, keep=()):
+    """The command backend's environment: everything a CLI login needs (HOME, PATH, its own config vars) minus every
+    configured model key env and anything that looks like a secret, unless the operator lists it in pass_env."""
     env = dict(os.environ)
     for k in list(env):
-        if k in secret_envs or k == "ADRAILS_APPROVAL_SECRET":
+        if k in keep:
+            continue
+        if k in secret_envs or k == "ADRAILS_APPROVAL_SECRET" or _SECRETISH.search(k):
             env.pop(k, None)
     return env
 
@@ -378,10 +414,12 @@ def _call_command(b, system, user, budget, run_cmd, secret_envs):
             f.write(prompt)
         os.chmod(pf, 0o600)
         uses_file = any("{prompt_file}" in x for x in b["cmd"])
-        argv = [x.replace("{prompt_file}", pf) for x in b["cmd"]]
+        nonce = "adrails-%d-%s" % (int(time.time()), os.urandom(3).hex())     # "{nonce}": a fresh session id per call
+        argv = [x.replace("{prompt_file}", pf).replace("{nonce}", nonce) for x in b["cmd"]]
         timeout = max(5.0, min(float(b["timeout_s"]), budget.remaining_s()))
         try:
-            rc, out = run_cmd(argv, None if uses_file else prompt, timeout, b.get("cwd"), _child_env(secret_envs))
+            rc, out = run_cmd(argv, None if uses_file else prompt, timeout, b.get("cwd"),
+                              _child_env(secret_envs, b.get("pass_env") or ()))
         except subprocess.TimeoutExpired:
             raise BackendError("command timed out after %ds" % int(timeout)) from None
         except OSError as e:
@@ -401,8 +439,8 @@ def _call_command(b, system, user, budget, run_cmd, secret_envs):
     model = _first(d, b["model_paths"])
     fb = _first(d, b["fallback_paths"]) if b["fallback_paths"] else None
     tools = _first(d, b["tools_paths"]) if b["tools_paths"] else None
-    if rc != 0 and not text:
-        raise BackendError("command exited rc=%s with no answer" % rc)
+    if rc != 0:
+        raise BackendError("command exited rc=%s" % rc)
     return {"text": text if isinstance(text, str) else "", "model_answered": model if isinstance(model, str) else None,
             "provider": "command", "finish": None, "fallback_used": bool(fb),
             "tools_used": tools if isinstance(tools, list) else ([] if not tools else [str(tools)]),
@@ -657,6 +695,33 @@ def selftest() -> int:
     call(sb, "s", "PROMPT-X", Budget(), run_cmd=stdin_run)
     ck("PROMPT-X" in (rep_stdin["stdin"] or ""), "stdin used when no {prompt_file}")
     ck(secret_env_names(ws, rs) == ["DS_TEST_KEY", "OR_TEST_KEY", "ZAI_TEST_KEY"], "secret env names")
+    # review D-a fixes
+    neg = (200, {"model": "glm-5.3", "choices": [{"message": {"content": "x"}, "finish_reason": "LENGTH"}],
+                 "usage": {"prompt_tokens": -5000, "completion_tokens": "x"}})
+    raises(lambda: call(ws[0], "s", "u", Budget(), http=fake_http([neg])), BackendError, "LENGTH (any case) = truncated")
+    b4 = Budget()
+    call(ws[0], "s", "u", b4, http=fake_http([(200, dict(neg[1], choices=[{"message": {"content": "x"},
+                                                                         "finish_reason": "stop"}]))]))
+    ck(b4.tokens == 0, "negative / junk usage never lowers the token count")
+
+    def failing(argv, stdin_text, timeout, cwd, env):
+        return 1, json.dumps(ans)
+    raises(lambda: call(rs[1], "s", "u", Budget(), run_cmd=failing), BackendError, "non-zero exit is an error even with text")
+    os.environ["SOME_SERVICE_TOKEN"] = "tok-x"
+    os.environ["OPENCLAW_PROFILE"] = "p"
+    call(rs[1], "s", "u", Budget(), run_cmd=fake_run(ans))
+    ck("SOME_SERVICE_TOKEN" not in got["env_keys"] and "OPENCLAW_PROFILE" in got["env_keys"], "secret-looking env stripped")
+    pe = validate_backend(dict(cmd, pass_env=["SOME_SERVICE_TOKEN"]), "reviewer")
+    call(pe, "s", "u", Budget(), run_cmd=fake_run(ans))
+    ck("SOME_SERVICE_TOKEN" in got["env_keys"], "pass_env keeps an operator-listed var")
+    raises(lambda: validate_backend(dict(cmd, pass_env=["ADRAILS_APPROVAL_SECRET"])), ToolError, "approval secret never passed")
+    raises(lambda: validate_backend(dict(glm, key_env="ADRAILS_APPROVAL_SECRET")), ToolError, "approval secret is not a key")
+    os.environ.pop("SOME_SERVICE_TOKEN", None)
+    os.environ.pop("OPENCLAW_PROFILE", None)
+    b5 = Budget({"max_calls": 2})
+    raises(lambda: call(ws[0], "s", "u", b5, http=fake_http([(500, {}), (500, {})]), sleep=lambda s: None),
+           ToolError, "retries count toward max_calls")
+    ck(isinstance(_OPENER, urllib.request.OpenerDirector), "model calls use the no-redirect opener")
     for k in ("ZAI_TEST_KEY", "OR_TEST_KEY", "DS_TEST_KEY"):
         os.environ.pop(k, None)
     return n

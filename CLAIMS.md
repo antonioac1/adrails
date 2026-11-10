@@ -199,4 +199,28 @@ Evidence is a `python3 -m adsops --selftest` check (module and quoted check mess
 | S13 | `lighthouse=true`: LCP per template, the LCP element, preload vs LCP image | test: seo.perf.selftest (synthetic Lighthouse 13 report); acceptance: the prototype's real Lighthouse 13.6 report of the pre-fix home page gives `preloads hero-antonio.webp but its LCP element is ... video#broll (poster hero-broll-poster.webp)`; live runs measured 6 templates per site |
 | S14 | `gsc=true` / `seo_gsc_exclusions`: URL Inspection + clicks, "not connected" degrades cleanly | test: metrics.gsc.selftest `inspect request`; seo.gsc_join.selftest; seo_tools.selftest `seo_gsc_exclusions merges Google's coverage state with the crawl's explanation` (fake client). Live: see the PR notes for whether the founder-credential run connected |
 | S15 | "Runs are stored in seo-audits/<host>/ beside your audit log, newest 30 per site, mode 0600" | test: seo_tools.selftest `stored run is private (0600)`; seo.runs.selftest pruning to keep and report pruning |
-| S16 | "91 tools" (with an openai_ads account configured; 75 without) | test: tools.selftest `len(names) == 75` and the four seo_* names; the 16 adsops_openai_* tools register only with an openai_ads account (as in 0.10's 87) |
+| S16 | "91 tools" (0.11.0; superseded by C15: 99 with an openai_ads account, 83 without) | test (0.11.0): tools.selftest `len(names) == 75` and the four seo_* names; the 16 adsops_openai_* tools register only with an openai_ads account (as in 0.10's 87) |
+
+## 0.12.0 guarded content pipeline (README "Guarded content pipeline (0.12)" and "New in 0.12.0")
+
+Evidence is a `python3 -m adsops --selftest` check (module and check message), the black-box suite
+`tests/blackbox/test_seo_content.py` (loopback model API over real HTTP, injected site fetch), or the live acceptance runs of
+2026-11-10 (Order D log). Nothing here is claimed from code reading alone.
+
+| # | Claim | Evidence |
+|---|---|---|
+| C1 | "Without an approved FACTS file the pipeline refuses to draft"; `seo_content_facts` never approves | test: content.facts.selftest (proposed / missing approved_by / empty refused; propose never sets approved_by); blackbox `test_kill_switch_and_unapproved_facts` (no model call made) |
+| C2 | Topics from Search Console 8-40, questions, thin/starved audit pages; extend preferred; brand/competitor/doorway refused | test: content.topics.selftest (band, impressions, safe_query, doorway place/zip swap, lessons weights); acceptance: live plan on baytownpm.com (297 GSC rows, own-brand queries refused) |
+| C3 | Three writer kinds, fallback chain recorded, truncated output is an error | test: content.writers.selftest (`chain falls to backup`, `truncated output is an error`, command backend); blackbox `test_truncated_writer_falls_back_to_backup_and_is_recorded`, `test_all_writers_truncated_is_held` |
+| C4 | Keys by env name only, never logged, not passed to a command backend; prompt never in argv | test: content.writers.selftest (`key only in the header`, `error names the env, never a value`, `API keys not passed to command`, `prompt via 0600 file, not stdin`, `prompt in argv refused`); blackbox `test_end_to_end_approved_bundle` (no key value anywhere on disk) |
+| C5 | Reviewer of a writer's family refused before any call | test: content.writers.selftest (`same-family reviewer refused at config`, `reviewer = backup writer family refused`); blackbox `test_same_family_reviewer_is_refused_before_any_call` |
+| C6 | Answering model verified; silent fallback, unverifiable model, tool use refused; no verdict = hold | test: content.writers.selftest, content.review.selftest; blackbox `test_silent_fallback_reviewer_is_held`, `test_reviewer_without_verdict_is_held` |
+| C7 | Every number traced to FACTS or a verbatim quote fetched in the run; statistics in words refused | test: content.numbers.selftest, content.checks.selftest; blackbox `test_invented_statistic_is_held_and_never_reviewed` |
+| C8 | Reviewer edits re-run every check | test: content.review.selftest (`edit that fails checks = hold`); blackbox `test_reviewer_edit_adding_a_number_is_held`, `test_reviewer_edit_is_rechecked_and_kept_when_clean` |
+| C9 | Fails closed on any fetch error | test: content.sources.selftest; blackbox `test_fetch_error_mid_run_fails_closed`, `test_source_fetch_error_at_review_holds` |
+| C10 | Prompt injection in fetched pages is caught by the checks | blackbox `test_prompt_injection_in_live_page_is_caught_by_checks` |
+| C11 | Per-run call/token/cost/time caps | test: content.writers.selftest (`cost cap exceeded after the call`, `call cap`); blackbox `test_cost_cap_exceeded_is_held` |
+| C12 | Bundle: page.md, IMPLEMENT.md, review.json, hashes; tampering detected | test: content.bundle.selftest; content.publish.selftest (`tamper refused`) |
+| C13 | Publish: human approval by default, audit chain, never over an existing page for new pages, no symlinks, git never pushes, auto only with caps + window, HOLD on a failed post-publish check, kill switch | test: content.publish.selftest; blackbox `test_publish_human_then_auto_hold`, `test_cli_refuses_with_kill_switch` |
+| C14 | Results at 14/28/56 days; LESSONS.md visible, capped, operator deletions stick | test: content.learn.selftest; blackbox `test_results_and_lessons_loop` |
+| C15 | "99 tools" (with an openai_ads account configured; 83 without) | test: tools.selftest `len(names) == 83` and the eight seo_content_* names |

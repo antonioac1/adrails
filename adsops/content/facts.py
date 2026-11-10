@@ -309,11 +309,23 @@ def load_profile(path):
         "reviewers": _backends(data.get("reviewers"), "reviewers"),
         "editor": editor,
         "caps": _mixed_map(data.get("caps"), "caps",
-                           {"max_cost_usd": 2.0, "max_tokens": 250_000, "max_calls": 8, "deadline_s": 2400},
+                           {"max_cost_usd": 2.0, "max_tokens": 250_000, "max_calls": 8, "deadline_s": 2400,
+                            "max_model_stages_per_day": 6},
                            {"max_cost_usd": ("float", 0.0, 1_000_000.0), "max_tokens": ("int", 1, 100_000_000),
-                            "max_calls": ("int", 1, 10_000), "deadline_s": ("float", 0.0, 1_000_000.0)}),
+                            "max_calls": ("int", 1, 10_000), "deadline_s": ("float", 0.0, 1_000_000.0),
+                            "max_model_stages_per_day": ("int", 1, 1000)}),
         "publish": _sub_object(data.get("publish"), "publish"),
+        # PM (pipeline keys): official pages the writer may quote, state/bundle dirs, Search Console property, corpus cap
+        "reference_sources": _str_list(data.get("reference_sources") or [], "reference_sources", 12, 500),
+        "state_dir": _path_string(data.get("state_dir", "state"), "state_dir"),
+        "bundle_dir": _path_string(data.get("bundle_dir", "bundles"), "bundle_dir"),
+        "gsc_site": _str_list([data["gsc_site"]], "gsc_site", 1, 300)[0] if data.get("gsc_site") else None,
+        "max_corpus_pages": _num_int(data.get("max_corpus_pages", 400), "max_corpus_pages", 1, 400),
+        "exclude_paths": _str_list(data.get("exclude_paths") or [], "exclude_paths", 100, 200),
     }
+    for u in profile["reference_sources"]:
+        if not u.startswith("https://"):
+            _fail('reference_sources must be https URLs on allowed_source_domains.')
 
     directory = os.path.dirname(os.path.abspath(path.strip()))
     profile["_dir"] = directory
@@ -537,7 +549,7 @@ def selftest() -> int:
         chk(prof["min_words"] == {"new": 700, "extend": 150}, "min_words defaults")
         chk(prof["extend"] == {"min_retention": 0.85, "max_changed_sentences": 3}, "extend defaults")
         chk(prof["max_duplicate"] == {"jaccard": 0.30, "containment": 0.50}, "max_duplicate defaults")
-        chk(prof["caps"] == {"max_cost_usd": 2.0, "max_tokens": 250000, "max_calls": 8, "deadline_s": 2400},
+        chk(prof["caps"] == {"max_cost_usd": 2.0, "max_tokens": 250000, "max_calls": 8, "deadline_s": 2400, "max_model_stages_per_day": 6},
             "caps defaults")
         chk(prof["writers"] == [] and prof["reviewers"] == [] and prof["editor"] is None,
             "writers/reviewers default to empty and editor to null")

@@ -92,29 +92,12 @@ def _log(p, row):
 
 
 class _RunLock:
-    def __init__(self, path, stale_s=7200):
-        self.path, self.stale_s, self.fd = path, stale_s, None
+    """One pipeline run at a time (token lock shared with the publisher; stale after 2 h)."""
 
-    def __enter__(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        try:
-            if time.time() - os.path.getmtime(self.path) > self.stale_s:
-                os.unlink(self.path)
-        except OSError:
-            pass
-        try:
-            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            raise RailViolation("another content run holds the lock (%s)" % self.path) from None
-        os.write(self.fd, str(os.getpid()).encode())
-        return self
-
-    def __exit__(self, *a):
-        os.close(self.fd)
-        try:
-            os.unlink(self.path)
-        except OSError:
-            pass
+    def __new__(cls, path, stale_s=7200):
+        from .publish import _Lock
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return _Lock(path, stale_s)
 
 
 def load(profile_path):
@@ -128,6 +111,17 @@ def load(profile_path):
 def _guard(p):
     if os.path.exists(p["stop"]):
         raise RailViolation("kill switch is on (%s): the content pipeline does nothing" % p["stop"])
+
+
+def daily_gate(profile, p, now):
+    """Caps are per run; this caps RUNS per day (draft + review stages that call models), so an agent looping the tools
+    cannot multiply the spend (review D#15). profile caps.max_model_stages_per_day, default 6."""
+    cap = int((profile.get("caps") or {}).get("max_model_stages_per_day") or 6)
+    today = dt.datetime.fromtimestamp(now, dt.timezone.utc).date()
+    n = sum(1 for r in _runs(p) if r.get("stage") in ("draft", "review") and isinstance(r.get("at"), (int, float))
+            and dt.datetime.fromtimestamp(r["at"], dt.timezone.utc).date() == today)
+    if n >= cap:
+        raise RailViolation("daily cap reached: %d model stages today (caps.max_model_stages_per_day)" % cap)
 
 
 # ── evidence ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -206,7 +200,19 @@ def plan(profile, io, *, audit_run=None, limit=5, today=None):
     p = paths(profile)
     lessons = learn_mod.read_lessons(profile["_lessons_path"]) if os.path.exists(profile["_lessons_path"]) else None
     done = [r.get("candidate_id") for r in _runs(p) if r.get("stage") == "draft" and r.get("ok")]
-    out = topics_mod.plan(rows, profile, audit_run=audit_run, lessons=lessons, published=done, limit=limit)
+    out = topics_mod.plan(rows, profile, audit_run=audit_run, lessons=lessons, published=done, limit=limit + 20)
+    skip = tuple(x if x.endswith("/") else x + "/" for x in profile.get("exclude_paths") or [])
+    if skip:                                     # operator-excluded sections (team pages, legal, landing pages ...)
+        keep = []
+        for c in out["candidates"]:
+            path = "/" + (c.get("page") or c.get("slug") or "").split("://", 1)[-1].split("/", 1)[-1] if c.get("page") \
+                else (c.get("slug") or "")
+            if path.startswith(skip):
+                out.setdefault("refused", []).append(dict(c, reason="path excluded by the site profile"))
+            else:
+                keep.append(c)
+        out["candidates"] = keep
+    out["candidates"] = out["candidates"][:limit]
     out["connected"] = True
     out["gsc_rows"] = len(rows)
     return out
@@ -325,7 +331,8 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None):
     if os.path.exists(profile["_lessons_path"]):
         lessons_text = learn_mod.read_lessons(profile["_lessons_path"])["text"]
     ctx, refs, errs, _ = _context(profile, facts, io, budget, candidate)
-    did = "%s-%s" % (dt.date.fromtimestamp(io.now()).strftime("%Y%m%d"), candidate["id"][:10])
+    did = "%s-%s" % (dt.date.fromtimestamp(io.now()).strftime("%Y%m%d"),
+                     hashlib.sha256(str(candidate["id"]).encode()).hexdigest()[:10])     # review D#21: path-safe id
     res = {"stage": "draft", "run_id": run_id, "candidate_id": candidate["id"], "draft_id": did, "ok": False,
            "attempts": [], "site_errors": errs[:20]}
     if candidate["mode"] == "extend" and not ctx.get("live_text"):
@@ -345,11 +352,17 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None):
             res["attempts"] += getattr(e, "attempts", [])
             res["held"] = "writer failed: " + scrub(str(e), 400)
             res["budget"] = budget.summary()
+            if check:                                    # the fix round failed: keep what round 1 was held for
+                res["errors"] = check["errors"][:40]
             _held(p, did, res)
             return res
         res["attempts"] += att
         writer_rep = rep
         d = _parse_draft(rep["text"])
+        if d is None:                                    # review D#23 (accept() already gates this; never trust it)
+            res["held"] = "the writer's answer is not a JSON draft"
+            _held(p, did, res)
+            return res
         d["mode"], d["slug"] = candidate["mode"], candidate["slug"]          # the plan decides where the page goes
         for k, v in (("faq", []), ("sources", []), ("live_changes", []), ("internal_links", []), ("jsonld", None)):
             d.setdefault(k, v)
@@ -406,11 +419,17 @@ def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=No
         res["review"] = rec
         _held(p, draft_id, res)
         return res
+    final_check = check_fn(rv["draft"], ctx)            # review D#8: the pipeline re-checks the final draft itself
+    if not final_check["ok"]:
+        res.update(verdict="hold", hold_reasons=rv["hold_reasons"] + ["final re-check failed: %s" % ", ".join(
+            sorted({e["code"] for e in final_check["errors"]}))])
+        _held(p, draft_id, res)
+        return res
     meta = {"bundle_id": draft_id, "today": dt.date.fromtimestamp(io.now()).isoformat(),
             "writer_model": wrep.get("model_answered"), "reviewer_model": rv["reviewer"]["model_answered"],
             "run_id": run_id or ""}
     srcs = {u: {"final": r.get("final"), "sha256": r.get("sha256"), "status": r.get("status")} for u, r in refs.items()}
-    out = bundle_mod.write(p["bundles"], rv["draft"], rec, rv["checks"], srcs, profile, meta, html=html)
+    out = bundle_mod.write(p["bundles"], rv["draft"], rec, final_check, srcs, profile, meta, html=html)
     res.update(ok=True, bundle=out["path"])
     return res
 
@@ -432,6 +451,7 @@ def run_once(profile_path, io, *, candidate_id=None, html=False, audit_run=None,
     _guard(p)
     run_id = "%s-%s" % (dt.datetime.fromtimestamp(io.now(), dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ"), secrets.token_hex(2))
     with _RunLock(p["lock"]):
+        daily_gate(profile, p, io.now())
         t0 = io.clock()
         budget = writers.Budget(profile.get("caps"), clock=io.clock)
         pl = plan(profile, io, audit_run=audit_run, today=today)
@@ -455,7 +475,8 @@ def run_once(profile_path, io, *, candidate_id=None, html=False, audit_run=None,
             row.update(verdict=rres.get("verdict"), bundle=rres.get("bundle"), hold_reasons=rres.get("hold_reasons"))
         else:
             row.update(verdict="hold", hold_reasons=[dres.get("held")])
-        row.update(ok=True, seconds=round(io.clock() - t0, 1), budget=budget.summary())
+        row.update(ok=row.get("verdict") == "approve", completed=True, seconds=round(io.clock() - t0, 1),
+                   budget=budget.summary())
         _log(p, row)
         return row
 
