@@ -337,7 +337,7 @@ Same promise as the ads side: your keys, your server, your caps, rules in code, 
 | `seo_content_draft` | The writer chain drafts (fallback to the next configured writer on error or truncation, recorded), then the deterministic checks run, with one fix round. |
 | `seo_content_review` | Mandatory adversarial review by a model of a different family. Sources re-fetched, quotes re-found, reviewer edits re-checked. Approve = an approved bundle. |
 | `seo_content_bundle` | Lists, reads and verifies bundles: `page.md`, `IMPLEMENT.md`, `review.json`, hashes. |
-| `seo_content_publish` | Request approval, dry-run or publish one bundle: static directory or a git commit on a new branch (never pushed). |
+| `seo_content_publish` | Request approval, dry-run or publish one new-page bundle: static directory or a git commit on a new branch (never pushed). Extensions of existing pages are applied from `IMPLEMENT.md`. |
 | `seo_content_results` | Impressions, clicks and position per day, 28 days before vs 14/28/56 days after each piece, and a scoreboard by content type and query class. |
 | `seo_content_lessons` | Reads LESSONS.md: the evidence-backed lines the planner and writer use, plus the operator's own notes. |
 
@@ -354,8 +354,9 @@ refused and recorded. No parseable verdict is a hold.
 **The checks** (before any reviewer, and again after every reviewer edit): every number, percentage, dollar amount and year traced
 to FACTS or to a verbatim quote from a source fetched in that run (spelled-out statistics refused); banned phrases, excluded areas,
 competitor names, superlatives, URLs in text, raw HTML; near-duplicates against every sitemap page (any fetch error = hold);
-minimum substance; for page extensions, a retention floor and a maximum number of changed live sentences, each declared; JSON-LD,
-author and internal links.
+minimum substance; for page extensions, a retention floor and a maximum number of changed live sentences, each declared; JSON-LD
+(its values are traced too), author, and links (internal links must exist; external links only to allowed source domains;
+javascript:/data: targets refused).
 
 **Publishing** goes through the existing approvals queue and audit chain: human approval per bundle by default; `auto` only with
 daily and weekly caps and a time window; a failed post-publish check writes a HOLD file that stops all publishing until a person

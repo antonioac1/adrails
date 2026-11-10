@@ -47,7 +47,7 @@ The facts file is the only place a number or claim can come from without a cited
 - banned phrases, excluded areas, competitor names, superlatives and guarantees, URLs or domains in the text, raw HTML;
 - near-duplicates against every page in the sitemap (if any page could not be fetched, the draft is held: it fails closed);
 - enough substance; for an extension, at least 85% of the current page kept and at most 3 live sentences changed, each declared;
-- JSON-LD parses, the author is the approved author, internal links point to pages that exist, sources are https on allowed domains.
+- JSON-LD parses (and its prices or ratings are traced like text), the author is the approved author, internal links point to pages that exist, external links go only to allowed source domains, sources are https on allowed domains.
 
 One fix round is allowed. A draft that still fails is held with the exact errors.
 
@@ -61,7 +61,7 @@ Each approved bundle has `page.md` (front matter: title, description, slug, cano
 
 ## 6. Publishing
 
-`seo_content_publish` action=`request` asks the owner to approve this exact bundle (its hash). After the owner approves with `adsops_approval_decide`, action=`dry_run` shows what would be written and action=`publish` writes it: `static` writes `page.md` under the slug in the site directory; `git` writes it in a clean working tree on a new branch and commits (it never pushes: the owner opens the pull request). A new-page bundle never overwrites an existing page. Auto mode exists only with daily and weekly caps and a time window; any failed post-publish check writes a HOLD file and stops all publishing until a human deletes it. Kill switch: create `state/content-STOP` next to the profile.
+`seo_content_publish` action=`request` asks the owner to approve this exact bundle (its hash). After the owner approves with `adsops_approval_decide`, action=`dry_run` shows what would be written and action=`publish` writes it: `static` writes `page.md` under the slug in the site directory; `git` writes it in a clean working tree on a new branch and commits (it never pushes: the owner opens the pull request). The publishers create new pages only and never overwrite an existing file; a bundle that extends an existing page is applied from `IMPLEMENT.md` by the site's own agent or developer. Auto mode exists only with daily and weekly caps and a time window; any failed post-publish check writes a HOLD file and stops all publishing until a human deletes it. Kill switch: create `state/content-STOP` next to the profile.
 
 ## 7. Results and lessons
 

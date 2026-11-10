@@ -181,8 +181,8 @@ pages, Search Console query strings, and every model output (writer, reviewer, e
   (black-box): no key value appears anywhere under the profile directory after a full run.
 - **Publishing something unapproved or altered.** Blocked: a bundle exists only after an "approve" verdict with passing
   checks; publish re-verifies every file hash in MANIFEST.json, requires a signed human approval for that exact manifest
-  hash (default) or the auto caps + window, refuses a second publish of the same bundle, refuses new-page bundles over an
-  existing file, writes only under `publish.dir` (no `..`, no symlinks on the path), and never pushes a git branch. Every
+  hash (default) or the auto caps + window, refuses a second publish of the same bundle, creates new pages only (extension bundles are applied from IMPLEMENT.md by the site's own
+  agent) and never over an existing file, writes only under `publish.dir` (no `..`, no symlinks on the path), and never pushes a git branch. Every
   attempt, refused or not, is appended to the audit chain. A failed post-publish check (written bytes differ, or the live
   URL is not 200 with the title) writes HOLD and stops all publishing until a person removes it.
 - **Runaway cost.** Per run: call, token, dollar (OpenRouter's reported cost, or the configured price) and wall-clock caps

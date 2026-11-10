@@ -221,6 +221,6 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C10 | Prompt injection in fetched pages is caught by the checks | blackbox `test_prompt_injection_in_live_page_is_caught_by_checks` |
 | C11 | Per-run call/token/cost/time caps | test: content.writers.selftest (`cost cap exceeded after the call`, `call cap`); blackbox `test_cost_cap_exceeded_is_held` |
 | C12 | Bundle: page.md, IMPLEMENT.md, review.json, hashes; tampering detected | test: content.bundle.selftest; content.publish.selftest (`tamper refused`) |
-| C13 | Publish: human approval by default, audit chain, never over an existing page for new pages, no symlinks, git never pushes, auto only with caps + window, HOLD on a failed post-publish check, kill switch | test: content.publish.selftest; blackbox `test_publish_human_then_auto_hold`, `test_cli_refuses_with_kill_switch` |
+| C13 | Publish: human approval by default, audit chain, new pages only and never over an existing file, no symlinks, git never pushes, auto only with caps + window, HOLD on a failed post-publish check, kill switch | test: content.publish.selftest; blackbox `test_publish_human_then_auto_hold`, `test_cli_refuses_with_kill_switch` |
 | C14 | Results at 14/28/56 days; LESSONS.md visible, capped, operator deletions stick | test: content.learn.selftest; blackbox `test_results_and_lessons_loop` |
 | C15 | "99 tools" (with an openai_ads account configured; 83 without) | test: tools.selftest `len(names) == 83` and the eight seo_content_* names |

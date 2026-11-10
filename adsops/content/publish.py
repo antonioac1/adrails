@@ -8,7 +8,8 @@ Nothing reaches a site except through `publish()`, and `publish()` refuses unles
      local time window are set and respected;
   4. the publish lock is free (one publish at a time).
 Publishers: "static" (write page.md, optional index.html, into a directory under the slug; never outside it, never
-through a symlink, never over an existing page unless the bundle is an "extend" of that page, with a backup) and "git"
+through a symlink, never over an existing page; NEW pages only - an "extend" bundle is applied by the site's own agent or
+developer from IMPLEMENT.md) and "git"
 (the same write inside a clean git working tree, on a NEW branch, one commit; it never pushes - opening the pull
 request stays with the operator). Every attempt, allowed or refused, is appended to the audit chain.
 After writing, the file is re-read and its hash compared; optionally the live URL is fetched and must return 200 with
@@ -297,6 +298,9 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
             slug, mode = fm.get("slug"), fm.get("mode")
             if not slug:
                 raise RailViolation("page.md front matter has no slug")
+            if mode != "new":
+                raise RailViolation("this bundle extends an existing page: give IMPLEMENT.md to the site's own agent or "
+                                    "developer (the static/git publishers only create new pages)")
             record.update(slug=slug)
             targets = [(_target_path(st["dir"], slug, "index.md"), page)]
             if st["html"] and "page.html" in (man.get("files") or {}):
@@ -474,6 +478,13 @@ def selftest() -> int:
         refused(lambda: publish(out6["path"], auto, state_dir=state, chain=chain, now=lambda: nine_am + 86400,
                                 fetch=lambda u: {"status": 500, "body": ""}), "HOLD written", "failed live check trips HOLD")
         ck(os.path.exists(state_files(state)["hold"]), "HOLD file exists")
+        os.rename(state_files(state)["hold"], state_files(state)["hold"] + ".x")
+        outx = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/ext/", mode="extend"), rv,
+                                {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bx"))
+        q.decide(q.request(plan_id_for(outx["path"], prof), "example.com", "x")["approve_token"])
+        refused(lambda: publish(outx["path"], prof, state_dir=state, chain=chain, queue=q), "extends an existing page",
+                "extend bundles are not written by the static/git publisher")
+        os.rename(state_files(state)["hold"] + ".x", state_files(state)["hold"])
         out7 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-three/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b7"))
         refused(lambda: publish(out7["path"], auto, state_dir=state, chain=chain, now=lambda: nine_am + 2 * 86400),

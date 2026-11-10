@@ -44,14 +44,15 @@ WRITER_SYSTEM = (
     "3. Never use superlatives or guarantees (best, #1, leading, top-rated, guaranteed ...), never name competitors, "
     "never write URLs or domain names in the text, no raw HTML. Follow SITE_RULES.\n"
     "4. Answer the SEARCH_QUERIES directly and usefully, in plain language. Link only to pages listed in SITE_PAGES.\n"
-    "5. Mode \"extend\": keep the CURRENT page text word for word, including every table, list and figure in it (copy "
-    "tables row by row); add new sections (and at most %d declared corrections of live "
-    "sentences, each in live_changes with before/after/reason). body_md must contain the whole page body.\n"
+    "5. Mode \"extend\": the CURRENT page stays as it is. body_md contains ONLY the new sections you add (do not repeat "
+    "the current page). Set \"insert_after\" to the exact text of a heading on the current page after which the new "
+    "sections go (or null for the end of the main content). You may correct at most %d live sentences: each goes in "
+    "live_changes with before (copied exactly from CURRENT_PAGE_TEXT), after and reason.\n"
     "6. Answer with ONE JSON object and nothing else:\n"
     "{\"mode\": ..., \"slug\": ..., \"title\": \"<=70 chars\", \"description\": \"70-170 chars\", \"content_type\": "
     "\"answer-extension\"|\"guide\"|\"faq\"|\"comparison\", \"body_md\": \"Markdown, no H1, no front matter\", "
     "\"faq\": [{\"q\": ..., \"a\": ...}] (<= 8), \"sources\": [{\"url\": ..., \"quote\": ...}], \"live_changes\": "
-    "[{\"before\": ..., \"after\": ..., \"reason\": ...}], \"internal_links\": [{\"from\": \"/path/\", \"anchor\": ...}], "
+    "[{\"before\": ..., \"after\": ..., \"reason\": ...}], \"insert_after\": null, \"internal_links\": [{\"from\": \"/path/\", \"anchor\": ...}], "
     "\"jsonld\": null}")
 
 
@@ -261,6 +262,37 @@ def _context(profile, facts, io, budget, cand, draft_sources=(), refs=None, site
     return ctx, refs, errs, qerr
 
 
+def compose(d, ctx):
+    """Extend mode: the page a reader will see = the live page with the declared live changes applied + the new
+    sections. The checks run on that composed page (retention, changed sentences, duplicates, numbers in new text);
+    the bundle keeps only the new sections + the declared changes for the implementer. -> (draft_for_checks, errors)."""
+    if not isinstance(d, dict) or d.get("mode") != "extend" or not ctx.get("live_text"):
+        return d, []
+    from . import numbers
+    live = numbers.norm(ctx["live_text"])
+    errs = []
+    for ch in d.get("live_changes") or []:
+        before = numbers.norm((ch or {}).get("before") if isinstance(ch, dict) else "")
+        if before and before in live:
+            live = live.replace(before, numbers.norm(ch.get("after") or ""), 1)
+        else:
+            errs.append({"code": "LIVE_CHANGES", "msg": "a declared live change is not on the live page: \"%s\""
+                         % scrub(str((ch or {}).get("before") if isinstance(ch, dict) else ch), 160)})
+    ia = d.get("insert_after")
+    if ia and (not isinstance(ia, str) or numbers.norm(ia) not in numbers.norm(ctx["live_text"])):
+        errs.append({"code": "SCHEMA", "msg": "insert_after is not text on the live page"})
+    return dict(d, body_md=live + "\n\n" + str(d.get("body_md") or "")), errs
+
+
+def check(d, ctx):
+    """Every deterministic check, on the composed page for extensions."""
+    view, errs = compose(d, ctx)
+    res = checks_mod.run(view, ctx)
+    res["errors"] = errs + res["errors"]
+    res["ok"] = not res["errors"]
+    return res
+
+
 def _merge_source_errors(res, qerr, errs):
     for e in qerr:
         res["errors"].append({"code": e["code"], "msg": e["msg"]})
@@ -341,20 +373,20 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None):
         _held(p, did, res)
         return res
     system = WRITER_SYSTEM % int((profile.get("extend") or {}).get("max_changed_sentences", 3))
-    prev, check = None, None
+    prev, chk_res = None, None
     writer_rep = None
     for round_ in range(2):
         prompt = _writer_prompt(profile, facts, candidate, ctx, refs, lessons_text,
-                                fix=[e["msg"] for e in check["errors"]] if check else None, prev=prev)
-        chain = ws if writer_rep is None else [b for b in ws if b["name"] == writer_rep["backend"]]
+                                fix=[e["msg"] for e in chk_res["errors"]] if chk_res else None, prev=prev)
+        chain = ws if writer_rep is None else ws[[b["name"] for b in ws].index(writer_rep["backend"]):]
         try:
             rep, att = writers.call_chain(chain, system, prompt, budget, accept=_draft_accept, **kw)
         except (writers.BackendError, writers.Refused, writers.CapExceeded) as e:
             res["attempts"] += getattr(e, "attempts", [])
             res["held"] = "writer failed: " + scrub(str(e), 400)
             res["budget"] = budget.summary()
-            if check:                                    # the fix round failed: keep what round 1 was held for
-                res["errors"] = check["errors"][:40]
+            if chk_res:                                    # the fix round failed: keep what round 1 was held for
+                res["errors"] = chk_res["errors"][:40]
             _held(p, did, res)
             return res
         res["attempts"] += att
@@ -365,23 +397,24 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None):
             _held(p, did, res)
             return res
         d["mode"], d["slug"] = candidate["mode"], candidate["slug"]          # the plan decides where the page goes
-        for k, v in (("faq", []), ("sources", []), ("live_changes", []), ("internal_links", []), ("jsonld", None)):
+        for k, v in (("faq", []), ("sources", []), ("live_changes", []), ("internal_links", []), ("jsonld", None),
+                     ("insert_after", None)):
             d.setdefault(k, v)
         ctx2, refs, errs2, qerr = _context(profile, facts, io, budget, candidate, d.get("sources") or [], refs=refs,
                                            site=ctx["_site"])
-        check = _merge_source_errors(checks_mod.run(d, ctx2), qerr, errs2)
+        chk_res = _merge_source_errors(check(d, ctx2), qerr, errs2)
         prev = d
         ctx = ctx2
-        if check["ok"]:
+        if chk_res["ok"]:
             break
-    res.update(writer=writers.public(writer_rep), checks_ok=check["ok"], errors=check["errors"][:40],
-               warnings=check["warnings"][:20], stats=check["stats"], budget=budget.summary())
+    res.update(writer=writers.public(writer_rep), checks_ok=chk_res["ok"], errors=chk_res["errors"][:40],
+               warnings=chk_res["warnings"][:20], stats=chk_res["stats"], budget=budget.summary())
     ddir = os.path.join(p["drafts"], did)
     os.makedirs(ddir, exist_ok=True)
     with open(os.path.join(ddir, "draft.json"), "w", encoding="utf-8") as f:
         json.dump({"draft": prev, "candidate": candidate, "writer": writers.public(writer_rep),
-                   "checks": {"ok": check["ok"], "errors": check["errors"][:60]}}, f, indent=1, sort_keys=True)
-    if not check["ok"]:
+                   "checks": {"ok": chk_res["ok"], "errors": chk_res["errors"][:60]}}, f, indent=1, sort_keys=True)
+    if not chk_res["ok"]:
         res["held"] = "the draft failed the deterministic checks after one fix round"
         _held(p, did, res)
         return res
@@ -411,7 +444,7 @@ def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=No
            "writer": wrep}
     if qerr:
         ctx["verified_quotes"] = []
-    check_fn = (lambda dd, cc: _merge_source_errors(checks_mod.run(dd, cc), _requote(dd, refs, cc), []))
+    check_fn = (lambda dd, cc: _merge_source_errors(check(dd, cc), _requote(dd, refs, cc), []))
     rv = review_mod.review(d, ctx, wrep.get("family"), rs, budget, editor=ed, lessons_text=lessons_text,
                            check_fn=check_fn, **io.callkw(secret_envs))
     rec = review_mod.record(rv)

@@ -177,7 +177,7 @@ class ContentPipelineTests(unittest.TestCase):
         d = {"mode": "extend", "slug": "/guides/fees/", "title": "Flat fee property management: is it worth it?",
              "description": "What a flat monthly management fee covers, what is separate, and how to compare plans "
                             "before you sign.",
-             "content_type": "answer-extension", "body_md": body if body is not None else live + ADDED,
+             "content_type": "answer-extension", "body_md": body if body is not None else ADDED.strip(),
              "faq": [{"q": "Is a flat fee worth it?", "a": "It makes the monthly cost easy to predict."}],
              "sources": [{"url": "https://www.irs.gov/taxtopics/tc414", "quote": QUOTE}], "live_changes": [],
              "internal_links": [{"from": "/guides/repairs/", "anchor": "flat fee management"}], "jsonld": None}
@@ -238,6 +238,7 @@ class ContentPipelineTests(unittest.TestCase):
     # ── forced failures ──────────────────────────────────────────────────────────────────────────────────────
     def test_invented_statistic_is_held_and_never_reviewed(self):
         bad = self.good_draft(body=self.good_draft()["body_md"] + " 68% of owners save $1,100 a year with us.")
+        self.assertTrue(bad["body_md"].startswith("## Is a flat fee"))
         self.models.script("w", ("glm-5.3", bad, "stop"), ("glm-5.3", bad, "stop"))
         r = self.run_once()
         self.assertEqual(r["verdict"], "hold")
@@ -334,6 +335,38 @@ class ContentPipelineTests(unittest.TestCase):
         r = self.run_once(io=io)
         self.assertEqual(r["verdict"], "hold", r)
 
+    def test_extend_change_not_on_live_page_is_held(self):
+        d = self.good_draft(live_changes=[{"before": "We never charge for anything at all.", "after": "x", "reason": "r"}])
+        self.models.script("w", ("glm-5.3", d, "stop"), ("glm-5.3", d, "stop"))
+        r = self.run_once()
+        self.assertEqual(r["verdict"], "hold")
+        with open(os.path.join(self.dir, "state", "held", r["draft"] + ".json"), encoding="utf-8") as f:
+            self.assertIn("LIVE_CHANGES", {e["code"] for e in json.load(f)["errors"]})
+
+    def test_declared_live_change_passes_and_is_in_implement(self):
+        d = self.good_draft(live_changes=[{"before": "Rent is collected online and paid out to the owner each month after "
+                                                     "the statement closes.",
+                                           "after": "Rent is collected online and paid out to the owner every month.",
+                                           "reason": "simpler"}], insert_after=None)
+        self.models.script("w", ("glm-5.3", d, "stop"))
+        self.models.script("r", ("openai/gpt-5", {"verdict": "approve"}, "stop"))
+        r = self.run_once()
+        self.assertEqual(r["verdict"], "approve", r)
+        with open(os.path.join(r["bundle"], "IMPLEMENT.md"), encoding="utf-8") as f:
+            impl = f.read()
+        self.assertIn("paid out to the owner every month", impl)
+        self.assertIn("Insert the body Markdown", impl)
+
+    def test_daily_model_stage_cap(self):
+        self.edit_profile(caps={"max_cost_usd": 1.0, "max_tokens": 100000, "max_calls": 8, "deadline_s": 600,
+                                "max_model_stages_per_day": 1})
+        self.models.script("w", ("glm-5.3", self.good_draft(), "stop"))
+        self.models.script("r", ("openai/gpt-5", {"verdict": "approve"}, "stop"))
+        self.run_once()
+        with self.assertRaises(RailViolation) as cm:
+            self.run_once()
+        self.assertIn("daily cap", str(cm.exception))
+
     def test_cost_cap_exceeded_is_held(self):
         self.edit_profile(caps={"max_cost_usd": 0.05, "max_tokens": 100000, "max_calls": 8, "deadline_s": 600})
         self.models.script("w", ("glm-5.3", self.good_draft(), "stop", 0.04))
@@ -375,13 +408,20 @@ class ContentPipelineTests(unittest.TestCase):
         with self.assertRaises(RailViolation):
             publish.publish(b, prof, state_dir=state, chain=chain, queue=q)
         q.decide(q.request(publish.plan_id_for(b, prof), "example.com", "publish")["approve_token"])
-        # an "extend" bundle may replace the existing page file (with a backup)
-        os.makedirs(os.path.join(self.dir, "site", "guides", "fees"))
-        with open(os.path.join(self.dir, "site", "guides", "fees", "index.md"), "w") as f:
-            f.write("old page")
-        out = publish.publish(b, prof, state_dir=state, chain=chain, queue=q)
+        # an "extend" bundle is never written by the static publisher: the site's own agent applies IMPLEMENT.md
+        with self.assertRaises(RailViolation) as cm:
+            publish.publish(b, prof, state_dir=state, chain=chain, queue=q)
+        self.assertIn("extends an existing page", str(cm.exception))
+        rv0 = {"verdict": "approve", "reviewer": {"model_answered": "openai/gpt-5", "family": "openai"}, "findings": [],
+               "writer_family": "zhipu"}
+        bn = bundle.write(os.path.join(self.dir, "bundles"), dict(self.good_draft(), slug="/guides/brand-new/", mode="new"),
+                          rv0, {"ok": True, "errors": [], "warnings": []}, {}, prof,
+                          {"bundle_id": "n1", "today": "2026-11-10", "writer_model": "glm-5.3",
+                           "reviewer_model": "openai/gpt-5", "run_id": "t"})["path"]
+        q.decide(q.request(publish.plan_id_for(bn, prof), "example.com", "publish")["approve_token"])
+        out = publish.publish(bn, prof, state_dir=state, chain=chain, queue=q)
         self.assertTrue(out["ok"])
-        self.assertTrue(out["files"][0].endswith("guides/fees/index.md"))
+        self.assertTrue(out["files"][0].endswith("guides/brand-new/index.md"))
         self.assertEqual(chain.verify()["ok"], True)
         # auto mode: a failed post-publish live check writes HOLD and blocks the next publish
         self.edit_profile(publish={"target": "static", "dir": "site", "mode": "auto", "verify_url": True,

@@ -205,6 +205,10 @@ def front_matter(draft, profile, today, meta=None):
     rows.append(("date_modified", today))
     rows.append(("content_type", _cap(draft.get("content_type"), 40)))
     rows.append(("mode", mode))
+    if mode == "extend":
+        rows.append(("insert_after", _one_line(draft.get("insert_after"), 200) or None))
+        rows.append(("live_changes", [{"before": _one_line(c.get("before"), 400), "after": _one_line(c.get("after"), 400)}
+                                      for c in _lst(draft.get("live_changes"), 50) if isinstance(c, dict)]))
     rows.append(("jsonld", bundle_jsonld(draft, profile, today)))
     rows.append(("sources", _sources(draft)))
     rows.append(("internal_links_to_add", [dict(l, to=slug) for l in _links(draft)]))
@@ -282,11 +286,18 @@ def implement_md(draft, profile, review, meta):
             % (slug, canonical))
     else:
         add("This is an EXTEND of the page that already exists at `%s` (full URL %s)." % (slug, canonical))
-        add("Replace the body of that existing page with the body Markdown from `page.md`. Keep its URL, its head and")
-        add("its surrounding template. Apply only the declared live changes below, and **change nothing else**.")
+        ia = _one_line(draft.get("insert_after"), 200)
+        if ia:
+            add("Insert the body Markdown from `page.md` (the new sections) directly after the section whose heading is")
+            add("\"%s\" on the existing page, in the page's own markup and styles." % ia)
+        else:
+            add("Insert the body Markdown from `page.md` (the new sections) at the end of the existing page's main")
+            add("content, before any closing call-to-action or footer, in the page's own markup and styles.")
+        add("Keep the existing page's URL, its text and its template. Apply only the declared live changes below, and")
+        add("**change nothing else**.")
         add()
         if not changes:
-            add("There are no declared live changes: the body is added as-is and existing sentences stay untouched.")
+            add("There are no declared live changes: existing sentences stay untouched.")
         else:
             add("Declared live changes (%d). Each one is a single live sentence, before -> after:" % len(changes))
             add()
