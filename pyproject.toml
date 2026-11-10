@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adrails"
-version = "0.10.0"
-description = "AdRails: open-source MCP server for AI agents running ad accounts with guardrails: Google Ads, Google Local Services Ads and ChatGPT Ads through plan/validate/commit, a local-business lead book and growth plan, AEO toolkit, enterprise controls."
+dynamic = ["version"]   # single source: adsops/__init__.py __version__ (scripts/release_check.py verifies the rest)
+description = "AdRails: open-source MCP server for AI agents running ad accounts with guardrails: Google Ads, Google Local Services Ads and ChatGPT Ads through plan/validate/commit, a local-business lead book and growth plan, AEO toolkit, a technical SEO site audit, enterprise controls."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "adsops contributors" }]
-keywords = ["mcp", "mcp-server", "google-ads", "local-services-ads", "lsa", "chatgpt-ads", "ai-agents", "guardrails", "aeo", "local-seo", "lead-management", "small-business", "claude", "advertising"]
+keywords = ["mcp", "mcp-server", "google-ads", "local-services-ads", "lsa", "chatgpt-ads", "ai-agents", "guardrails", "aeo", "local-seo", "technical-seo", "seo-audit", "lead-management", "small-business", "claude", "advertising"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -21,6 +21,7 @@ dependencies = []
 
 [project.optional-dependencies]
 google = ["google-auth>=2.0"]
+render = ["playwright>=1.48"]   # optional: seo_audit_run render=true (JS render parity); then `playwright install chromium`
 
 [project.urls]
 Homepage = "https://adrails.dev"
@@ -29,6 +30,9 @@ Source = "https://github.com/antonioac1/adrails"
 [project.scripts]
 adrails = "adsops.__main__:main"
 adsops-mcp = "adsops.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "adsops.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["adsops*"]

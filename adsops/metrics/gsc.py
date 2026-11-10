@@ -21,6 +21,7 @@ from urllib.parse import quote, unquote
 from ..errors import ToolError, scrub
 
 BASE = "https://www.googleapis.com/webmasters/v3"
+INSPECT = "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect"   # read-only URL Inspection API
 _DIMS = ("date", "query", "page", "country", "device", "searchAppearance")
 _OPS = ("equals", "contains", "notEquals", "notContains", "includingRegex", "excludingRegex")
 
@@ -204,6 +205,33 @@ class Client:
                 self.truncated = True
                 break
         return rows
+
+
+    def inspect(self, site, url, inspect_base=INSPECT):
+        """URL Inspection (read-only; Google allows ~2,000 per property per day): Google's view of one URL.
+        -> {url, verdict, coverage_state, indexing_state, robots_txt_state, page_fetch_state, google_canonical,
+            user_canonical, last_crawl_time, crawled_as}. Missing fields come back as ''."""
+        if not isinstance(site, str) or not (
+            site.startswith("https://") or site.startswith("http://") or site.startswith("sc-domain:")
+        ):
+            raise ToolError("site must start with https://, http:// or sc-domain:")
+        if not isinstance(url, str) or not url.startswith(("https://", "http://")) or len(url) > 2048:
+            raise ToolError("url must be an absolute http(s) URL")
+        data = self._call("POST", inspect_base, {"inspectionUrl": url, "siteUrl": site})
+        st = _g(data, "inspectionResult", "indexStatusResult", default={})
+        st = st if isinstance(st, dict) else {}
+        return {
+            "url": url,
+            "verdict": _text(st.get("verdict")),
+            "coverage_state": _text(st.get("coverageState")),
+            "indexing_state": _text(st.get("indexingState")),
+            "robots_txt_state": _text(st.get("robotsTxtState")),
+            "page_fetch_state": _text(st.get("pageFetchState")),
+            "google_canonical": _text(st.get("googleCanonical")),
+            "user_canonical": _text(st.get("userCanonical")),
+            "last_crawl_time": _text(st.get("lastCrawlTime")),
+            "crawled_as": _text(st.get("crawledAs")),
+        }
 
 
 # --------------------------------------------------------------------------- analysis
@@ -685,6 +713,23 @@ def selftest() -> int:
     ck(opportunities(rows, limit=1) == [opp[0]], "limit honoured")
     ck(all("_rank" not in o for o in opp), "no internal keys")
 
+    # --- URL inspection ----------------------------------------------------------------------------------------
+    sent = []
+
+    def http_inspect(method, url, headers, body):
+        sent.append((method, url, json.loads(body)))
+        return 200, json.dumps({"inspectionResult": {"indexStatusResult": {
+            "verdict": "NEUTRAL", "coverageState": "Crawled - currently not indexed", "googleCanonical": "https://a.com/x/",
+            "userCanonical": "https://a.com/x/", "robotsTxtState": "ALLOWED", "pageFetchState": "SUCCESSFUL"}}}).encode()
+
+    ins = Client(TP(), http_inspect).inspect("sc-domain:a.com", "https://a.com/x/")
+    ck(sent[0][0] == "POST" and sent[0][1] == INSPECT and sent[0][2] == {"inspectionUrl": "https://a.com/x/", "siteUrl": "sc-domain:a.com"},
+       "inspect request")
+    ck(ins["coverage_state"] == "Crawled - currently not indexed" and ins["verdict"] == "NEUTRAL" and ins["last_crawl_time"] == "",
+       "inspect parsed, missing fields blank")
+    ck(refused(lambda: Client(TP(), nohttp).inspect("a.com", "https://a.com/")), "inspect bad site refused before HTTP")
+    ck(refused(lambda: Client(TP(), nohttp).inspect("sc-domain:a.com", "ftp://a.com/")), "inspect bad url refused before HTTP")
+    ck(Client(TP(), lambda *a: (200, b"{}")).inspect("sc-domain:a.com", "https://a.com/")["verdict"] == "", "empty inspect body tolerated")
     return n
 
 

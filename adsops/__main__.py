@@ -1,4 +1,4 @@
-"""python3 -m adsops [--config PATH] [--selftest] [meter-summary [--since ISO]]"""
+"""python3 -m adsops [--config PATH] [--selftest] [meter-summary [--since ISO]] | site-audit --url URL [...]"""
 import argparse
 import json
 import os
@@ -16,6 +16,8 @@ def _selftest():
                  "mail.codes", "mail.qr", "mail.hygiene", "mail.labels", "mail.scans", "mail.response", "mail.cac", "platforms.openai_ads", "oai_policy",
                  "oai_creative", "oai_conversions", "oai_audiences", "oai_experiments", "oai_builder",
                  "local.leadbook", "local.presence", "local.reviews", "local.oauth_connect", "local.plan", "local.lsa", "local.setup_cli", "local.results", "local.gbp", "updates", "guides", "paid_tools", "metrics.store", "metrics.gsc", "metrics.impact", "metrics_tools", "devices",
+                 "seo.fetcher", "seo.extract", "seo.crawl", "seo.checks_site", "seo.checks_content", "seo.checks_links",
+                 "seo.adguard", "seo.issues", "seo.runs", "seo.perf", "seo.render", "seo.gsc_join", "seo_tools",
                  "mail_tools", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
@@ -26,6 +28,14 @@ def _selftest():
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if "site-audit" in argv[:3]:                  # technical SEO site audit: its own flags (python3 -m adsops site-audit --help)
+        from adsops import seo_tools
+        rest = [x for x in argv if x != "site-audit"]
+        cfg = None
+        if "--config" not in rest and os.environ.get("ADSOPS_CONFIG"):
+            rest += ["--config", os.environ["ADSOPS_CONFIG"]]
+        return seo_tools.main(rest, cfg)
     ap = argparse.ArgumentParser(prog="adsops")
     ap.add_argument("--config", default=os.environ.get("ADSOPS_CONFIG"))
     ap.add_argument("--selftest", action="store_true")

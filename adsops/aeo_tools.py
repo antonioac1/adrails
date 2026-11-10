@@ -46,17 +46,32 @@ def raw_http(method, url, headers, body):
         raise ToolError("network error: %s" % (getattr(e, "reason", None) or "connection failed")) from None
 
 
-def _check_host(host, resolver=socket.getaddrinfo):
+def public_addresses(host, resolver=socket.getaddrinfo):
+    """-> the host's resolved IP strings, all public; ToolError if ANY is private/loopback/link-local/reserved/multicast.
+    Shared with adsops/seo/fetcher.py, which connects to one of these exact addresses (no second DNS lookup)."""
     if not host or host.lower() in ("localhost",) or host.lower().endswith((".local", ".internal", ".localhost")):
         raise ToolError("refusing to fetch a local host")
     try:
         infos = resolver(host, None)
-    except socket.gaierror:
+    except (socket.gaierror, UnicodeError):
         raise ToolError(f"cannot resolve {host}") from None
+    out = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%")[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified \
+                or not ip.is_global:
             raise ToolError(f"refusing to fetch {host}: it resolves to a non-public address")
+        if str(ip) not in out:
+            out.append(str(ip))
+    if not out:
+        raise ToolError(f"cannot resolve {host}")
+    return out
+
+
+def _check_host(host, resolver=socket.getaddrinfo):
+    public_addresses(host, resolver)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

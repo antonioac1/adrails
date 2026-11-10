@@ -230,7 +230,7 @@ def onepassword_loader(ref, token_file, op_bin="/opt/homebrew/bin/op", runner=su
         env = dict(os.environ)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = token
         try:
-            r = runner([op_bin, "read", ref_s], capture_output=True, text=True, env=env)
+            r = runner([op_bin, "read", ref_s], capture_output=True, text=True, env=env, timeout=60)   # a hung op must not hang the server
         except Exception as e:
             _fail("%s could not be executed: %s" % (op_bin, _hide(e, token)))
         rc = getattr(r, "returncode", 1)
@@ -306,7 +306,9 @@ def from_config(cred):
                 if not isinstance(tok, str) or not tok.strip():
                     raise ToolError("credentials.sources[%d].token_file is required for kind "
                                     "'1password'" % i) from None
-                loaders.append(onepassword_loader(ref, tok))
+                op_bin = src.get("op_bin")
+                loaders.append(onepassword_loader(ref, tok, op_bin=op_bin) if isinstance(op_bin, str) and op_bin.strip()
+                               else onepassword_loader(ref, tok))
             else:
                 raise ToolError("credentials.sources[%d].kind %r is not supported "
                                 "(file|1password)" % (i, skind)) from None
@@ -512,7 +514,8 @@ def selftest():
     prov = from_config({"type": "static", "token": "abc"})
     check(isinstance(prov, StaticToken) and prov.access_token() == "abc", "from_config static")
     prov = from_config({"type": "service_account",
-                        "sources": [{"kind": "1password", "ref": op_ref, "token_file": token_path},
+                        "sources": [{"kind": "1password", "ref": op_ref, "token_file": token_path,
+                                     "op_bin": "/nonexistent/adrails-selftest/op"},   # hermetic: never runs the real op
                                     {"kind": "file", "path": good}]})
     check(isinstance(prov, ServiceAccount), "from_config service_account")
     check(prov.info_loader()["client_email"] == "sa@example",
