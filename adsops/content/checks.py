@@ -21,6 +21,7 @@ already lives on the page is not re-ruled: only sentences that are not in `ctx["
 
 Public helpers: `visible_text(draft)`, `strip_markdown(md)`, `md_links(md)`.
 """
+import html as html_mod
 import json
 import re
 from urllib.parse import urlsplit
@@ -175,6 +176,7 @@ def strip_markdown(md):
     if not s:
         return ""
     s = _FENCE_RE.sub(" ", s)
+    s = html_mod.unescape(s)                    # PM (GLM #5): "Chea&#112;est" renders as "Cheapest"
     s = _LINK_RE.sub(lambda m: m.group(1), s)
     s = _HEAD_RE.sub("", s)
     s = _QUOTE_RE.sub("", s)
@@ -211,7 +213,30 @@ def visible_text(draft):
     for item in _mlist(draft.get("internal_links"))[:MAX_LIST]:   # PM: anchors become visible text on other pages
         if isinstance(item, dict):
             parts.append(_text(item.get("anchor"), 300))
-    return "\n".join(p for p in parts if p)[:MAX_TEXT]
+    parts.extend(_jsonld_values(draft.get("jsonld")))   # PM (GLM #4): JSON-LD prices/ratings/claims are traced too
+    return "\n".join(_text(p, 20000) for p in parts if p)[:MAX_TEXT]
+
+
+def _jsonld_values(obj, depth=0, out=None):
+    """Every string and number inside a JSON-LD object (keys that are URLs/ids/types excluded), as text lines."""
+    out = [] if out is None else out
+    if depth > 8 or len(out) > 400:
+        return out
+    if isinstance(obj, dict):
+        for k, v in list(obj.items())[:200]:
+            if k in ("@context", "@type", "@id", "url", "sameAs", "image", "logo", "mainEntityOfPage"):
+                continue
+            _jsonld_values(v, depth + 1, out)
+    elif isinstance(obj, list):
+        for v in obj[:200]:
+            _jsonld_values(v, depth + 1, out)
+    elif isinstance(obj, bool):
+        pass
+    elif isinstance(obj, (int, float)):
+        out.append(str(obj))
+    elif isinstance(obj, str):
+        out.append(obj)
+    return out
 
 
 # ── shingle similarity ────────────────────────────────────────────────────────────────────────────────────────
@@ -231,7 +256,7 @@ def _jaccard(a, b):
     if not a or not b:
         return 0.0
     union = len(a | b)
-    return 0.0 if union else len(a & b) / union
+    return len(a & b) / union if union else 0.0     # PM: was inverted (always 0.0); found by the live Baytown run
 
 
 def _containment(a, b):
@@ -958,4 +983,15 @@ def selftest() -> int:
         "garbage fields become errors, not exceptions")
     chk(run({"mode": "new", "slug": 5, "title": object(), "description": [], "content_type": None,
              "body_md": {}}, ctx())["ok"] is False, "wrong types never raise")
+    ck_a, ck_b = {"a b c d e", "b c d e f", "c d e f g"}, {"a b c d e", "b c d e f", "x y z w v"}
+    chk(abs(_jaccard(ck_a, ck_b) - 0.5) < 1e-9, "jaccard value (2 shared of 4) - regression for the inverted return")
+    long_dup = " ".join("word%d" % (i % 37) for i in range(400))
+    r_dup = run(draft(body_md=long_dup), ctx(corpus={"https://example.com/other/": long_dup + " tail"}))
+    chk(r_dup["stats"]["max_jaccard"] > 0.9 and "DUPLICATE" in {e["code"] for e in r_dup["errors"]},
+        "jaccard is measured and drives a DUPLICATE error on a near-copy")
+    r_ld = run(draft(jsonld={"@context": "https://schema.org", "@type": "Product",
+                             "offers": {"price": 399.99, "priceCurrency": "USD"}}), ctx())
+    chk("UNTRACED_NUMBER" in {e["code"] for e in r_ld["errors"]}, "a JSON-LD price is traced like body text (GLM #4)")
+    r_ent = run(draft(body_md=body + " Acme&#32;PM is slower."), ctx())
+    chk("COMPETITOR" in {e["code"] for e in r_ent["errors"]}, "HTML entities are decoded before the rulings (GLM #5)")
     return n

@@ -20,6 +20,7 @@ quotes + source labels). Two escapes exist for numbers that are *not* claims: ba
 ("$5" is still a claim), which must always be traced.
 """
 import re
+import unicodedata
 from bisect import bisect_right
 from datetime import date
 
@@ -36,13 +37,13 @@ _ONCE_CHARS = {
     "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'", "\u2035": "'",
     "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"', "\u2033": '"', "\u2036": '"',
     "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2015": "-",
-    "\u2212": "-", "\u2043": "-", "\u00ad": "-",
+    "\u2212": "-", "\u2043": "-",
     "\u2026": "...", "\u203d": "?!", "\u00ab": '"', "\u00bb": '"',
     "\u00a0": " ", "\u1680": " ", "\u2000": " ", "\u2001": " ", "\u2002": " ", "\u2003": " ",
     "\u2004": " ", "\u2005": " ", "\u2006": " ", "\u2007": " ", "\u2008": " ", "\u2009": " ",
     "\u200a": " ", "\u202f": " ", "\u205f": " ", "\u3000": " ",
 }
-_ZERO = "\u200b\u200c\u200d\u2060\ufeff\u180e"
+_ZERO = "\u200b\u200c\u200d\u2060\ufeff\u180e\u00ad"     # PM (GLM review #2): soft hyphen is dropped, not a dash
 _TRANS = str.maketrans(_ONCE_CHARS)
 _DROP = str.maketrans({c: None for c in _ZERO})
 
@@ -59,6 +60,7 @@ _YEAR_RE = re.compile(r"\A\d{4}\Z")
 # Context markers used for statistics (numbers) and spelled-out statistics (word_statistics).
 _PCT_AFTER = re.compile(r"^\s*(?:%|percent\b|per\s?cent\b|pct\b)")
 _OUT_AFTER = re.compile(r"^\s*out\s+of\b")
+_RANGE_AFTER = re.compile(r"^\s*(?:-|to)\s*\$?\d[\d,.]*\s*(?:%|percent\b|per\s?cent\b)")   # PM: "5-10%", "5 to 10 percent"
 _OF_EVERY_AFTER = re.compile(r"^\s+of\s+every\b")
 _IN_NUM_AFTER = re.compile(r"^\s+(?:in|of|for|to)\s+(?:{nw}|\d)".format(
     nw=r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
@@ -113,7 +115,8 @@ def _prepare(text):
     if not s:
         return ""
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = s.translate(_DROP).translate(_TRANS)
+    s = unicodedata.normalize("NFKC", s.translate(_DROP))       # PM (GLM review #2): fullwidth digits, ligatures, ...
+    s = s.translate(_TRANS)
     return _WS_RE.sub(" ", s).strip()
 
 
@@ -214,7 +217,7 @@ def _is_statistic(prepared, end):
     if not after:
         return False
     return bool(_PCT_AFTER.match(after) or _OUT_AFTER.match(after) or _OF_EVERY_AFTER.match(after)
-                or _IN_NUM_AFTER.match(after))
+                or _IN_NUM_AFTER.match(after) or _RANGE_AFTER.match(after))
 
 
 def _allowed_numbers(allowed_text):
@@ -481,4 +484,8 @@ def selftest() -> int:
     chk(new_sentences("Old line. New line.", "The old line stays here.") == ["New line."],
         "new_sentences keeps only new sentences")
     chk(new_sentences(None, None) == [] and new_sentences("", "x") == [], "new_sentences of empty input")
+    chk(len(trace("save \uff16\uff18\uff05 now")) == 1, "fullwidth 68% is normalised and traced (GLM #2)")
+    chk(numbers_in("\uff16\uff18") == ["68"], "fullwidth digits read as ASCII")
+    chk(len(trace("we cut costs 5-10% for owners")) == 2, "both ends of a percent range are statistics")
+    chk(norm("com\u00adpetitor") == "competitor", "soft hyphen dropped, not turned into a dash")
     return n

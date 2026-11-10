@@ -284,7 +284,7 @@ def fetch_text(url, fetch=None, max_hops=3, allowed_domains=None):
         if status != 200:
             out["error"] = "status %d" % status
             return out
-        if got.get("truncated") is True:
+        if got.get("truncated"):                      # PM (GLM #7): any truthy value means truncated
             out["error"] = "truncated"
             return out
         body = got.get("body")
@@ -400,7 +400,7 @@ def verify_quotes(draft_sources, fetched):
             continue
         text = rec.get("text")
         text_n = _norm(text if isinstance(text, str) else "")
-        if not isinstance(quote, str) or len(quote.strip()) < MIN_QUOTE:
+        if not isinstance(quote, str) or len(_norm(quote)) < MIN_QUOTE:     # PM (GLM #16): measured after normalising
             errors.append(_err("QUOTE_NOT_FOUND", "quote %d is shorter than %d characters" % (i, MIN_QUOTE)))
             continue
         if len(quote) > MAX_QUOTE:
