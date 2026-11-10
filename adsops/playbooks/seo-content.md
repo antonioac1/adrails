@@ -53,7 +53,7 @@ One fix round is allowed. A draft that still fails is held with the exact errors
 
 ## 4. The adversarial review
 
-`seo_content_review` re-fetches every cited source and re-finds every quote, then asks the reviewer to find what is false, unsupported, duplicate, misleading or embarrassing. The reviewer may edit; every edit goes through all the checks again. A reviewer edit that adds an unsupported number is held, not quietly kept. The review record (`review.json`) names the writer's family and the reviewer model that actually answered.
+`seo_content_review` re-fetches every cited source and re-finds every quote, then asks the reviewer to find what is false, unsupported, duplicate, misleading or embarrassing. The reviewer may edit; every edit goes through all the checks again. A reviewer edit that adds an unsupported number is held, not quietly kept. In an unattended run (`seo-run`), a rejected draft gets one revision: the writer sees the reviewer's findings, and the revision is checked and reviewed again from scratch. The review record (`review.json`) names the writer's family and the reviewer model that actually answered.
 
 ## 5. The bundle and IMPLEMENT.md
 

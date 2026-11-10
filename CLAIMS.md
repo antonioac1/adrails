@@ -223,4 +223,5 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C12 | Bundle: page.md, IMPLEMENT.md, review.json, hashes; tampering detected | test: content.bundle.selftest; content.publish.selftest (`tamper refused`) |
 | C13 | Publish: human approval by default, audit chain, new pages only and never over an existing file, no symlinks, git never pushes, auto only with caps + window, HOLD on a failed post-publish check, kill switch | test: content.publish.selftest; blackbox `test_publish_human_then_auto_hold`, `test_cli_refuses_with_kill_switch` |
 | C14 | Results at 14/28/56 days; LESSONS.md visible, capped, operator deletions stick | test: content.learn.selftest; blackbox `test_results_and_lessons_loop` |
+| C16 | One revision round after a rejected review; the revision is re-checked and reviewed anew | blackbox `test_rejected_review_gets_one_revision_and_a_new_review`; live run on baytownpm.com 2026-11-10 (Order D LOG) |
 | C15 | "99 tools" (with an openai_ads account configured; 83 without) | test: tools.selftest `len(names) == 83` and the eight seo_content_* names |

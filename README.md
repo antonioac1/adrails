@@ -349,7 +349,8 @@ environment by name and never logged. Per run: call, token, dollar and time caps
 **Independence, enforced in code.** The tool refuses to start if any reviewer is the same model family as any configured writer.
 At run time the model that actually answered is read from the response (or the CLI's JSON) and must be the model that was asked
 for (a dated suffix is fine); a different model, a reported fallback, tool use, an unknown family or a writer-family answer is
-refused and recorded. No parseable verdict is a hold.
+refused and recorded. No parseable verdict is a hold. After a rejection the writer gets one revision round with the
+reviewer's findings; the revision goes through every check and a new independent review (`revision_rounds: 0` turns it off).
 
 **The checks** (before any reviewer, and again after every reviewer edit): every number, percentage, dollar amount and year traced
 to FACTS or to a verbatim quote from a source fetched in that run (spelled-out statistics refused); banned phrases, excluded areas,
