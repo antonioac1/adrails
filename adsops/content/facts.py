@@ -322,6 +322,7 @@ def load_profile(path):
         "gsc_site": _str_list([data["gsc_site"]], "gsc_site", 1, 300)[0] if data.get("gsc_site") else None,
         "max_corpus_pages": _num_int(data.get("max_corpus_pages", 400), "max_corpus_pages", 1, 400),
         "exclude_paths": _str_list(data.get("exclude_paths") or [], "exclude_paths", 100, 200),
+        "revision_rounds": _num_int(data.get("revision_rounds", 1), "revision_rounds", 0, 1),
     }
     for u in profile["reference_sources"]:
         if not u.startswith("https://"):

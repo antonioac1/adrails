@@ -271,6 +271,20 @@ class ContentPipelineTests(unittest.TestCase):
         self.assertEqual(r["verdict"], "hold")
         self.assertTrue(any("silent fallback" in h for h in r["hold_reasons"]), r)
 
+    def test_rejected_review_gets_one_revision_and_a_new_review(self):
+        d = self.good_draft()
+        self.models.script("w", ("glm-5.3", d, "stop"),
+                           ("glm-5.3", dict(d, body_md=d["body_md"] + " Ask for every fee in writing."), "stop"))
+        self.models.script("r", ("openai/gpt-5", {"verdict": "reject", "findings": [{"severity": "major",
+                                                                                    "issue": "too vague", "quote": "x"}]}),
+                           ("openai/gpt-5", {"verdict": "approve", "findings": []}))
+        r = self.run_once()
+        self.assertEqual(r["verdict"], "approve", r)
+        self.assertEqual(r["first_review"], "reject")
+        wprompts = [q["body"]["messages"][1]["content"] for q in self.models.requests if q["lane"] == "w"]
+        self.assertIn("REVIEWER (major): too vague", wprompts[1])
+        self.assertEqual(len([q for q in self.models.requests if q["lane"] == "r"]), 2)
+
     def test_reviewer_without_verdict_is_held(self):
         self.models.script("w", ("glm-5.3", self.good_draft(), "stop"))
         self.models.script("r", ("openai/gpt-5", "Looks good to me!", "stop"))

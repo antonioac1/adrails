@@ -324,9 +324,9 @@ def _writer_prompt(profile, facts, cand, ctx, refs, lessons_text, fix=None, prev
         parts.append(block("LESSONS", lessons_text[:4000]))
     if fix:
         parts.append(block("YOUR_PREVIOUS_DRAFT", prev))
-        parts.append(block("CHECK_ERRORS_TO_FIX", fix[:40]))
-        parts.append("Fix every error listed (remove a claim rather than invent support for it) and answer with the full "
-                     "corrected JSON object.")
+        parts.append(block("PROBLEMS_TO_FIX", fix[:40]))
+        parts.append("Fix every problem listed (remove or soften a claim rather than invent support for it) and answer "
+                     "with the full corrected JSON object.")
     parts.append("Answer with the single JSON object described in your rules.")
     return "\n\n".join(parts)
 
@@ -353,8 +353,10 @@ def _held(p, did, row):
         json.dump(row, f, indent=1, sort_keys=True, default=str)
 
 
-def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None):
-    """Write + deterministic checks (+ one writer fix round). -> result with draft_id; saves drafts/<id>/."""
+def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None, revise=None):
+    """Write + deterministic checks (+ one writer fix round). -> result with draft_id; saves drafts/<id>/.
+    revise = {"draft": previous draft, "findings": [reviewer findings]}: a revision after a rejected review (the revised
+    draft goes through every check and a NEW independent review; nothing from the old review carries over)."""
     p = paths(profile)
     ws, rs, ed = chains
     budget = budget or writers.Budget(profile.get("caps"), clock=io.clock)
@@ -365,7 +367,7 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None):
         lessons_text = learn_mod.read_lessons(profile["_lessons_path"])["text"]
     ctx, refs, errs, _ = _context(profile, facts, io, budget, candidate)
     did = "%s-%s" % (dt.date.fromtimestamp(io.now()).strftime("%Y%m%d"),
-                     hashlib.sha256(str(candidate["id"]).encode()).hexdigest()[:10])     # review D#21: path-safe id
+                     hashlib.sha256((str(candidate["id"]) + ("-r1" if revise else "")).encode()).hexdigest()[:10])
     res = {"stage": "draft", "run_id": run_id, "candidate_id": candidate["id"], "draft_id": did, "ok": False,
            "attempts": [], "site_errors": errs[:20]}
     if candidate["mode"] == "extend" and not ctx.get("live_text"):
@@ -376,8 +378,12 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None):
     prev, chk_res = None, None
     writer_rep = None
     for round_ in range(2):
-        prompt = _writer_prompt(profile, facts, candidate, ctx, refs, lessons_text,
-                                fix=[e["msg"] for e in chk_res["errors"]] if chk_res else None, prev=prev)
+        if chk_res is None and revise:
+            fix, prev = ["REVIEWER (%s): %s | quote: %s" % (f.get("severity"), f.get("issue"), f.get("quote"))
+                         for f in revise.get("findings") or []][:40], revise.get("draft")
+        else:
+            fix = [e["msg"] for e in chk_res["errors"]] if chk_res else None
+        prompt = _writer_prompt(profile, facts, candidate, ctx, refs, lessons_text, fix=fix, prev=prev)
         chain = ws if writer_rep is None else ws[[b["name"] for b in ws].index(writer_rep["backend"]):]
         try:
             rep, att = writers.call_chain(chain, system, prompt, budget, accept=_draft_accept, **kw)
@@ -506,6 +512,26 @@ def run_once(profile_path, io, *, candidate_id=None, html=False, audit_run=None,
             rres = review_draft(profile, facts, chains, io, draft_id=dres["draft_id"], budget=budget, run_id=run_id,
                                 html=html)
             _log(p, dict(_slim(rres), at=io.now()))
+            findings = (rres.get("review") or {}).get("findings") or []
+            if rres.get("verdict") == "reject" and findings and int(profile.get("revision_rounds", 1)) >= 1:
+                # one revision round: the writer fixes the reviewer's findings, then checks + a NEW review run again
+                try:
+                    with open(os.path.join(p["drafts"], dres["draft_id"], "draft.json"), encoding="utf-8") as f:
+                        prev_d = json.load(f)["draft"]
+                    dres2 = draft(profile, facts, chains, io, candidate=cand, budget=budget, run_id=run_id,
+                                  revise={"draft": prev_d, "findings": findings})
+                    _log(p, dict(_slim(dres2), at=io.now(), revision=1))
+                    row.update(revision_draft=dres2.get("draft_id"), revision_draft_ok=dres2["ok"],
+                               first_review=rres.get("verdict"), first_findings=len(findings))
+                    if dres2["ok"]:
+                        rres = review_draft(profile, facts, chains, io, draft_id=dres2["draft_id"], budget=budget,
+                                            run_id=run_id, html=html)
+                        _log(p, dict(_slim(rres), at=io.now(), revision=1))
+                    else:
+                        rres = dict(rres, verdict="hold", hold_reasons=rres.get("hold_reasons", []) +
+                                    ["revision failed: %s" % dres2.get("held")])
+                except (OSError, ValueError, KeyError) as e:
+                    rres = dict(rres, hold_reasons=rres.get("hold_reasons", []) + ["revision skipped: %s" % type(e).__name__])
             row.update(verdict=rres.get("verdict"), bundle=rres.get("bundle"), hold_reasons=rres.get("hold_reasons"))
         else:
             row.update(verdict="hold", hold_reasons=[dres.get("held")])
