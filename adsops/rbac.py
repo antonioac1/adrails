@@ -91,10 +91,15 @@ VIEWER = (
     "adsops_metrics",
     "adsops_search_console",
     "adsops_impact",
+    # 0.11 site audit reads (local stored runs only)
+    "seo_audit_issues",
+    "seo_audit_diff",
 )
 
 OPERATOR_EXTRA = (
     "adsops_metrics_pull",   # calls Google APIs (quota) and writes the local store
+    "seo_audit_run",         # crawls a website (outbound requests) and writes the local run store
+    "seo_gsc_exclusions",    # spends Search Console URL Inspection quota
     "adsops_plan",
     "adsops_apply",
     "adsops_set",
