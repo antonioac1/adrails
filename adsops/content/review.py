@@ -94,7 +94,7 @@ def parse_verdict(text):
     try:
         d = json.loads(t[i:j + 1])
         json.dumps(d, ensure_ascii=False).encode("utf-8")   # QA minor: lone surrogates -> no verdict -> hold
-    except (ValueError, UnicodeEncodeError):
+    except (ValueError, UnicodeEncodeError, RecursionError):
         return None
     if not isinstance(d, dict) or d.get("verdict") not in ("approve", "reject"):
         return None

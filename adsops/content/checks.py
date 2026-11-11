@@ -58,7 +58,7 @@ SUPERLATIVES = ("best", "#1", "number one", "leading", "top-rated", "top rated",
 
 # ── total helpers (never raise, never touch the outside world) ────────────────────────────────────────────────
 _SLUG_RE = re.compile(r"\A/[a-z0-9/-]{1,120}/\Z")
-_FILE_SLUG_RE = re.compile(r"\A/[a-z0-9/_-]{0,180}[a-z0-9_-]\.(?:html?|php|aspx?)\Z")   # QA minor: /blog/post.html
+_FILE_SLUG_RE = re.compile(r"\A/[a-z0-9-]+(?:/[a-z0-9-]+)*\.html?\Z")   # QA minor: /blog/post.html
 _FENCE_RE = re.compile(r"```.*?```", re.S)
 _LINK_RE = re.compile(r"!?\[([^\]\n]{0,500})\]\(([^()\s]{0,2000})(?:\s+\"[^\"]{0,500}\")?\)")
 _LINK_TITLE_RE = re.compile(r"\]\([^()\s]{0,2000}\s+\"([^\"]{0,500})\"\)")
@@ -533,8 +533,8 @@ def _run(draft, ctx, err, warn, stats, errors_so_far=lambda: []):
     low_text = numbers.norm(under)
     # QA M11: a format character (zero-width space, joiner, soft hyphen, bidi mark) may stand where a space was: rule
     # matching sees the text both with those characters dropped and with them read as spaces.
-    spaced = "".join(" " if unicodedata.category(ch) == "Cf" else ch for ch in under)
-    low = low_text + "\n" + numbers.norm(spaced)
+    spaced = "".join(" " if numbers.invisible(ch) else ch for ch in under)
+    low = low_text + "\n\x00\n" + numbers.norm(spaced)   # \x00 seam: no phrase can match across the two variants
     for w in numbers.mixed_script_words(visible):
         err("MIXED_SCRIPT", 'the word "{}" mixes Latin with Cyrillic or Greek letters (lookalike spoofing)'.format(
             _clip(w, 60)))

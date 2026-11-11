@@ -341,7 +341,7 @@ def _cost(b, usage):
     if isinstance(c, (int, float)) and not isinstance(c, bool) and 0 <= c < 1e6:
         return float(c)
     price = b.get("price_per_mtok") or (CONSERVATIVE_PRICE if b.get("kind") == "openrouter" else None)
-    if price and isinstance(usage, dict):
+    if price and isinstance(usage, dict) and (_nonneg_int(usage.get("prompt_tokens")) or _nonneg_int(usage.get("completion_tokens"))):
         return (_nonneg_int(usage.get("prompt_tokens")) * price["in"] + _nonneg_int(usage.get("completion_tokens"))
                 * price["out"]) / 1e6
     return None

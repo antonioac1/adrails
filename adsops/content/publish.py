@@ -110,8 +110,10 @@ def _on_chain(chain, digest):
     return any((e.get("data") or {}).get("manifest") == digest for e in chain.tail(100000, event="content_bundle"))
 
 
-_CONTENT_CODES = {"UNTRACED_NUMBER", "WORD_STATISTIC", "BANNED_PHRASE", "SUPERLATIVE", "COMPETITOR", "EXCLUDED_AREA",
-                  "URL_IN_TEXT", "RAW_HTML", "JSONLD", "AUTHOR", "SCHEMA", "MIXED_SCRIPT"}
+# Codes that need the live site or the fetched sources (corpus, links, retention, quotes): verified at review time and
+# bound by the audit-chain record; every OTHER error refuses the publish (review fr#8).
+_CONTEXT_CODES = {"INTERNAL_LINK", "CORPUS_INCOMPLETE", "DUPLICATE", "LIVE_CHANGES", "RETENTION", "UNDECLARED_CHANGE",
+                  "SOURCES_INCOMPLETE", "QUOTE_NOT_FOUND", "THIN"}
 
 
 def _recheck(bundle_dir, man, profile, page_bytes, facts_text):
@@ -121,11 +123,15 @@ def _recheck(bundle_dir, man, profile, page_bytes, facts_text):
     expect = bundle_mod.page_md(draft, profile, man.get("today"))
     if expect.encode("utf-8") != page_bytes:
         raise RailViolation("page.md is not what the approved draft.json produces; refusing")
+    if "page.html" in (man.get("files") or {}):
+        html_bytes = _read_verified(bundle_dir, man, "page.html")
+        if bundle_mod.render_html(draft, profile).encode("utf-8") != html_bytes:
+            raise RailViolation("page.html is not what the approved draft.json renders; refusing")
     quotes = [s.get("quote") for s in draft.get("sources") or [] if isinstance(s, dict) and s.get("quote")]
     res = checks_mod.run(draft, {"profile": profile, "facts_text": facts_text, "verified_quotes": quotes,
                                  "source_labels": [], "corpus": {}, "corpus_complete": True, "known_paths": [],
                                  "today": man.get("today")})
-    bad = sorted({e["code"] for e in res["errors"]} & _CONTENT_CODES)
+    bad = sorted({e["code"] for e in res["errors"]} - _CONTEXT_CODES)
     if bad:
         raise RailViolation("the content checks fail at publish time (%s); refusing" % ", ".join(bad))
 
@@ -137,9 +143,12 @@ def _site_bound(man, fm, profile):
     if not man.get("site") or man["site"].rstrip("/").lower() != site:
         raise RailViolation("this bundle was built for %r, not for this site (%r)" % (man.get("site"), profile.get("site")))
     can = str(fm.get("canonical") or "")
-    host = (urlsplit(can).hostname or "").lower()
-    if host != (profile.get("host") or urlsplit(site).hostname or "").lower() or not can.lower().startswith(site + "/"):
-        raise RailViolation("the bundle's canonical %r is not on this site" % can)
+    try:
+        host = (urlsplit(can).hostname or "").lower()
+    except ValueError:
+        raise RailViolation("the bundle's canonical is not a valid URL") from None
+    if host != (profile.get("host") or urlsplit(site).hostname or "").lower() or can.lower() != site + str(fm.get("slug") or ""):
+        raise RailViolation("the bundle's canonical %r is not this site's URL for its slug" % can)
 
 
 def _read_json(path):
@@ -164,7 +173,7 @@ def check_bundle(bundle_dir):
     rev = rv.get("reviewer") or {}
     if not rev.get("model_answered"):
         raise RailViolation("bundle has no verified reviewer model on record")
-    wf, rf = rv.get("writer_family"), rev.get("family")      # review D#2: independence re-asserted at publish time
+    wf, rf = (str(x or "").strip().lower() for x in (rv.get("writer_family"), rev.get("family")))   # independence again
     if not wf or not rf or wf == rf:
         raise RailViolation("bundle does not record an independent review (writer family %r, reviewer family %r)" % (wf, rf))
     if man.get("reviewer_model") and man["reviewer_model"] != rev["model_answered"]:
@@ -210,7 +219,7 @@ class _Lock:
     """O_EXCL lock file with a random token; a stale lock (older than stale_s) may be taken over, and we only remove
     the file if it still holds OUR token (review D#11)."""
 
-    def __init__(self, path, stale_s=3600):
+    def __init__(self, path, stale_s=6 * 3600):
         self.path, self.stale_s, self.token = path, stale_s, None
 
     def __enter__(self):
@@ -287,7 +296,7 @@ _GIT_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "TMP
 
 def _git(argv, cwd, run=None):
     """git with an allowlisted environment (no API keys reach it) and hooks/fsmonitor disabled (review D#5)."""
-    full = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + argv
+    full = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false"] + argv
     if run:
         return run(["git"] + argv, cwd)
     env = {k: os.environ[k] for k in _GIT_ENV_KEEP if k in os.environ}
@@ -356,6 +365,12 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
             _site_bound(man, fm, profile)
             if not _on_chain(chain, manifest_digest(bundle_dir)):
                 raise RailViolation("this bundle is not recorded in the audit chain as created by a review; refusing")
+            if profile.get("_facts_path"):             # review fr#4: the approved file decides, not caller text
+                from . import facts as facts_mod
+                try:
+                    facts_text = facts_mod.load_facts(profile["_facts_path"])["text"]
+                except ToolError as e:
+                    raise RailViolation("the facts file is not approved: %s" % scrub(str(e), 200)) from None
             if facts_text is None:
                 raise RailViolation("publish needs the current approved facts to re-run the content checks")
             _recheck(bundle_dir, man, profile, page, facts_text)
@@ -412,12 +427,19 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                         problems.append("live check failed for %s (status %s)" % (url, r.get("status")))
             except Exception as e:                        # noqa: BLE001 - convert, restore, HOLD
                 problems.append("publish failed after writing started: %s" % scrub(str(e) or type(e).__name__, 200))
-                if st["target"] == "static":
-                    for path, bak in backups:
+            if problems and st["target"] == "static":    # review fr#1: never leave a page live after a failed check
+                restored = {pth for pth, _ in backups}
+                for path, bak in backups:
+                    try:
+                        os.replace(bak, path)
+                    except OSError:
+                        problems.append("could not restore %s" % path)
+                for path, _ in targets:
+                    if path not in restored and os.path.exists(path):
                         try:
-                            os.replace(bak, path)
+                            os.unlink(path)
                         except OSError:
-                            pass
+                            problems.append("could not remove %s" % path)
             if st["target"] == "git" and branch:
                 if problems:                              # QA M4: leave the operator's repo exactly as it was
                     _git(["reset", "-q", "--hard"], st["dir"], git_run)
@@ -430,8 +452,10 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                                     os.unlink(path)
                                 except OSError:
                                     pass
-                    _git(["checkout", "-q", orig_branch], st["dir"], git_run)
-                    _git(["branch", "-D", branch], st["dir"], git_run)
+                    for argv_ in (["checkout", "-q", orig_branch], ["branch", "-D", branch]):
+                        rc_, out_ = _git(argv_, st["dir"], git_run)
+                        if rc_ != 0:
+                            problems.append("git rollback step %s failed: %s; the repo needs a human" % (argv_[0], scrub(out_, 120)))
                     branch, commit = None, None
                 else:                                     # success: the commit stays on its branch, the checkout goes back
                     _git(["checkout", "-q", orig_branch], st["dir"], git_run)
@@ -453,6 +477,9 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
         if "HOLD written" not in str(e):
             audit(False, error=scrub(str(e), 300))
         raise
+    except Exception as e:                                # noqa: BLE001 - review fr#13: never an unaudited crash
+        audit(False, error="unexpected %s: %s" % (type(e).__name__, scrub(str(e), 200)))
+        raise RailViolation("publish refused after an unexpected %s" % type(e).__name__) from None
 
 
 def _default_fetch(url):
@@ -563,6 +590,8 @@ def selftest() -> int:
         refused(lambda: publish(out6["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am + 86400,
                                 fetch=lambda u: {"status": 500, "body": ""}), "HOLD written", "failed live check trips HOLD")
         ck(os.path.exists(state_files(state)["hold"]), "HOLD file exists")
+        ck(not os.path.exists(os.path.join(site, "guides", "auto-two", "index.md")),
+           "a page whose post-publish check failed is taken down again (review fr#1)")
         os.rename(state_files(state)["hold"], state_files(state)["hold"] + ".x")
         from . import extend as extend_mod
         outx = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/ext/", mode="extend"), rv,

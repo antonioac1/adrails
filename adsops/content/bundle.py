@@ -69,7 +69,7 @@ def _canonical(profile, slug):
 
 def _slug(draft):
     slug = _cap(draft.get("slug") if isinstance(draft, dict) else "", 200)
-    file_ok = _cap(draft.get("mode"), 20) == "extend" and re.match(r"^/[a-z0-9/_-]{0,180}[a-z0-9_-]\.(?:html?|php|aspx?)$", slug)
+    file_ok = _cap(draft.get("mode"), 20) == "extend" and re.match(r"^/[a-z0-9-]+(?:/[a-z0-9-]+)*\.html?$", slug)
     if not (SLUG_RX.match(slug) or file_ok) or ".." in slug or "//" in slug:
         raise ToolError("bundle: draft slug %r is not /lower/path/ form" % scrub(slug))
     return slug

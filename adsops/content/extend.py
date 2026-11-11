@@ -103,8 +103,15 @@ def merge_jsonld(blocks, faq, today):
         raise ToolError("the live page has a JSON-LD block that does not parse; an extension cannot merge into it safely")
     after = copy.deepcopy(blocks)
     ops = []
-    questions = [{"@type": "Question", "name": q["q"], "acceptedAnswer": {"@type": "Answer", "text": q["a"]}}
-                 for q in faq or [] if isinstance(q, dict) and q.get("q") and q.get("a")]
+    questions = []
+    for q in faq or []:
+        if not isinstance(q, dict) or not isinstance(q.get("q"), str) or not isinstance(q.get("a"), str) \
+                or not q["q"].strip() or not q["a"].strip():
+            raise ToolError("every FAQ item needs a non-empty text question and answer")
+        if any(ch in q["q"] + q["a"] for ch in "<>"):             # never markup inside an embedded ld+json script
+            raise ToolError("FAQ text may not contain < or >")
+        questions.append({"@type": "Question", "name": q["q"].strip(),
+                          "acceptedAnswer": {"@type": "Answer", "text": q["a"].strip()}})
     if questions:
         target = None
         for bi, b in enumerate(after):
@@ -115,11 +122,11 @@ def merge_jsonld(blocks, faq, today):
             if target:
                 break
         if target:
-            ents = target[1].get("mainEntity")
+            ents = target[1].get("mainEntity", [])
             if isinstance(ents, dict):
                 ents = [ents]
             if not isinstance(ents, list):
-                ents = []
+                raise ToolError("the live FAQPage has a mainEntity that is not a list or object; refusing to merge")
             have = {str(e.get("name", "")).strip().lower() for e in ents if isinstance(e, dict)}
             add = [q for q in questions if q["name"].strip().lower() not in have]
             target[1]["mainEntity"] = ents + add
@@ -164,8 +171,13 @@ def head(h):
     return [t.group(1).strip() if t else None, metas, links, [" ".join(x.split()) for x in h1]]
 if head(old) != head(new):
     fails.append("title, meta description, canonical, og/twitter tags or H1 changed: an extension must not change them")
+def _nodup(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate JSON key")
+    return dict(pairs)
 try:
-    got = [json.loads(b) for b in LD.findall(new)]
+    got = [json.loads(b, object_pairs_hook=_nodup) for b in LD.findall(new)]
 except ValueError:
     got = None
 if got != after:
@@ -181,20 +193,29 @@ for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).ge
         continue
     if op == "insert":
         inserts += 1
+        block = "\n".join(b[j1:j2])
+        if re.search(r"<\s*(script|iframe|object|embed|style|form|link|meta)\b|\son\w+\s*=|javascript:", block, re.I):
+            fails.append("the inserted block contains script/iframe/style/form/meta tags, event handlers or javascript: links")
+        for href in re.findall(r"href\s*=\s*[\"']([^\"']*)[\"']", block, re.I):
+            if href not in spec.get("allowed_hrefs", []):
+                fails.append("the inserted block links to %r, which page.md does not" % href)
+        words = re.findall(r"[a-z0-9]+", norm(block))
+        if words != spec.get("insert_words"):
+            fails.append("the visible text of the inserted block is not exactly the body of page.md")
         if spec.get("insert_after"):
             anchor = next((k for k, l in enumerate(a) if norm(spec["insert_after"]) in norm(l)), None)
             if anchor is None or i1 <= anchor:
                 fails.append("new content is not inserted after the heading %r" % spec["insert_after"])
         continue
-    oldt, newt = norm(" ".join(a[i1:i2])), norm(" ".join(b[j1:j2]))
+    # a replace hunk must be the old lines with ONLY the declared before -> after substitutions (markup untouched)
+    oldr, newr = html.unescape("\n".join(a[i1:i2])), html.unescape("\n".join(b[j1:j2]))
     ok = False
     if op == "replace":
         for c in spec["live_changes"]:
-            bf, af = norm(c["before"]), norm(c["after"])
-            if bf and bf in oldt and af in newt:
-                oldt, newt = oldt.replace(bf, " ", 1), newt.replace(af, " ", 1)
+            if c["before"] and c["before"] in oldr:
+                oldr = oldr.replace(c["before"], c["after"], 1)
                 ok = True
-        ok = ok and " ".join(oldt.split()) == " ".join(newt.split())   # nothing else changed inside the hunk
+        ok = ok and oldr == newr
     if not ok:
         fails.append("lines %d-%d of the original were %s outside the declared changes" % (i1 + 1, i2, "removed" if op == "delete" else "changed"))
 if inserts > 1:
@@ -207,7 +228,12 @@ sys.exit(1 if fails else 0)
 def bundle_files(draft, live, today):
     """-> (files {name: text}, ops, after_blocks) for an extend bundle."""
     after, ops = merge_jsonld(live["jsonld"], draft.get("faq"), today)
+    from . import checks as checks_mod
+    body = draft.get("body_md") or ""
+    words = re.findall(r"[a-z0-9]+", " ".join(html_mod.unescape(checks_mod.strip_markdown(body)).split()).lower())
+    hrefs = sorted({l["target"] for l in checks_mod.md_links(body)})
     spec = {"page": live["url"], "original_sha256": live["sha256"], "insert_after": draft.get("insert_after"),
+            "insert_words": words, "allowed_hrefs": hrefs,
             "live_changes": [{"before": c.get("before", ""), "after": c.get("after", "")}
                              for c in draft.get("live_changes") or [] if isinstance(c, dict)],
             "head_unchanged": live["head"], "jsonld_ops": ops}
@@ -286,6 +312,7 @@ def selftest() -> int:
     ck(live["head"]["title"] == "Rent or Sell?" and live["head"]["h1"] == ["Rent or Sell?"], "head facts read")
     ck(live["head"]["canonical"] == "https://ex.com/a/" and live["head"]["og"]["og:title"] == "Rent or Sell?", "canonical/og")
     draft = {"faq": [{"q": "New q", "a": "New a"}, {"q": "Old q", "a": "dup"}], "insert_after": "The fee, plainly",
+             "body_md": "## New\n\nNew text.",
              "live_changes": [{"before": "Call us.", "after": "Call us today."}]}
     after, ops = merge_jsonld(live["jsonld"], draft["faq"], "2026-11-11")
     g = after[0]["@graph"]
@@ -334,6 +361,26 @@ def selftest() -> int:
     ck(rc == 1, "an undeclared change fails")
     rc, out = verify(good.replace("<h1>", "<p>x</p>\n<h1>", 1))
     ck(rc == 1, "a second insertion before the anchor fails")
+    rc, out = verify(good.replace("<p>New text.</p>", "<p>New text.</p><script src=//evil></script>"))
+    ck(rc == 1 and "script" in out, "a script in the inserted block fails (review fr#2)")
+    rc, out = verify(good.replace("<p>New text.</p>", "<p>New text and more.</p>"))
+    ck(rc == 1 and "visible text" in out, "inserted text must equal page.md")
+    rc, out = verify(good.replace("<p>Call us today.</p>", "<p onclick=\"x()\">Call us today.</p>"))
+    ck(rc == 1, "markup changed inside a declared live change fails (review fr#3)")
+    dup = good.replace('"@context": "https://schema.org"', '"@type": "Evil", "@context": "https://schema.org"', 1)
+    rc, out = verify(dup)
+    ck(rc == 1, "duplicate JSON keys / altered JSON-LD fail (review fr#19)")
+    for bad_faq in ([{"q": 1, "a": "x"}], [{"q": "q</script>", "a": "x"}]):
+        try:
+            merge_jsonld(live["jsonld"], bad_faq, "2026-11-11")
+            ck(False, "bad FAQ must refuse")
+        except ToolError:
+            ck(True, "non-text or markup FAQ refused (review fr#12/#20)")
+    try:
+        merge_jsonld([{"@type": "FAQPage", "mainEntity": "legacy"}], [{"q": "a", "a": "b"}], "2026-11-11")
+        ck(False, "odd mainEntity must refuse")
+    except ToolError:
+        ck(True, "odd live mainEntity refuses the merge (review fr#11)")
     sec = implement_section(draft, live, ops, lambda v, n: " ".join(str(v or "").split())[:n])
     ck("ALREADY LIVE" in sec and "never replaced" in sec and "Rent or Sell?" in sec, "IMPLEMENT extend section")
     return n

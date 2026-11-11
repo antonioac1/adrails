@@ -260,9 +260,9 @@ def _context(profile, facts, io, budget, cand, draft_sources=(), refs=None, site
                 live_page = extend_mod.live_page(raw.get("body") or "", page)
                 if live_page["jsonld_unparseable"]:
                     raise ToolError("the live page has JSON-LD that does not parse")
-            except ToolError as e:
+            except Exception as e:                    # noqa: BLE001 - anything odd about the live page = hold
                 live_text, live_page = None, None
-                errs.append("the page to extend could not be modelled safely: %s" % scrub(str(e), 200))
+                errs.append("the page to extend could not be modelled safely: %s" % scrub(str(e) or type(e).__name__, 200))
     if refs is None:
         refs, rerr = reference_sources(io, profile, [s.get("url") for s in draft_sources if isinstance(s, dict)], deadline)
         errs += rerr
@@ -294,7 +294,10 @@ def compose(d, ctx):
     ia = d.get("insert_after")
     if ia and (not isinstance(ia, str) or numbers.norm(ia) not in numbers.norm(ctx["live_text"])):
         errs.append({"code": "SCHEMA", "msg": "insert_after is not text on the live page"})
-    return dict(d, body_md=live + "\n\n" + str(d.get("body_md") or "")), errs
+    view = dict(d, body_md=live + "\n\n" + str(d.get("body_md") or ""))
+    # the kept live head may be longer than our own limits; it is legacy text, so it is checked as live text only
+    view["title"], view["description"] = str(d.get("title") or "")[:70], str(d.get("description") or "")[:170]
+    return view, errs
 
 
 def check(d, ctx):
@@ -382,8 +385,10 @@ def _parse_draft(text):
     try:
         d = json.loads(t[i:j + 1])
         json.dumps(d, ensure_ascii=False).encode("utf-8")   # QA minor: a lone surrogate (\\ud800) is not text -> hold
-    except (ValueError, UnicodeEncodeError):
+    except (ValueError, UnicodeEncodeError, RecursionError):
         return None
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]|\\u00(?:0[0-8bcef]|1[0-9a-f])", t[i:j + 1], re.I):
+        return None                                      # control characters are never page text
     return d if isinstance(d, dict) else None
 
 
@@ -530,6 +535,8 @@ def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=No
     if chain is not None:                              # publish() only accepts bundles recorded here
         from . import publish as publish_mod
         publish_mod.record_bundle(chain, out["path"])
+    else:
+        res["note"] = "bundle not recorded on the audit chain: the publisher will refuse it (IMPLEMENT.md still applies)"
     res.update(ok=True, bundle=out["path"])
     return res
 
@@ -679,4 +686,7 @@ def selftest() -> int:
     ck(len(h) == 1 and "Most people pay on time, which means they keep their deposit." in h[0], "quote hint = closest sentence")
     ck(_quote_hints({"sources": [{"url": "u", "quote": "Most people pay on time"}]}, refs) == [], "verbatim quote: no hint")
     ck(_parse_draft('{"body_md": "bad \\ud800 text"}') is None, "lone surrogate in model JSON = no usable draft (QA)")
+    deep = _parse_draft("{\"a\": " + "[" * 100000 + "]" * 100000 + "}")
+    ck(deep is None or isinstance(deep, dict), "deep nesting never crashes the run")
+    ck(_parse_draft('{"body_md": "x\\u0000y"}') is None, "control characters = no draft")
     return n

@@ -61,9 +61,17 @@ _CONFUSABLES = {
 _CONF = str.maketrans(_CONFUSABLES)
 
 
+_FILLERS = frozenset("\u115f\u1160\u3164\uffa0\u2800\u180e")
+
+
+def invisible(ch):
+    """Format characters (Cf), combining marks left after NFKC (Mn: CGJ, variation selectors) and invisible fillers."""
+    return unicodedata.category(ch) in ("Cf", "Mn") or ch in _FILLERS
+
+
 def strip_format(s):
-    """Remove every Unicode format character (category Cf: zero-width spaces/joiners, bidi marks, soft hyphen...)."""
-    return "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
+    """Remove every invisible character (see invisible(); GLM fix-round review #2 added Mn and Hangul/Braille fillers)."""
+    return "".join(ch for ch in s if not invisible(ch))
 
 
 def mixed_script_words(text, limit=20):
@@ -151,7 +159,8 @@ def _prepare(text):
     if not s:
         return ""
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = unicodedata.normalize("NFKC", strip_format(s.translate(_DROP)))   # fullwidth digits, ligatures; all Cf removed
+    s = "".join(ch for ch in s.translate(_DROP) if unicodedata.category(ch) != "Cf")
+    s = strip_format(unicodedata.normalize("NFKC", s))   # NFKC composes real accents first; leftover marks/fillers go
     s = s.translate(_TRANS).translate(_CONF)                              # QA M11: lookalike letters -> ASCII
     return _WS_RE.sub(" ", s).strip()
 
@@ -571,4 +580,7 @@ def selftest() -> int:
     chk(norm("\u0410cme \u0420M") == "acme pm" and norm("\u202eabc") == "abc", "uppercase lookalikes + bidi marks")
     chk(mixed_script_words("we are guar\u0430nteed") == ["guar\u0430nteed"] and mixed_script_words("\u043f\u0440\u0438\u0432\u0435\u0442 hello") == [],
         "mixed-script words detected, pure Cyrillic words are not")
+    chk(norm("r\u034fisk") == "risk" and norm("guaranteed\ufe0freturns") == "guaranteedreturns" and norm("guar\u1160anteed") == "guaranteed",
+        "combining joiner, variation selector and Hangul filler removed")
+    chk(norm("caf\u00e9") == "caf\u00e9" and norm("cafe\u0301") == "caf\u00e9", "real accents survive (NFKC composes them)")
     return n
