@@ -218,35 +218,50 @@ def _auto_gate(st, rows, now):
 
 
 class _Lock:
-    """O_EXCL lock file with a random token; a stale lock (older than stale_s) may be taken over, and we only remove
-    the file if it still holds OUR token (review D#11)."""
+    """Non-blocking OS file lock (flock / msvcrt) on a lock file that is never unlinked. The kernel drops the lock
+    when the holder exits or crashes, so there is no stale-lock takeover and no check-then-unlink race (round 2:
+    the old O_EXCL + mtime takeover let two processes both delete a stale lock and both proceed). `stale_s` is
+    accepted for compatibility and ignored."""
 
-    def __init__(self, path, stale_s=6 * 3600):
-        self.path, self.stale_s, self.token = path, stale_s, None
+    def __init__(self, path, stale_s=None):
+        self.path, self.fh = path, None
 
     def __enter__(self):
+        fh = open(self.path, "a+")
         try:
-            if time.time() - os.path.getmtime(self.path) > self.stale_s:
-                os.unlink(self.path)
+            try:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except ImportError:                                  # Windows
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            fh.close()
+            raise RailViolation("another publish or run is in progress (lock %s)" % self.path) from None
+        try:
+            os.chmod(self.path, 0o600)
         except OSError:
             pass
-        try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            raise RailViolation("another publish or run is in progress (lock %s)" % self.path) from None
-        self.token = "%d-%s" % (os.getpid(), os.urandom(8).hex())
-        os.write(fd, self.token.encode())
-        os.close(fd)
+        self.fh = fh
         return self
 
     def __exit__(self, *a):
+        fh, self.fh = self.fh, None
+        if fh is None:
+            return
         try:
-            with open(self.path, encoding="utf-8") as f:
-                mine = f.read(100) == self.token
-            if mine:
-                os.unlink(self.path)
+            try:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except ImportError:
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
+        finally:
+            fh.close()
 
 
 _SLUG_FULL = re.compile(r"/[a-z0-9-]+(?:/[a-z0-9-]+)*/")
@@ -444,7 +459,9 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
             try:                                          # review D#4/#12: anything after this point fails CLOSED
                 for path, data in targets:
                     if os.path.exists(path):
-                        bak = path + ".bak-%d" % int(now())
+                        bak = path + ".bak-%d-%s" % (int(now()), os.urandom(4).hex())   # round 2: never collides
+                        while os.path.lexists(bak):
+                            bak = path + ".bak-%d-%s" % (int(now()), os.urandom(4).hex())
                         os.replace(path, bak)
                         backups.append((path, bak))
                     _write(path, data, st["dir"])
@@ -510,8 +527,23 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                                         "%s; a human must check it out" % (commit, branch, orig_branch, scrub(out_, 120), branch))
             row = dict(record, ok=not problems, at=now(), files=[p for p, _ in targets], backups=[b for _, b in backups],
                        branch=branch, commit=commit, url=url, problems=problems)
-            with open(files["log"], "a", encoding="utf-8") as f:
-                f.write(json.dumps(row, sort_keys=True) + "\n")
+            try:
+                with open(files["log"], "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row, sort_keys=True) + "\n")
+            except OSError as exc:
+                # round 2 (DeepSeek concern): the page is out but unrecorded, so caps and the already-published check
+                # cannot see it. Write HOLD (blocks every further publish) and fail loudly; best effort only.
+                problems.append("published but the publish log could not be written (%s); the page at %s is live and "
+                                "unrecorded" % (scrub(str(exc), 120), url or st.get("dir")))
+                try:
+                    with open(files["hold"], "w", encoding="utf-8") as f:
+                        f.write("%s HOLD: %s\n" % (dt.datetime.fromtimestamp(now(), dt.timezone.utc).isoformat(),
+                                                    "; ".join(problems)))
+                except OSError:
+                    pass
+                audit(False, error="publish log write failed; HOLD written", problems=problems)
+                raise RailViolation("post-publish record failed (%s); HOLD written to %s" % ("; ".join(problems)[:300],
+                                                                                            files["hold"])) from None
             if problems:
                 with open(files["hold"], "w", encoding="utf-8") as f:
                     f.write("%s HOLD: %s\n" % (dt.datetime.fromtimestamp(now(), dt.timezone.utc).isoformat(),
@@ -639,6 +671,19 @@ def selftest() -> int:
         refused(lambda: publish(out6["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am + 86400,
                                 sleep=lambda s: None, fetch=lambda u: {"status": 500, "body": ""}), "HOLD written", "failed live check trips HOLD")
         ck(os.path.exists(state_files(state)["hold"]), "HOLD file exists")
+        # round 2 (DeepSeek concern): publish-log append fails after the page is out -> HOLD, not ok, not silent
+        state_ro = os.path.join(tmp, "state-ro")
+        os.makedirs(state_ro)
+        open(state_files(state_ro)["log"], "w").close()
+        os.chmod(state_files(state_ro)["log"], 0o400)
+        out_ro = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-ro/"), rv,
+                   {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bro"))
+        if os.geteuid() != 0 if hasattr(os, "geteuid") else True:
+            refused(lambda: publish(out_ro["path"], dict(auto, publish=dict(auto["publish"], verify_url=False)),
+                                    facts_text="", state_dir=state_ro, chain=chain, now=lambda: nine_am),
+                    "post-publish record failed", "a failed publish-log write is a HOLD, not ok")
+            ck(os.path.exists(state_files(state_ro)["hold"]), "log-write failure leaves a HOLD that blocks the next run")
+        os.chmod(state_files(state_ro)["log"], 0o600)
         ck(live_check("u", "Tom's &amp; Jerry \u2013 caf\u00e9", lambda u: {"status": 200, "body":
                       "<title>Tom&#39;s &amp;amp; Jerry &ndash; caf&eacute;</title>"}, sleep=lambda s: None) is None,
            "titles with quotes, &, en dash and non-ASCII compare unescaped (QA N5)")
@@ -808,4 +853,17 @@ def selftest() -> int:
                                 git_run=git_noback), "could not return", "checkout-back failure is a failure state (QA N9)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # round 2 (DeepSeek concern): lock has no stale-takeover race; a crashed holder's leftover file is reusable
+    with tempfile.TemporaryDirectory() as lt:
+        lp = os.path.join(lt, "x.lock")
+        with _Lock(lp):
+            try:
+                with _Lock(lp):
+                    ck(False, "a second holder must be refused")
+            except RailViolation:
+                ck(True, "a second concurrent holder is refused")
+        old_t = time.time() - 30 * 86400
+        os.utime(lp, (old_t, old_t))
+        with _Lock(lp):
+            ck(os.path.exists(lp), "a leftover lock file from a dead holder is simply re-locked")
     return n
