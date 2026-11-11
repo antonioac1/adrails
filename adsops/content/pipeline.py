@@ -299,6 +299,9 @@ def compose(d, ctx):
 
 def check(d, ctx):
     """Every deterministic check, on the composed page for extensions."""
+    head = ((ctx.get("live_page") or {}).get("head") or {}) if d.get("mode") == "extend" else {}
+    if head and ctx.get("live_text"):                # the kept live head is legacy text, not new claims (QA B2)
+        ctx = dict(ctx, live_text=ctx["live_text"] + "\n" + (head.get("title") or "") + "\n" + (head.get("description") or ""))
     view, errs = compose(d, ctx)
     res = checks_mod.run(view, ctx)
     res["errors"] = errs + res["errors"]
