@@ -1,0 +1,18 @@
+{
+ "version": 1,
+ "approved_by": "Jane Doe",
+ "approved_at": "2026-11-10",
+ "facts": [
+  {
+   "id": "fee",
+   "text": "Our management fee is $99 per month per home.",
+   "source": "https://www.example.com/pricing/"
+  },
+  {
+   "id": "area",
+   "text": "We serve owners in Example County.",
+   "source": "https://www.example.com/about/"
+  }
+ ],
+ "approval_sha256": "c64d22343f804db988f9ddfa3fcc56d337bcfc7b0077560d0855db8453f2bf02"
+}

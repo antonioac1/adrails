@@ -327,7 +327,7 @@ near-duplicates are compared across up to 600 indexable pages; Lighthouse is one
 
 The selling point is the guardrails, not the writing: **it refuses to hand over a page that states something it cannot back up.**
 Same promise as the ads side: your keys, your server, your caps, rules in code, approvals, an audit log. Playbook for the agent:
-`adsops_playbook` name=`seo-content`. Setup: a site profile and an approved FACTS file (examples in `examples/seo-server/`), and
+`adsops_playbook` name=`seo-content`. Setup: a site profile and an approved FACTS file (`adsops-mcp seo-run --init DIR` writes example profiles, a FACTS example, systemd units and a crontab; a human approves the facts with `--approve-facts "Name"`), and
 `"seo_content": {"profiles": {"mysite": "/path/site-profile.json"}}` in the config.
 
 | Tool | What it does |

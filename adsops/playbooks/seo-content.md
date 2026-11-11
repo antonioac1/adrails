@@ -18,9 +18,9 @@ Ground rules:
 
 | Step | Do | Tool | Time | Done when |
 |---|---|---|---|---|
-| 1 | Configure the site: a site profile (copy `examples/seo-server/openrouter.example.json` or `subscriptions.example.json`), keys in the environment by NAME, and `"seo_content": {"profiles": {"<name>": "/path/site-profile.json"}}` in the AdRails config. | owner + you | 20 min | `seo_content_lessons` answers for the site |
+| 1 | Configure the site: a site profile (`adsops-mcp seo-run --init DIR` writes `openrouter.example.json` and `subscriptions.example.json`), keys in the environment by NAME, and `"seo_content": {"profiles": {"<name>": "/path/site-profile.json"}}` in the AdRails config. | owner + you | 20 min | `seo_content_lessons` answers for the site |
 | 2 | Propose a facts file from the site's own pages. | `seo_content_facts` | 5 min | `FACTS.proposed.json` written |
-| 3 | The owner reviews every line, deletes anything untrue, sets `approved_by` and `approved_at`, removes `"proposed"`, and saves it as the profile's facts file. | owner | 20-40 min | The pipeline stops refusing to draft |
+| 3 | The owner reviews every line, deletes anything untrue, saves it as the profile's facts file, and approves it with `adsops-mcp seo-run --profile P --approve-facts "Their Name"` (records the date and a hash of the content; any later edit needs a new approval). | owner | 20-40 min | The pipeline stops refusing to draft |
 | 4 | Plan topics from evidence. | `seo_content_plan` | 1 min | A short candidate list with reasons |
 | 5 | Draft the top candidate (or the one the owner picks). | `seo_content_draft` (candidate_id) | 3-10 min | `ok: true` and a draft_id, or a hold with check errors |
 | 6 | Run the adversarial review. | `seo_content_review` (draft_id) | 3-20 min | `verdict: approve` and a bundle path, or a hold with reasons |
@@ -69,4 +69,4 @@ Each approved bundle has `page.md` (front matter: title, description, slug, cano
 
 ## Unattended runs
 
-`adsops-mcp seo-run --profile site-profile.json --config config.json` runs one plan, draft, review and bundle and exits (cron or a systemd timer; examples in `examples/seo-server/`). It opens no ports and never publishes. `--stage publish` publishes only what the gates allow; `--stage results --update-lessons` refreshes the lessons.
+`adsops-mcp seo-run --profile site-profile.json --config config.json` runs one plan, draft, review and bundle and exits (cron or a systemd timer; `adsops-mcp seo-run --init DIR` writes example units). It opens no ports and never publishes. `--stage publish` publishes only what the gates allow; `--stage results --update-lessons` refreshes the lessons.

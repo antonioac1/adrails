@@ -52,7 +52,7 @@ def _profile_path(cfg, site):
     m = _profiles(cfg)
     if not m:
         raise ToolError("no content sites configured: add \"seo_content\": {\"profiles\": {\"mysite\": \"/path/site-profile.json\"}} "
-                        "to the config (see examples/seo-server/)")
+                        "to the config (`adsops-mcp seo-run --init DIR` writes example profiles)")
     if not site:
         if len(m) == 1:
             return next(iter(m.values()))
@@ -296,12 +296,38 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, http=None, run_cmd=None
         return {"path": profile["_lessons_path"], "exists": True, "text": r["text"], "weights": r["weights"]}
 
 
+def init_examples(dest):
+    """Copy the packaged examples (adsops/examples_seo/) into dest; existing files are never overwritten."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples_seo")
+    dest = os.path.abspath(os.path.expanduser(dest))
+    os.makedirs(dest, exist_ok=True)
+    written, skipped = [], []
+    for name in sorted(os.listdir(src)):
+        if name.startswith((".", "__")):
+            continue
+        target = os.path.join(dest, name)
+        if os.path.exists(target):
+            skipped.append(target)
+            continue
+        with open(os.path.join(src, name), "rb") as f, open(target, "xb") as g:
+            g.write(f.read())
+        written.append(target)
+    print(json.dumps({"written": written, "skipped_existing": skipped,
+                      "next": "edit a profile, write FACTS.json, then: adsops-mcp seo-run --profile P --approve-facts "
+                              "\"Your Name\""}, indent=1))
+    return 0
+
+
 # ── CLI: one shot for cron / systemd timers ─────────────────────────────────────────────────────────────────────
 def main(argv=None, cfg=None):
     """adsops-mcp seo-run --profile PATH [--stage run|plan|results|publish|facts] [--bundle ID] [--candidate ID]."""
     import argparse
     ap = argparse.ArgumentParser(prog="adsops-mcp seo-run")
-    ap.add_argument("--profile", required=True, help="site profile JSON (see examples/seo-server/)")
+    ap.add_argument("--profile", help="site profile JSON (`--init DIR` writes examples)")
+    ap.add_argument("--init", metavar="DIR", help="write the example site profiles, FACTS example, systemd units and "
+                                                  "crontab into DIR (never overwrites) and exit")
+    ap.add_argument("--approve-facts", metavar="NAME", help="a human approves the profile's facts file as NAME "
+                                                            "(records the date and a hash of the approved content)")
     ap.add_argument("--config", help="AdRails config (Search Console credential, approvals, audit chain)")
     ap.add_argument("--stage", choices=["run", "plan", "results", "publish", "facts"], default="run")
     ap.add_argument("--candidate")
@@ -310,6 +336,20 @@ def main(argv=None, cfg=None):
     ap.add_argument("--html", action="store_true", help="also render page.html into the bundle")
     ap.add_argument("--update-lessons", action="store_true")
     a = ap.parse_args(argv)
+    if a.init:
+        return init_examples(a.init)
+    if not a.profile:
+        ap.error("--profile is required (or --init DIR)")
+    if a.approve_facts:
+        try:
+            prof = facts_mod.load_profile(a.profile)
+            r = facts_mod.approve_file(prof["_facts_path"], a.approve_facts)
+        except ToolError as e:
+            print(json.dumps({"ok": False, "error": scrub(str(e), 500)}))
+            return 2
+        print(json.dumps({"ok": True, "approved_by": r["approved_by"], "approved_at": r["approved_at"],
+                          "facts": len(r["facts"])}))
+        return 0
     if cfg is None and a.config:
         from . import config as config_mod
         cfg = config_mod.load_config(a.config)

@@ -73,7 +73,7 @@ def offline():
     # 0.12: the shipped example site profiles must load and pass the writer/reviewer independence rule
     import glob as _glob
     from adsops.content import writers as _w
-    for ex in sorted(_glob.glob(os.path.join(ROOT, "examples", "seo-server", "*.example.json"))):
+    for ex in sorted(_glob.glob(os.path.join(ROOT, "adsops", "examples_seo", "*.example.json"))):
         if os.path.basename(ex).startswith("FACTS"):
             continue
         try:
@@ -83,6 +83,13 @@ def offline():
         except Exception as e:                                   # noqa: BLE001 - report the reason
             ok_ex, why = False, str(e)[:160]
         check("example profile %s: chains valid, reviewer of another family" % os.path.basename(ex), ok_ex, why)
+    from adsops.content import facts as _f
+    try:
+        _f.load_facts(os.path.join(ROOT, "adsops", "examples_seo", "FACTS.example.json"))
+        ok_f, why_f = True, ""
+    except Exception as e:                                       # noqa: BLE001
+        ok_f, why_f = False, str(e)[:160]
+    check("FACTS.example.json loads as an approved facts file", ok_f, why_f)
     from adsops import guides as _g
     check("playbook seo-content ships", any(p["name"] == "seo-content" for p in _g.available()))
     st = os.popen("cd %s && git status --porcelain 2>/dev/null" % ROOT).read().strip()

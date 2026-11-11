@@ -22,8 +22,9 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 import urllib.parse
-from datetime import date
+from datetime import date, datetime
 
 from ..errors import ToolError, scrub
 from . import numbers
@@ -34,6 +35,8 @@ MAX_PROPOSAL_BYTES = 1024 * 1024         # a proposal may not exceed 1 MB
 MAX_PATH = 4096                          # cap for any path we accept
 MAX_ITEM_CHARS = 200                     # cap for one list item (rulings, domains, author fields)
 MAX_LIST_ITEMS = 200                     # cap for one list of strings in the profile
+MAX_APPROVER_CHARS = 120                 # cap for approved_by
+MAX_FACT_ID_CHARS = 64                   # cap for one fact id
 MAX_FACTS = 500                          # an approval may list at most 500 facts
 MAX_FACT_CHARS = 1000                    # one fact text may not exceed 1000 chars
 MAX_PROPOSED = 500                       # hard ceiling for propose(max_facts=...)
@@ -119,7 +122,7 @@ def _num_float(value, label, low, high):
     return number
 
 
-def _str_list(value, label, max_items=MAX_LIST_ITEMS, max_chars=MAX_ITEM_CHARS):
+def _str_list(value, label, max_items=MAX_LIST_ITEMS, max_chars=MAX_ITEM_CHARS, nonempty=False):
     """Require a list of strings, capped in length and item size; returns a new list."""
     if not isinstance(value, list):
         _fail('"{}" must be a list of strings.'.format(label))
@@ -131,6 +134,8 @@ def _str_list(value, label, max_items=MAX_LIST_ITEMS, max_chars=MAX_ITEM_CHARS):
             _fail('"{}" item {} is not text.'.format(label, index))
         if len(item) > max_chars:
             _fail('"{}" item {} is too long: the limit is {} characters.'.format(label, index, max_chars))
+        if nonempty and not item.strip():
+            _fail('"{}" item {} must not be empty.'.format(label, index))
         out.append(item)
     return out
 
@@ -173,6 +178,125 @@ def _path_string(value, label):
     if any(ch in path for ch in _BAD_PATH_CHARS):
         _fail('"{}" contains a control character.'.format(label))
     return path
+
+
+def _inside(directory, target):
+    """True when `target` resolves (realpath) inside `directory`, not merely next to its prefix."""
+    try:
+        base = os.path.realpath(directory)
+        other = os.path.realpath(target)
+        return os.path.commonpath([base, other]) == base
+    except (OSError, ValueError):
+        return False
+
+
+def _resolve_inside(directory, value, label):
+    """Return the original relative path and its absolute target, refusing escapes from `directory`."""
+    path = _path_string(value, label)
+    if os.path.isabs(path) or path.startswith("~"):
+        _fail('"{}" must be a relative path inside the profile directory.'.format(label))
+    absolute = os.path.abspath(os.path.join(directory, path))
+    if not _inside(directory, absolute):
+        _fail('"{}" must stay inside the profile directory (no ".." escape).'.format(label))
+    return path, absolute
+
+
+def _approved_by(value):
+    """Validate the human approver's name: 1..120 chars, one line, no control characters."""
+    if not isinstance(value, str):
+        _fail('"approved_by" must be the name of the human who approved it.')
+    if any(ch in "\r\n\u2028\u2029" or unicodedata.category(ch).startswith("C") for ch in value):
+        _fail('"approved_by" must be a single line of text without control characters.')
+    clean = value.strip()
+    if not clean:
+        _fail('"approved_by" must name the human who approved it.')
+    if len(clean) > MAX_APPROVER_CHARS:
+        _fail('"approved_by" is too long: the limit is {} characters.'.format(MAX_APPROVER_CHARS))
+    return clean
+
+
+def _today_value(today):
+    """Turn the optional `today` argument into a date; None means today's local date."""
+    if today is None:
+        return date.today()
+    if isinstance(today, datetime):
+        return today.date()
+    if isinstance(today, date):
+        return today
+    if isinstance(today, str):
+        try:
+            return date.fromisoformat(today.strip())
+        except ValueError:
+            pass
+    _fail('"today" must be a date such as 2026-01-31.')
+
+
+def _approved_at(value, today):
+    """Validate approved_at as a real YYYY-MM-DD date that is not after `today`."""
+    if not isinstance(value, str):
+        _fail('the facts file needs "approved_at" (the day the human approved it, YYYY-MM-DD).')
+    if not _ISO_DAY_RE.match(value):
+        _fail('"approved_at" must be a real date in YYYY-MM-DD format.')
+    try:
+        parsed = date(int(value[0:4]), int(value[5:7]), int(value[8:10]))
+    except (ValueError, TypeError):
+        _fail('"approved_at" is not a real date: "{}".'.format(scrub(value, 40)))
+    if parsed > today:
+        _fail('"approved_at" is in the future: "{}".'.format(scrub(value, 40)))
+    return value
+
+
+def _validate_facts(raw_facts):
+    """Validate the stored facts list, returning normalised facts and one text line per fact."""
+    if not isinstance(raw_facts, list):
+        _fail('the facts file needs "facts" as a list of objects.')
+    if not raw_facts:
+        _fail("the facts file has no facts: an approval that lists nothing approves nothing.")
+    if len(raw_facts) > MAX_FACTS:
+        _fail("the facts file has {} facts; the limit is {}.".format(len(raw_facts), MAX_FACTS))
+
+    facts = []
+    lines = []
+    seen_ids = set()
+    for index, item in enumerate(raw_facts, 1):
+        if not isinstance(item, dict):
+            _fail("fact {} is not a JSON object.".format(index))
+        body = item.get("text")
+        if not isinstance(body, str) or not body.strip():
+            _fail('fact {} has no "text".'.format(index))
+        clean = " ".join(body.split())
+        if len(clean) > MAX_FACT_CHARS:
+            _fail("fact {} is {} characters long; the limit is {}.".format(index, len(clean), MAX_FACT_CHARS))
+        source = item.get("source", "")
+        if source is None:
+            source = ""
+        if not isinstance(source, str):
+            _fail("fact {} has a source that is not text.".format(index))
+        fact_id = item.get("id")
+        if isinstance(fact_id, str):
+            if len(fact_id) > MAX_FACT_ID_CHARS:
+                _fail("fact {} has an id longer than {} characters.".format(index, MAX_FACT_ID_CHARS))
+            fact_id = fact_id.strip()
+            if not fact_id:
+                fact_id = None
+        else:
+            fact_id = None
+        if fact_id is None:
+            fact_id = "f-" + hashlib.sha1(numbers.norm(clean).encode("utf-8")).hexdigest()[:8]
+        if fact_id in seen_ids:
+            _fail('fact {} reuses the fact id "{}": ids must be unique.'.format(index, scrub(fact_id, 64)))
+        seen_ids.add(fact_id)
+        facts.append({"id": fact_id, "text": clean, "source": source.strip()[:MAX_PATH]})
+        lines.append(clean)
+    return facts, lines
+
+
+def approval_hash(facts, approved_by=None, approved_at=None):
+    """The binding hash over the exact `facts` list AND who approved it on which day. It makes any later edit visible
+    (tamper-evident); it is not a signature: whoever can write the file can also re-run the approval."""
+    payload = json.dumps({"facts": facts, "approved_by": approved_by, "approved_at": approved_at}, sort_keys=True,
+                         separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ── profile pieces ──────────────────────────────────────────────────────────────────────────────────────────
@@ -219,6 +343,34 @@ def _host(value):
     return host
 
 
+def _host_matches(host, allowed):
+    """Same host or a subdomain; "*.gov" matches any subdomain of gov."""
+    host = (host or "").strip().lower().rstrip(".")
+    allowed = (allowed or "").strip().lower().rstrip(".")
+    if not host or not allowed:
+        return False
+    if allowed.startswith("*."):
+        suffix = allowed[2:]
+        return bool(suffix) and host.endswith("." + suffix)
+    return host == allowed or host.endswith("." + allowed)
+
+
+def _validate_reference_sources(urls, allowed_domains):
+    """Every reference source must be https, have no userinfo, and match an allowed source domain."""
+    for url in urls:
+        try:
+            parts = urllib.parse.urlsplit(url)
+            host = (parts.hostname or "").strip().lower()
+        except ValueError:
+            _fail("reference_sources must be https URLs on allowed_source_domains.")
+        if (parts.scheme or "").lower() != "https":
+            _fail("reference_sources must be https URLs on allowed_source_domains.")
+        if parts.username or parts.password:
+            _fail("reference_sources must not contain a username or password.")
+        if not host or not any(_host_matches(host, domain) for domain in allowed_domains):
+            _fail("reference_sources must be https URLs on allowed_source_domains.")
+
+
 def _author(raw):
     """Validate the optional author block; every field falls back to "" so callers never see a missing key."""
     data = _sub_object(raw, "author")
@@ -241,7 +393,7 @@ def _rulings(raw):
     out = {"banned_phrases": [], "excluded_areas": [], "competitors": [], "own_brand": []}
     for key, value in data.items():
         label = "rulings.{}".format(key)
-        out[key] = _str_list(value, label) if key in out else value
+        out[key] = _str_list(value, label, nonempty=True) if key in out else value
     return out
 
 
@@ -254,11 +406,33 @@ def _backends(raw, label):
     return list(raw)
 
 
-def _resolve(directory, path):
-    """Resolve a profile-relative path against the profile directory and return an absolute path."""
-    if os.path.isabs(path):
-        return os.path.abspath(os.path.normpath(path))
-    return os.path.abspath(os.path.join(directory, path))
+def _write_json_atomic(absolute, payload, prefix, overwrite):
+    """Write JSON text to `absolute` via a temp file and os.replace, mode 0644."""
+    if not overwrite and os.path.exists(absolute):
+        _fail('"{}" already exists: refusing to overwrite a facts file a human may have reviewed.'.format(
+            scrub(absolute, MAX_ITEM_CHARS)))
+    directory = os.path.dirname(absolute) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as exc:
+        _fail('could not create the directory "{}": {}'.format(scrub(directory, MAX_ITEM_CHARS), scrub(exc, 120)))
+    handle, temporary = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=directory)
+    moved = False
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+        os.chmod(temporary, 0o644)
+        if not overwrite and os.path.exists(absolute):
+            _fail('"{}" already exists: refusing to overwrite a facts file a human may have reviewed.'.format(
+                scrub(absolute, MAX_ITEM_CHARS)))
+        os.replace(temporary, absolute)
+        moved = True
+    finally:
+        if not moved and os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
 
 
 # ── public API: profile ────────────────────────────────────────────────────────────────────────────────────
@@ -266,7 +440,7 @@ def load_profile(path):
     """Load and validate a site profile, filling every default and resolving file paths.
 
     Refuses (ToolError) a missing/unreadable/oversize file, non-JSON, a bad `site`/`host`, a missing `facts_file`,
-    and lists that are not lists of short strings.
+    path escapes, empty ruling/domain strings, and lists that are not lists of short strings.
     """
     text = _read_text(path, MAX_PROFILE_BYTES, "profile",
                       'no profile file at "{}": create one with "site" and "facts_file".'.format(scrub(path, 200)))
@@ -281,13 +455,21 @@ def load_profile(path):
         _fail('the profile needs "facts_file" (for example "FACTS.json").')
     facts_file = _path_string(data["facts_file"], "facts_file")
     lessons_file = _path_string(data.get("lessons_file", "LESSONS.md"), "lessons_file")
+    state_dir = _path_string(data.get("state_dir", "state"), "state_dir")
+    bundle_dir = _path_string(data.get("bundle_dir", "bundles"), "bundle_dir")
 
     allowed = data.get("allowed_source_domains")
-    allowed = [host] if allowed is None else _str_list(allowed, "allowed_source_domains")
+    allowed = [host] if allowed is None else _str_list(allowed, "allowed_source_domains", nonempty=True)
 
     editor = data.get("editor")
     if editor is not None and not isinstance(editor, dict):
         _fail('"editor" must be a JSON object or null.')
+
+    directory = os.path.dirname(os.path.abspath(path.strip()))
+    facts_file, facts_abs = _resolve_inside(directory, facts_file, "facts_file")
+    lessons_file, lessons_abs = _resolve_inside(directory, lessons_file, "lessons_file")
+    state_dir, _state_abs = _resolve_inside(directory, state_dir, "state_dir")
+    bundle_dir, _bundle_abs = _resolve_inside(directory, bundle_dir, "bundle_dir")
 
     profile = {
         "site": site,
@@ -316,91 +498,93 @@ def load_profile(path):
                             "max_model_stages_per_day": ("int", 1, 1000)}),
         "publish": _sub_object(data.get("publish"), "publish"),
         # PM (pipeline keys): official pages the writer may quote, state/bundle dirs, Search Console property, corpus cap
-        "reference_sources": _str_list(data.get("reference_sources") or [], "reference_sources", 12, 500),
-        "state_dir": _path_string(data.get("state_dir", "state"), "state_dir"),
-        "bundle_dir": _path_string(data.get("bundle_dir", "bundles"), "bundle_dir"),
+        "reference_sources": _str_list(data.get("reference_sources") or [], "reference_sources", 12, 500,
+                                       nonempty=True),
+        "state_dir": state_dir,
+        "bundle_dir": bundle_dir,
         "gsc_site": _str_list([data["gsc_site"]], "gsc_site", 1, 300)[0] if data.get("gsc_site") else None,
         "max_corpus_pages": _num_int(data.get("max_corpus_pages", 400), "max_corpus_pages", 1, 400),
         "exclude_paths": _str_list(data.get("exclude_paths") or [], "exclude_paths", 100, 200),
         "revision_rounds": _num_int(data.get("revision_rounds", 1), "revision_rounds", 0, 1),
     }
-    for u in profile["reference_sources"]:
-        if not u.startswith("https://"):
-            _fail('reference_sources must be https URLs on allowed_source_domains.')
-
-    directory = os.path.dirname(os.path.abspath(path.strip()))
+    _validate_reference_sources(profile["reference_sources"], profile["allowed_source_domains"])
     profile["_dir"] = directory
-    profile["_facts_path"] = _resolve(directory, facts_file)
-    profile["_lessons_path"] = _resolve(directory, lessons_file)
+    profile["_facts_path"] = facts_abs
+    profile["_lessons_path"] = lessons_abs
     return profile
 
 
 # ── public API: facts file ────────────────────────────────────────────────────────────────────────────────
-def load_facts(path):
+def load_facts(path, today=None):
     """Load an APPROVED facts file -> {"text", "facts", "approved_by", "approved_at"}.
 
-    Refused (ToolError): missing file, non-JSON, `"proposed": true`, missing/blank `approved_by` or `approved_at`,
-    zero facts, more than 500 facts, a fact without text, or a fact text longer than 1000 characters.
+    Refused (ToolError): missing file, non-JSON, any `"proposed"` key, missing/blank `approved_by` or
+    `approved_at`, an `approved_at` that is not a real YYYY-MM-DD date or is in the future, zero facts, more
+    than 500 facts, bad fact ids, or a facts list whose approval hash does not match.
     """
     text = _read_text(path, MAX_FACTS_BYTES, "facts",
                       _NO_FACTS_MSG.format(path=scrub(str(path), MAX_ITEM_CHARS)))
     data = _parse_object(text, "facts")
 
-    if data.get("proposed"):
-        _fail('this facts file is still a proposal ("proposed": true): a human must review it, set approved_by and '
-              'approved_at, and remove "proposed" before the pipeline drafts.')
+    if "proposed" in data:
+        _fail('this facts file is still a proposal ("proposed" is present): a human must review it, set approved_by '
+              'and approved_at, and remove "proposed" before the pipeline drafts.')
     version = data.get("version", 1)
     if isinstance(version, bool) or version != 1:
         _fail('the facts file has an unsupported "version": {}.'.format(scrub(version, 20)))
 
-    approved_by = data.get("approved_by")
-    if not isinstance(approved_by, str) or not approved_by.strip():
-        _fail('the facts file needs "approved_by": a named human must approve it before the pipeline drafts.')
-    approved_by = approved_by.strip()[:MAX_ITEM_CHARS]
-
-    approved_at = data.get("approved_at")
-    if not isinstance(approved_at, str) or not approved_at.strip():
-        _fail('the facts file needs "approved_at" (the day the human approved it, YYYY-MM-DD).')
-    approved_at = approved_at.strip()[:40]
-    if _ISO_DAY_RE.match(approved_at):
-        try:
-            date(int(approved_at[0:4]), int(approved_at[5:7]), int(approved_at[8:10]))
-        except (ValueError, TypeError):
-            _fail('"approved_at" is not a real date: "{}".'.format(scrub(approved_at, 40)))
+    approved_by = _approved_by(data.get("approved_by"))
+    day = _today_value(today)
+    approved_at = _approved_at(data.get("approved_at"), day)
 
     raw_facts = data.get("facts")
-    if not isinstance(raw_facts, list):
-        _fail('the facts file needs "facts" as a list of objects.')
-    if not raw_facts:
-        _fail("the facts file has no facts: an approval that lists nothing approves nothing.")
-    if len(raw_facts) > MAX_FACTS:
-        _fail("the facts file has {} facts; the limit is {}.".format(len(raw_facts), MAX_FACTS))
+    facts, lines = _validate_facts(raw_facts)
 
-    facts = []
-    lines = []
-    for index, item in enumerate(raw_facts, 1):
-        if not isinstance(item, dict):
-            _fail("fact {} is not a JSON object.".format(index))
-        body = item.get("text")
-        if not isinstance(body, str) or not body.strip():
-            _fail('fact {} has no "text".'.format(index))
-        clean = " ".join(body.split())
-        if len(clean) > MAX_FACT_CHARS:
-            _fail("fact {} is {} characters long; the limit is {}.".format(index, len(clean), MAX_FACT_CHARS))
-        source = item.get("source", "")
-        if source is None:
-            source = ""
-        if not isinstance(source, str):
-            _fail("fact {} has a source that is not text.".format(index))
-        fact_id = item.get("id")
-        if isinstance(fact_id, str) and fact_id.strip():
-            fact_id = fact_id.strip()[:64]
-        else:
-            fact_id = "f-" + hashlib.sha1(numbers.norm(clean).encode("utf-8")).hexdigest()[:8]
-        facts.append({"id": fact_id, "text": clean, "source": source.strip()[:MAX_PATH]})
-        lines.append(clean)
+    expected = data.get("approval_sha256")
+    actual = approval_hash(raw_facts, data.get("approved_by"), data.get("approved_at"))
+    if not isinstance(expected, str) or expected != actual:
+        _fail("the facts changed after approval (or were never approved with seo-run --approve-facts): a human "
+              "must re-approve")
 
     return {"text": "\n".join(lines), "facts": facts, "approved_by": approved_by, "approved_at": approved_at}
+
+
+def approve_file(path, approved_by, today=None):
+    """Approve a reviewed facts/proposal file - the ONLY sanctioned approval path; a human runs it.
+
+    Loads the JSON object, removes any "proposed" key, validates approved_by and every fact, sets approved_by,
+    approved_at (today) and approval_sha256 over the exact facts list, writes atomically with mode 0644, then
+    returns load_facts(path, today).
+    """
+    text = _read_text(path, MAX_FACTS_BYTES, "facts",
+                      _NO_FACTS_MSG.format(path=scrub(str(path), MAX_ITEM_CHARS)))
+    data = _parse_object(text, "facts")
+    approver = _approved_by(approved_by)
+    day = _today_value(today)
+
+    version = data.get("version", 1)
+    if isinstance(version, bool) or version != 1:
+        _fail('the facts file has an unsupported "version": {}.'.format(scrub(version, 20)))
+
+    raw_facts = data.get("facts")
+    _validate_facts(raw_facts)
+
+    data.pop("proposed", None)
+    data["approved_by"] = approver
+    data["approved_at"] = day.isoformat()
+    data["approval_sha256"] = approval_hash(raw_facts, approver, day.isoformat())
+
+    try:
+        payload = json.dumps(data, indent=1, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        _fail("the facts file is not plain JSON data and cannot be written.")
+    if len(payload.encode("utf-8")) > MAX_FACTS_BYTES:
+        _fail("the approved facts file would be larger than {} KB.".format(MAX_FACTS_BYTES // 1024))
+
+    target = _path_string(path, "facts path")
+    absolute = os.path.abspath(target)
+    _write_json_atomic(absolute, payload + "\n", ".facts-approval-", overwrite=True)
+    return load_facts(path, day)
 
 
 # ── public API: proposals ─────────────────────────────────────────────────────────────────────────────────
@@ -457,47 +641,38 @@ def propose(pages, max_facts=60):
     return {"version": 1, "proposed": True, "approved_by": None, "approved_at": None, "note": _NOTE, "facts": facts}
 
 
-def write_proposal(path, proposal):
+def write_proposal(path, proposal, base_dir=None):
     """Write a proposal as JSON (indent 1, mode 0644) to `path`, refusing to overwrite an existing file.
 
+    If base_dir is given, the target must resolve inside it (relative paths are resolved against base_dir).
     The write goes to a temp file next to the target and is moved into place with os.replace, so a crash never leaves
     a half-written proposal behind. Returns the absolute path written.
     """
     if not isinstance(proposal, dict):
         _fail("write_proposal needs the proposal object that propose() returns.")
     target = _path_string(path, "proposal path")
+    if base_dir is not None:
+        base = _path_string(base_dir, "base_dir")
+        base_abs = os.path.abspath(base)
+        if os.path.isabs(target):
+            absolute = os.path.abspath(target)
+        else:
+            absolute = os.path.abspath(os.path.join(base_abs, target))
+        if not _inside(base_abs, absolute):
+            _fail('the proposal path must stay inside base_dir (no ".." escape).')
+    else:
+        absolute = os.path.abspath(target)
+
     try:
         payload = json.dumps(proposal, indent=1, ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError):
         _fail("the proposal is not plain JSON data and cannot be written.")
     if len(payload) > MAX_PROPOSAL_BYTES:
         _fail("the proposal is larger than {} KB; propose fewer facts.".format(MAX_PROPOSAL_BYTES // 1024))
-    absolute = os.path.abspath(target)
     if os.path.exists(absolute):
         _fail('"{}" already exists: refusing to overwrite a facts file a human may have reviewed.'.format(
             scrub(absolute, MAX_ITEM_CHARS)))
-    directory = os.path.dirname(absolute) or "."
-    try:
-        os.makedirs(directory, exist_ok=True)
-    except OSError as exc:
-        _fail('could not create the directory "{}": {}'.format(scrub(directory, MAX_ITEM_CHARS), scrub(exc, 120)))
-    handle, temporary = tempfile.mkstemp(prefix=".facts-proposal-", suffix=".tmp", dir=directory)
-    moved = False
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(payload + "\n")
-        os.chmod(temporary, 0o644)
-        if os.path.exists(absolute):
-            _fail('"{}" already exists: refusing to overwrite a facts file a human may have reviewed.'.format(
-                scrub(absolute, MAX_ITEM_CHARS)))
-        os.replace(temporary, absolute)
-        moved = True
-    finally:
-        if not moved and os.path.exists(temporary):
-            try:
-                os.remove(temporary)
-            except OSError:
-                pass
+    _write_json_atomic(absolute, payload + "\n", ".facts-proposal-", overwrite=False)
     return absolute
 
 
@@ -529,6 +704,13 @@ def selftest() -> int:
             return False
         return False
 
+    def sealed(data):
+        data = dict(data)
+        data["approval_sha256"] = approval_hash(data["facts"], data.get("approved_by"), data.get("approved_at"))
+        return data
+
+    TODAY = date(2026, 12, 1)
+
     with tempfile.TemporaryDirectory() as root:
         base = os.path.abspath(root)
 
@@ -550,8 +732,8 @@ def selftest() -> int:
         chk(prof["min_words"] == {"new": 700, "extend": 150}, "min_words defaults")
         chk(prof["extend"] == {"min_retention": 0.85, "max_changed_sentences": 3}, "extend defaults")
         chk(prof["max_duplicate"] == {"jaccard": 0.30, "containment": 0.50}, "max_duplicate defaults")
-        chk(prof["caps"] == {"max_cost_usd": 2.0, "max_tokens": 250000, "max_calls": 8, "deadline_s": 2400, "max_model_stages_per_day": 6},
-            "caps defaults")
+        chk(prof["caps"] == {"max_cost_usd": 2.0, "max_tokens": 250000, "max_calls": 8, "deadline_s": 2400,
+                             "max_model_stages_per_day": 6}, "caps defaults")
         chk(prof["writers"] == [] and prof["reviewers"] == [] and prof["editor"] is None,
             "writers/reviewers default to empty and editor to null")
         chk(prof["publish"] == {}, "publish defaults to an empty object")
@@ -561,7 +743,7 @@ def selftest() -> int:
         # ── load_profile: a full profile keeps what it is given ──────────────────────────────────────
         full = dump(os.path.join(root, "full.json"), {
             "site": "http://example.com", "host": "www.example.com", "facts_file": "docs/FACTS.json",
-            "lessons_file": "/tmp/elsewhere/LESSONS.md",
+            "lessons_file": "notes/LESSONS.md",
             "author": {"name": "Jane Doe", "url": "/team/jane/", "id": "https://example.com/team/jane/#person"},
             "rulings": {"banned_phrases": ["guaranteed returns"], "excluded_areas": ["Springfield"],
                         "competitors": ["Acme PM"], "own_brand": ["Example Co"]},
@@ -578,7 +760,8 @@ def selftest() -> int:
         chk(pf["host"] == "www.example.com", "an explicit host wins over the derived one")
         chk(pf["_facts_path"] == os.path.join(base, "docs", "FACTS.json"),
             "a relative facts_file resolves against the profile directory")
-        chk(pf["_lessons_path"] == "/tmp/elsewhere/LESSONS.md", "an absolute lessons_file is kept")
+        chk(pf["_lessons_path"] == os.path.join(base, "notes", "LESSONS.md"),
+            "a relative lessons_file resolves against the profile directory")
         chk(pf["small_number_max"] == 5 and pf["min_words"]["new"] == 900, "explicit numbers are kept")
         chk(pf["min_words"]["extend"] == 150, "a partial min_words keeps the documented default for extend")
         chk(pf["rulings"]["competitors"] == ["Acme PM"], "rulings lists are kept")
@@ -666,13 +849,63 @@ def selftest() -> int:
                                            '{"site": "https://example.com/", "facts_file": "' + "x" * 300000 + '"}')),
                   "larger"), "an oversize profile file refuses")
 
-        # ── load_facts: the good path ───────────────────────────────────────────────────────────────
-        approved = {"version": 1, "approved_by": "Jane Doe", "approved_at": "2026-11-10",
-                    "facts": [{"id": "mgmt-fee", "text": "Management is $149 per month per home.",
-                               "source": "https://example.com/pricing/"},
-                              {"id": "fee-2", "text": "Fees\nare billed  monthly.", "source": ""}]}
+        # ── load_profile: empty strings and reference-source rules ──────────────────────────────────
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "empty-domain.json"),
+                                            {"site": "https://example.com/", "facts_file": "F",
+                                             "allowed_source_domains": [""]})), "empty"),
+            "an empty allowed_source_domain refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "empty-ruling.json"),
+                                            {"site": "https://example.com/", "facts_file": "F",
+                                             "rulings": {"banned_phrases": [""]}})), "empty"),
+            "an empty ruling refuses")
+        ref_ok = load_profile(dump(os.path.join(root, "ref-ok.json"), {
+            "site": "https://example.com/", "facts_file": "F",
+            "allowed_source_domains": ["irs.gov", "*.gov"],
+            "reference_sources": ["https://www.irs.gov/payments", "https://some.gov/x"],
+        }))
+        chk(ref_ok["reference_sources"] == ["https://www.irs.gov/payments", "https://some.gov/x"],
+            "reference sources on exact/subdomain allowed hosts are kept")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "ref-http.json"), {
+            "site": "https://example.com/", "facts_file": "F", "allowed_source_domains": ["irs.gov"],
+            "reference_sources": ["http://irs.gov/x"]})), "https"),
+            "a non-https reference source refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "ref-evil.json"), {
+            "site": "https://example.com/", "facts_file": "F", "allowed_source_domains": ["irs.gov"],
+            "reference_sources": ["https://evil.example/x"]})), "allowed_source_domains"),
+            "a reference source outside allowed domains refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "ref-userinfo.json"), {
+            "site": "https://example.com/", "facts_file": "F", "allowed_source_domains": ["irs.gov"],
+            "reference_sources": ["https://irs.gov@evil.example/"]})), "username"),
+            "a reference source with userinfo refuses")
+
+        # ── load_profile: path containment ─────────────────────────────────────────────────────────
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "path-abs.json"),
+                                            {"site": "https://example.com/", "facts_file": "/etc/passwd"})),
+                  "relative"), "an absolute facts_file refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "path-tilde.json"),
+                                            {"site": "https://example.com/", "facts_file": "~/FACTS.json"})),
+                  "relative"), "a ~ facts_file refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "path-escape.json"), {
+            "site": "https://example.com/", "facts_file": "../../../../tmp/evil/FACTS.json"})), "inside"),
+            "a .. facts_file escape refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "path-state.json"), {
+            "site": "https://example.com/", "facts_file": "F", "state_dir": "/tmp"})), "relative"),
+            "an absolute state_dir refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "path-bundle.json"), {
+            "site": "https://example.com/", "facts_file": "F", "bundle_dir": "../outside"})), "inside"),
+            "a .. bundle_dir escape refuses")
+        chk(fails(lambda: load_profile(dump(os.path.join(root, "path-lessons.json"), {
+            "site": "https://example.com/", "facts_file": "F", "lessons_file": "~/LESSONS.md"})), "relative"),
+            "a ~ lessons_file refuses")
+
+        # ── load_facts: the good path, hash binding, and approval_date rules ─────────────────────────
+        approved_facts = [{"id": "mgmt-fee", "text": "Management is $149 per month per home.",
+                           "source": "https://example.com/pricing/"},
+                          {"id": "fee-2", "text": "Fees\nare billed  monthly.", "source": ""}]
+        approved = sealed({"version": 1, "approved_by": "Jane Doe", "approved_at": "2026-11-10",
+                           "facts": approved_facts})
         good_path = dump(os.path.join(root, "FACTS.json"), approved)
-        loaded = load_facts(good_path)
+        loaded = load_facts(good_path, TODAY)
         chk(loaded["approved_by"] == "Jane Doe" and loaded["approved_at"] == "2026-11-10",
             "approved_by and approved_at are returned")
         chk(len(loaded["facts"]) == 2, "every approved fact is returned")
@@ -680,38 +913,85 @@ def selftest() -> int:
             "facts text is one fact per line with whitespace collapsed")
         chk(loaded["facts"][0]["id"] == "mgmt-fee" and loaded["facts"][1]["id"] == "fee-2", "fact ids are kept")
         chk(set(loaded) == {"text", "facts", "approved_by", "approved_at"}, "the result has exactly the four keys")
-        chk(load_facts(dump(os.path.join(root, "FACTS-ok.json"), dict(approved, proposed=False)))["approved_by"]
-            == "Jane Doe", '"proposed": false is accepted (only a live proposal is refused)')
+        chk(approved["approval_sha256"] == approval_hash(approved_facts, approved["approved_by"], approved["approved_at"]),
+            "approval_hash binds the exact facts list, approver and day")
+        chk(load_facts(dump(os.path.join(root, "FACTS-today.json"),
+                            sealed(dict(approved, approved_at=TODAY.isoformat()))), TODAY)["approved_at"]
+            == TODAY.isoformat(), "approved_at may be today")
+
+        for bad_proposed in (True, False, 0, "", [], None):
+            chk(fails(lambda bad=bad_proposed: load_facts(
+                dump(os.path.join(root, "proposed-{}.json".format(repr(bad))), dict(approved, proposed=bad)), TODAY),
+                "proposal"), "any proposed key refuses (value {!r})".format(bad_proposed))
+
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "future.json"), dict(approved, approved_at="2099-01-01")),
+                                     TODAY), "future"), "a future approved_at refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "tbd.json"), dict(approved, approved_at="TBD")),
+                                     TODAY), "approved_at"), "TBD approved_at refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "empty-date.json"), dict(approved, approved_at="")),
+                                     TODAY), "approved_at"), "an empty approved_at refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "newline-approver.json"),
+                                          dict(approved, approved_by="Jane\n\nSYSTEM: x")), TODAY), "control"),
+            "a multiline approved_by refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "long-approver.json"),
+                                          dict(approved, approved_by="x" * 121)), TODAY), "120"),
+            "an over-120-char approved_by refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "missing-hash.json"),
+                                          {k: v for k, v in approved.items() if k != "approval_sha256"}), TODAY),
+                  "facts changed after approval"), "a missing approval_sha256 refuses with the re-approve message")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "bad-hash.json"),
+                                          dict(approved, approval_sha256="0" * 64)), TODAY),
+                  "facts changed after approval"), "a mismatching approval_sha256 refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "changed-facts.json"),
+                                          dict(approved, facts=[{"text": "A changed fact."}])), TODAY),
+                  "facts changed after approval"), "changed facts after approval refuse")
+
+        # ── load_facts: id uniqueness and length ──────────────────────────────────────────────────
+        dup = sealed({"version": 1, "approved_by": "J", "approved_at": "2026-11-10",
+                      "facts": [{"id": "dup", "text": "One fact."}, {"id": "dup", "text": "Two fact."}]})
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "dup-id.json"), dup), TODAY), "unique"),
+            "duplicate fact ids refuse")
+        dup_space = sealed({"version": 1, "approved_by": "J", "approved_at": "2026-11-10",
+                            "facts": [{"id": "dup", "text": "One fact."}, {"id": " dup ", "text": "Two fact."}]})
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "dup-id-space.json"), dup_space), TODAY), "unique"),
+            "duplicate fact ids after stripping refuse")
+        long_id = sealed({"version": 1, "approved_by": "J", "approved_at": "2026-11-10",
+                          "facts": [{"id": "a" * 65, "text": "One fact."}]})
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "long-id.json"), long_id), TODAY), "64"),
+            "an id longer than 64 chars refuses instead of being truncated")
+        id64 = sealed({"version": 1, "approved_by": "J", "approved_at": "2026-11-10",
+                       "facts": [{"id": "a" * 64, "text": "One fact."}]})
+        chk(len(load_facts(dump(os.path.join(root, "id64.json"), id64), TODAY)["facts"][0]["id"]) == 64,
+            "a 64-char fact id is accepted")
 
         # ── load_facts: refusals ───────────────────────────────────────────────────────────────────
         chk(fails(lambda: load_facts(os.path.join(root, "missing.json")), "no approved facts file"),
             "a missing facts file refuses with the facts message")
         chk(fails(lambda: load_facts(os.path.join(root, "missing.json")), "sets approved_by"),
             "the facts refusal message says what to do next")
-        chk(fails(lambda: load_facts(dump(os.path.join(root, "F1.json"), dict(approved, proposed=True))), "proposal"),
-            "a proposed facts file refuses")
         chk(fails(lambda: load_facts(dump(os.path.join(root, "F2.json"),
-                                          {k: v for k, v in approved.items() if k != "approved_by"})), "approved_by"),
-            "a missing approved_by refuses")
-        chk(fails(lambda: load_facts(dump(os.path.join(root, "F3.json"), dict(approved, approved_by="  "))),
+                                          {k: v for k, v in approved.items() if k != "approved_by"}), TODAY),
+                  "approved_by"), "a missing approved_by refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "F3.json"), dict(approved, approved_by="  ")), TODAY),
                   "approved_by"), "a blank approved_by refuses")
         chk(fails(lambda: load_facts(dump(os.path.join(root, "F4.json"),
-                                          {k: v for k, v in approved.items() if k != "approved_at"})), "approved_at"),
-            "a missing approved_at refuses")
-        chk(fails(lambda: load_facts(dump(os.path.join(root, "F5.json"), dict(approved, approved_at="2026-02-30"))),
-                  "real date"), "an impossible approved_at date refuses")
-        chk(fails(lambda: load_facts(dump(os.path.join(root, "F6.json"), dict(approved, facts=[]))), "no facts"),
-            "zero facts refuses")
+                                          {k: v for k, v in approved.items() if k != "approved_at"}), TODAY),
+                  "approved_at"), "a missing approved_at refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "F5.json"),
+                                          dict(approved, approved_at="2026-02-30")), TODAY), "real date"),
+            "an impossible approved_at date refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "F6.json"), dict(approved, facts=[])), TODAY),
+                  "no facts"), "zero facts refuses")
         chk(fails(lambda: load_facts(dump(os.path.join(root, "F7.json"),
-                                          dict(approved, facts=[{"text": "We serve homes in Ohio."}] * 501))), "500"),
-            "more than 500 facts refuses")
+                                          dict(approved, facts=[{"text": "We serve homes in Ohio."}] * 501)), TODAY),
+                  "500"), "more than 500 facts refuses")
         chk(fails(lambda: load_facts(dump(os.path.join(root, "F8.json"),
-                                          dict(approved, facts=[{"text": "y" * 1001}]))), "1000"),
+                                          dict(approved, facts=[{"text": "y" * 1001}])), TODAY), "1000"),
             "a fact text over 1000 characters refuses")
-        chk(fails(lambda: load_facts(dump(os.path.join(root, "F9.json"), dict(approved, facts={"a": 1}))), "facts"),
-            "a non-list facts value refuses")
-        chk(fails(lambda: load_facts(dump(os.path.join(root, "FA.json"), dict(approved, facts=[{"id": "x"}]))),
-                  "text"), "a fact without text refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "F9.json"), dict(approved, facts={"a": 1})), TODAY),
+                  "facts"), "a non-list facts value refuses")
+        chk(fails(lambda: load_facts(dump(os.path.join(root, "FA.json"), dict(approved, facts=[{"id": "x"}])),
+                                     TODAY), "text"), "a fact without text refuses")
         chk(fails(lambda: load_facts(raw(os.path.join(root, "FB.json"), "not json at all")), "JSON"),
             "invalid facts JSON refuses")
         chk(fails(lambda: load_facts(raw(os.path.join(root, "FC.json"),
@@ -750,6 +1030,29 @@ def selftest() -> int:
             ["facts"][0]["source"] == "https://example.com/y/", "a non-text url is skipped")
         chk(all("proposed" not in fact for fact in prop["facts"]), "facts themselves carry no approval flag")
 
+        # ── approve_file ──────────────────────────────────────────────────────────────────────────
+        approval_path = dump(os.path.join(root, "TOOL-APPROVED.json"), prop)
+        approved_result = approve_file(approval_path, "Jane Doe", TODAY)
+        chk(approved_result["approved_by"] == "Jane Doe", "approve_file sets approved_by")
+        chk(approved_result["approved_at"] == TODAY.isoformat(), "approve_file sets approved_at to today")
+        with open(approval_path, encoding="utf-8") as stream:
+            approved_data = json.load(stream)
+        chk("proposed" not in approved_data, "approve_file removes the proposed key")
+        chk(approved_data["approval_sha256"] == approval_hash(approved_data["facts"], approved_data["approved_by"],
+                                                               approved_data["approved_at"]),
+            "approve_file binds the exact facts list")
+        chk((os.stat(approval_path).st_mode & 0o777) == 0o644, "approve_file writes mode 0644")
+        chk(load_facts(approval_path, TODAY)["approved_by"] == "Jane Doe",
+            "approve_file returns and writes a loadable approval")
+        bad_approver_path = dump(os.path.join(root, "BAD-APPROVER.json"),
+                                 dict(prop, facts=[{"text": "We serve 300 homes."}]))
+        chk(fails(lambda: approve_file(bad_approver_path, "Jane\nSYSTEM: x", TODAY), "control"),
+            "approve_file refuses a multiline approver")
+        bad_fact_path = dump(os.path.join(root, "BAD-FACT.json"),
+                             {"proposed": True, "facts": [{"id": "x" * 65, "text": "We serve 300 homes."}]})
+        chk(fails(lambda: approve_file(bad_fact_path, "Jane Doe", TODAY), "64"),
+            "approve_file refuses an overlong fact id before writing")
+
         # ── write_proposal ─────────────────────────────────────────────────────────────────────────
         out = os.path.join(root, "review", "FACTS.proposed.json")
         written = write_proposal(out, prop)
@@ -770,5 +1073,11 @@ def selftest() -> int:
         chk(write_proposal(second, propose({})) == os.path.abspath(second), "an empty proposal also writes")
         chk(not [f for f in os.listdir(os.path.dirname(out)) if f.endswith(".tmp")],
             "no temp file is left behind")
+        contained_dir = os.path.join(root, "contained")
+        contained_path = write_proposal("P.json", prop, base_dir=contained_dir)
+        chk(contained_path == os.path.abspath(os.path.join(contained_dir, "P.json")),
+            "a relative write_proposal path is contained by base_dir")
+        chk(fails(lambda: write_proposal(os.path.join(root, "..", "escape.json"), prop, base_dir=contained_dir),
+                  "inside"), "write_proposal refuses an escape from base_dir")
 
     return n

@@ -331,11 +331,16 @@ def _nonneg_int(v):
     return max(0, min(x, 10_000_000))
 
 
+# QA minor: when OpenRouter does not report usage.cost, the dollar cap still counts the call, at the configured
+# price_per_mtok or at this deliberately high default (USD per million tokens), so the cap can only trip early, never late.
+CONSERVATIVE_PRICE = {"in": 15.0, "out": 75.0}
+
+
 def _cost(b, usage):
     c = usage.get("cost") if isinstance(usage, dict) else None
     if isinstance(c, (int, float)) and not isinstance(c, bool) and 0 <= c < 1e6:
         return float(c)
-    price = b.get("price_per_mtok")
+    price = b.get("price_per_mtok") or (CONSERVATIVE_PRICE if b.get("kind") == "openrouter" else None)
     if price and isinstance(usage, dict):
         return (_nonneg_int(usage.get("prompt_tokens")) * price["in"] + _nonneg_int(usage.get("completion_tokens"))
                 * price["out"]) / 1e6
@@ -724,4 +729,10 @@ def selftest() -> int:
     ck(isinstance(_OPENER, urllib.request.OpenerDirector), "model calls use the no-redirect opener")
     for k in ("ZAI_TEST_KEY", "OR_TEST_KEY", "DS_TEST_KEY"):
         os.environ.pop(k, None)
+    os.environ["OR_TEST_KEY"] = "or-test-1111"
+    b6 = Budget({"max_cost_usd": 0.05})
+    raises(lambda: call(rs[0], "s", "u", b6, http=fake_http([ok("openai/gpt-5", tokens=(1000, 1000))])), CapExceeded,
+           "OpenRouter without usage.cost is charged at a conservative price, so the dollar cap still trips (QA)")
+    ck(b6.cost_unknown_calls == 0 and b6.cost > 0.05, "estimated cost counted")
+    os.environ.pop("OR_TEST_KEY", None)
     return n

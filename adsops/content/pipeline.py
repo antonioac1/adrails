@@ -378,7 +378,8 @@ def _parse_draft(text):
         return None
     try:
         d = json.loads(t[i:j + 1])
-    except ValueError:
+        json.dumps(d, ensure_ascii=False).encode("utf-8")   # QA minor: a lone surrogate (\\ud800) is not text -> hold
+    except (ValueError, UnicodeEncodeError):
         return None
     return d if isinstance(d, dict) else None
 
@@ -674,4 +675,5 @@ def selftest() -> int:
                      refs)
     ck(len(h) == 1 and "Most people pay on time, which means they keep their deposit." in h[0], "quote hint = closest sentence")
     ck(_quote_hints({"sources": [{"url": "u", "quote": "Most people pay on time"}]}, refs) == [], "verbatim quote: no hint")
+    ck(_parse_draft('{"body_md": "bad \\ud800 text"}') is None, "lone surrogate in model JSON = no usable draft (QA)")
     return n

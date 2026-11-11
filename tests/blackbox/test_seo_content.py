@@ -16,6 +16,7 @@ import threading
 import unittest
 
 from adsops.content import bundle, pipeline, publish, writers
+from adsops.content import facts as facts_mod
 from adsops.errors import RailViolation, ToolError
 from adsops import auditchain, approvals
 
@@ -134,8 +135,9 @@ class ContentPipelineTests(unittest.TestCase):
                 "caps": {"max_cost_usd": 1.0, "max_tokens": 100000, "max_calls": 8, "deadline_s": 600},
                 "publish": {"target": "static", "dir": "site"}}
         self.write("site-profile.json", prof)
-        self.write("FACTS.json", {"version": 1, "approved_by": "Jane Doe", "approved_at": "2026-11-10",
+        self.write("FACTS.json", {"version": 1, "proposed": True,
                                   "facts": [{"id": "fee", "text": "Our management fee is $149 per month per home."}]})
+        facts_mod.approve_file(os.path.join(self.dir, "FACTS.json"), "Jane Doe", today=dt.date(2026, 11, 10))
         os.makedirs(os.path.join(self.dir, "site"))
         self.profile_path = os.path.join(self.dir, "site-profile.json")
 
@@ -418,6 +420,15 @@ class ContentPipelineTests(unittest.TestCase):
         r = self.run_once()
         self.assertEqual(r["verdict"], "hold")
         self.assertTrue(any("cap" in h for h in r["hold_reasons"]), r)
+
+    def test_edited_facts_after_approval_are_refused(self):
+        p = os.path.join(self.dir, "FACTS.json")
+        d = json.load(open(p))
+        d["facts"][0]["text"] = "Our management fee is $99 per month per home."
+        json.dump(d, open(p, "w"))
+        with self.assertRaises(ToolError):
+            self.run_once()
+        self.assertEqual(self.models.requests, [])
 
     def test_kill_switch_and_unapproved_facts(self):
         os.makedirs(os.path.join(self.dir, "state"), exist_ok=True)
