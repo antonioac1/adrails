@@ -33,7 +33,7 @@ MAX_TEXT = 200_000                  # cap for every input string (chars)
 MAX_ROWS = 500                      # cap for every input list of rows / items
 MAX_PATHS = 2_000                   # cap for the existing-page list compared against
 MAX_QUERIES = 8                     # queries kept on one candidate
-MAX_LIMIT = 20                      # plan(limit=...) is clamped to this
+MAX_LIMIT = 50                      # plan(limit=...) must be 1..50
 MAX_LIST = 500                      # cap for the returned "refused" list
 MIN_QUERY_LEN = 3
 MAX_QUERY_LEN = 80
@@ -48,13 +48,15 @@ POS_WEIGHT_LOW = 0.4                # outside the band (audit-driven pages only)
 CLASS_WEIGHT = {"question": 1.2, "striking": 1.0, "thin_page": 1.0}
 AUDIT_CODES = ("starved_pages", "thin_content")
 PUBLISHED_MAX_AGE_DAYS = 30
+MAX_ABS_NUM = 1_000_000_000
 
 _WS_RE = re.compile(r"\s+")
 _WORD_RE = re.compile(r"[a-z0-9']+")
-_SEG_RE = re.compile(r"[-_]+")
 _ZIP_RE = re.compile(r"(?<![0-9])[0-9]{5}(?![0-9])")
-_SLUG_RE = re.compile(r"^/[a-z0-9/-]{1,120}/$")
 _ALLOWED = frozenset(string.ascii_letters + string.digits + " '-?")
+_ALNUM_FOLD_RE = re.compile(r"[^a-z0-9]+")
+_PATH_COLLAPSE_RE = re.compile(r"/+")
+_PATH_SPLIT_RE = re.compile(r"[-_/.]+")
 
 _STOPWORDS = frozenset("""
 a about after all also am an and any are as at be because been before being both but by can could did do does doing
@@ -70,6 +72,8 @@ might have has had if whether
 """.split())
 
 _QUESTION_ANYWHERE = frozenset("how why what when where which who whom whose whether".split())
+
+_DOORWAY_STOPWORDS = frozenset("a an the of for in to and vs or".split())
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -93,6 +97,11 @@ def _norm(value):
     return _squash(value).lower()
 
 
+def _fold(value):
+    """Lowercase alphanumeric-folded text: every non-alphanumeric run becomes one space."""
+    return _ALNUM_FOLD_RE.sub(" ", _norm(value)).strip()
+
+
 def _as_list(value, cap=MAX_ROWS):
     """A bounded list copy of `value` (empty for anything that is not a list/tuple)."""
     if not isinstance(value, (list, tuple)):
@@ -101,49 +110,62 @@ def _as_list(value, cap=MAX_ROWS):
 
 
 def _int(value):
-    """Bounded int or None (never raises, rejects bools/NaN/inf)."""
+    """Bounded int or None (never raises, rejects bools/NaN/inf/absurd values)."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
-        i = value
-    elif isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
+        if abs(value) > MAX_ABS_NUM:
             return None
-        i = int(value)
-    elif isinstance(value, str):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")) or abs(value) > MAX_ABS_NUM:
+            return None
+        return int(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
         try:
-            i = int(float(value.strip()))
+            f = float(s)
         except (TypeError, ValueError):
             return None
-    else:
-        return None
-    return max(-1_000_000_000, min(1_000_000_000, i))
+        if f != f or f in (float("inf"), float("-inf")) or abs(f) > MAX_ABS_NUM:
+            return None
+        return int(f)
+    return None
 
 
 def _float(value):
-    """Bounded float or None (never raises, rejects bools/NaN)."""
+    """Bounded float or None (never raises, rejects bools/NaN/inf/absurd values)."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        f = float(value)
-    elif isinstance(value, str):
         try:
-            f = float(value.strip())
+            f = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            f = float(s)
         except (TypeError, ValueError):
             return None
     else:
         return None
-    if f != f or f in (float("inf"), float("-inf")):
+    if f != f or f in (float("inf"), float("-inf")) or abs(f) > MAX_ABS_NUM:
         return None
-    return max(-1e9, min(1e9, f))
+    return f
 
 
 def _norm_path(path):
-    """A path we can compare: leading slash, no spaces, lowercased, trailing slash on directory-style paths."""
-    p = _WS_RE.sub("", _cap_str(path, 300)) or "/"
+    """A path we can compare: leading slash, collapsed slashes, lowercased, trailing slash on directory paths."""
+    p = _WS_RE.sub("", _cap_str(path, 2048)) or "/"
+    p = p.lower()
     if not p.startswith("/"):
         p = "/" + p
-    p = p.lower()
+    p = _PATH_COLLAPSE_RE.sub("/", p)
     tail = p.rstrip("/").split("/")[-1] if p.strip("/") else ""
     if not p.endswith("/") and "." not in tail:
         p += "/"
@@ -214,17 +236,26 @@ def _origin(site, host):
     return "%s://%s" % (scheme, h or host or "")
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=1024)
 def _phrase_rx(phrase):
-    """Word-bounded, escaped matcher for one literal token/phrase (never built from raw data)."""
-    return re.compile(r"(?<![a-z0-9])" + re.escape(phrase) + r"(?![a-z0-9])")
+    """Word-bounded matcher for one folded literal phrase, with optional plural on the last word."""
+    words = [w for w in phrase.split() if w]
+    if not words:
+        return None
+    parts = [re.escape(w) for w in words]
+    parts[-1] = parts[-1] + r"(?:s|es)?"
+    return re.compile(r"(?<![a-z0-9])" + r"\s+".join(parts) + r"(?![a-z0-9])")
 
 
 def _phrase_hit(text, phrases):
-    """The first phrase in `phrases` found as a whole-word hit in lowercased `text`, else None."""
+    """The first phrase in `phrases` found in folded `text`, else None."""
+    folded = _fold(text)
     for phrase in _as_list(phrases, 200):
-        p = _norm(phrase)
-        if p and _phrase_rx(p).search(text):
+        p = _fold(phrase)
+        if not p:
+            continue
+        rx = _phrase_rx(p)
+        if rx is not None and rx.search(folded):
             return p
     return None
 
@@ -283,7 +314,10 @@ def safe_query(query, profile):
             return False, "query has non-ascii characters"
         return False, "query has an unsupported character %r" % ch
     low = s.lower()
-    _banned, areas, competitors, own_brand = _rulings(profile)
+    banned, areas, competitors, own_brand = _rulings(profile)
+    hit = _phrase_hit(low, banned)
+    if hit:
+        return False, "query contains a banned phrase (%r)" % hit[:60]
     hit = _phrase_hit(low, competitors)
     if hit:
         return False, "query names a competitor (%r)" % hit[:60]
@@ -303,81 +337,121 @@ def safe_query(query, profile):
 # ----------------------------------------------------------------------------------------------------------------
 # public: doorway_reason
 # ----------------------------------------------------------------------------------------------------------------
-def _slug_parts(slug):
-    """(directory segments, last-segment word tokens) of a slug/path."""
-    segs = [s for s in _norm_path(slug).strip("/").split("/") if s]
-    if not segs:
-        return (), ()
-    return tuple(segs[:-1]), tuple(t for t in _SEG_RE.split(segs[-1]) if t)
+def _doorway_path(raw):
+    """Normalise a path or URL for doorway comparison; return (path, error)."""
+    s = _cap_str(raw, 2048)
+    if not s:
+        return "", "path is missing"
+    low = s.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        try:
+            p = urlsplit(s).path
+        except ValueError:
+            p = s
+    else:
+        p = s
+    p = p.lower()
+    p = _PATH_COLLAPSE_RE.sub("/", p)
+    if not p.startswith("/"):
+        p = "/" + p
+    p = p.rstrip("/")
+    p = p + "/" if p else "/"
+    segs = [seg for seg in p.strip("/").split("/") if seg]
+    for seg in segs:
+        if seg in (".", ".."):
+            return p, "path contains a '%s' segment" % seg
+    return p, None
 
 
-def _place_drop(profile):
-    """Tokens that are excluded place names, dropped before two slugs are compared by shape."""
-    drop = set()
-    for area in _rulings(profile)[1]:
-        drop.add(area.replace(" ", "-"))
-        drop.update(t for t in _SEG_RE.split(area) if t)
-        drop.update(_WORD_RE.findall(area))
-    return drop
+def _path_tokens(path):
+    """The folded token set of a path."""
+    body = path.strip("/")
+    words = [w for w in _PATH_SPLIT_RE.split(body) if w]
+    out = set()
+    for word in words:
+        w = word.lower()
+        if w in _DOORWAY_STOPWORDS:
+            continue
+        if len(w) > 3 and w.endswith("s"):
+            w = w[:-1]
+        if w:
+            out.add(w)
+    return frozenset(out)
 
 
-def _shape(slug, drop):
-    """Slug with place names and digit-only tokens removed: equal shapes mean "same page, new place/zip"."""
-    dirs, toks = _slug_parts(slug)
-    return dirs, tuple(t for t in toks if t not in drop and not t.isdigit())
+def _place_tokens(profile):
+    """Folded words of profile["places"] and profile["rulings"]["excluded_areas"]."""
+    tokens = set()
+
+    def add(value):
+        if not isinstance(value, str):
+            return
+        for w in re.findall(r"[a-z0-9]+", value.lower()):
+            if w in _DOORWAY_STOPWORDS:
+                continue
+            if len(w) > 3 and w.endswith("s"):
+                w = w[:-1]
+            if w:
+                tokens.add(w)
+
+    if not isinstance(profile, dict):
+        return tokens
+    places = profile.get("places")
+    if isinstance(places, str):
+        add(places)
+    elif isinstance(places, (list, tuple)):
+        for item in _as_list(places, 200):
+            add(item)
+    rulings = profile.get("rulings")
+    if isinstance(rulings, dict):
+        for area in _as_list(rulings.get("excluded_areas"), 200):
+            add(area)
+    return tokens
 
 
-def _slug_swap(a, b, drop):
-    """True when two slugs sit in the same directory and differ by one token (a place, zip or keyword)."""
-    pa, pb = _norm_path(a), _norm_path(b)
-    if not pa or not pb:
+def _place_like(token, place_tokens):
+    """True for a known place word, a five-digit zip, or any all-digit token."""
+    return token in place_tokens or token.isdigit() or re.fullmatch(r"\d{5}", token) is not None
+
+
+def _place_swap(a_tokens, b_tokens, place_tokens):
+    """True when the token sets differ by exactly one place-like token on each side."""
+    left = a_tokens - b_tokens
+    right = b_tokens - a_tokens
+    if len(left) != 1 or len(right) != 1:
         return False
-    if pa == pb:
-        return True
-    dirs_a, toks_a = _slug_parts(pa)
-    dirs_b, toks_b = _slug_parts(pb)
-    if dirs_a != dirs_b:
-        return False
-    if _shape(pa, drop) == _shape(pb, drop) and set(toks_a) != set(toks_b):
-        return True
-    sa, sb = set(toks_a), set(toks_b)
-    if not sa or len(sa) != len(sb) or len(sa & sb) != len(sa) - 1:
-        return False
-    return len(toks_a) >= 2 or bool(dirs_a)
+    a = next(iter(left))
+    b = next(iter(right))
+    return _place_like(a, place_tokens) and _place_like(b, place_tokens)
 
 
 def doorway_reason(slug, queries, existing_paths, profile):
-    """Plain-English reason this slug/queries pair is a doorway page, or None when it is a real new topic."""
+    """Plain-English reason this NEW slug is a doorway page, or None when it is a real new topic."""
     if not isinstance(slug, str) or not slug.strip():
         return "slug is missing"
-    path = _norm_path(slug)
-    if not _SLUG_RE.match(path):
-        return "slug is not a clean lowercase path (%r)" % path[:80]
-    if ".." in path:
-        return "slug contains '..'"
+    path, err = _doorway_path(slug)
+    if err:
+        return "slug %s" % err
+    if path == "/":
+        return "slug is empty"
     for seg in [s for s in path.strip("/").split("/") if s]:
         if seg.isdigit():
             return "slug has a digits-only segment (%r) - that is a zip/year page, not a topic" % path[:80]
-    drop = _place_drop(profile)
-    my_shape = _shape(path, drop)
+    my_tokens = _path_tokens(path)
+    place_tokens = _place_tokens(profile)
     for raw in _as_list(existing_paths, MAX_PATHS):
         if not isinstance(raw, str) or not raw.strip():
             continue
-        other = _path(raw)
-        if not other:
+        other, other_err = _doorway_path(raw)
+        if other_err or not other:
             continue
         if other == path:
             return "an existing page already lives at %s" % other[:100]
-        if _slug_swap(path, other, drop):
-            if _shape(other, drop) == my_shape:
-                return "%s is %s with only a place name or zip swapped" % (path[:80], other[:80])
-            return "%s differs from existing page %s by one swapped keyword or place name" % (path[:80], other[:80])
-    qs = [_norm(q) for q in _as_list(queries, MAX_QUERIES) if isinstance(q, str) and _norm(q)]
-    for i in range(len(qs)):
-        for j in range(i + 1, len(qs)):
-            a, b = _content_words(qs[i]), _content_words(qs[j])
-            if len(a) >= 4 and len(a) == len(b) and len(set(a) & set(b)) == len(a) - 1:
-                return "queries %r and %r differ only by one swapped keyword" % (qs[i][:60], qs[j][:60])
+        other_tokens = _path_tokens(other)
+        if my_tokens == other_tokens:
+            return "%s has the same topic tokens as existing page %s" % (path[:80], other[:80])
+        if _place_swap(my_tokens, other_tokens, place_tokens):
+            return "%s is %s with only a place name or zip swapped" % (path[:80], other[:80])
     return None
 
 
@@ -385,15 +459,53 @@ def doorway_reason(slug, queries, existing_paths, profile):
 # plan(): rows -> extend / new candidates
 # ----------------------------------------------------------------------------------------------------------------
 def _row(raw):
-    """A parsed, bounded GSC row, or None when it cannot be used."""
+    """(parsed bounded GSC row, "") or (None, refusal reason for bad numeric fields)."""
     if not isinstance(raw, dict):
-        return None
+        return None, ""
     query = _squash(raw.get("query"))
     if not query:
-        return None
+        return None, ""
     page = _squash(raw.get("page"))
-    return {"query": query[:200], "page": page[:2048], "impressions": max(0, _int(raw.get("impressions")) or 0),
-            "clicks": max(0, _int(raw.get("clicks")) or 0), "position": _float(raw.get("position"))}
+
+    imp_raw = raw.get("impressions")
+    if imp_raw is None or (isinstance(imp_raw, str) and not imp_raw.strip()):
+        impressions = 0
+    else:
+        impressions = _int(imp_raw)
+        if impressions is None:
+            return None, "row ignored: impressions is not a finite number"
+        impressions = max(0, impressions)
+
+    clicks_raw = raw.get("clicks")
+    if clicks_raw is None or (isinstance(clicks_raw, str) and not clicks_raw.strip()):
+        clicks = 0
+    else:
+        clicks = _int(clicks_raw)
+        if clicks is None:
+            return None, "row ignored: clicks is not a finite number"
+        clicks = max(0, clicks)
+
+    pos_raw = raw.get("position")
+    if pos_raw is None or (isinstance(pos_raw, str) and not pos_raw.strip()):
+        position = None
+    else:
+        position = _float(pos_raw)
+        if position is None:
+            return None, "row ignored: position is not a finite number"
+
+    return {"query": query[:200], "page": page[:2048], "impressions": impressions,
+            "clicks": clicks, "position": position}, ""
+
+
+def _bad_row_entry(raw, reason):
+    """Refused-list entry for a row rejected on numeric validation."""
+    q = ""
+    page = None
+    if isinstance(raw, dict):
+        q = _squash(raw.get("query"))[:120]
+        p = _squash(raw.get("page"))
+        page = p[:2048] or None
+    return {"mode": "new", "page": page, "slug": None, "queries": [q] if q else [], "reason": reason}
 
 
 def _refuse(bucket, seen, entry):
@@ -513,7 +625,7 @@ def _clusters(rows):
             continue
         seen.add(row["query"])
         items.append(row)
-    items = items[:MAX_ROWS]
+    items[:] = items[:MAX_ROWS]
     words = [_content_words(r["query"]) for r in items]
     parent = list(range(len(items)))
 
@@ -539,7 +651,7 @@ def _cluster_words(rows):
     """The content words shared by at least two queries of a cluster, most common first (max 3)."""
     counts = Counter()
     for row in rows:
-        counts.update(dict.fromkeys(_content_words(row["query"]), 1))   # PM: ordered, not a set (hash-seed flake)
+        counts.update(dict.fromkeys(_content_words(row["query"]), 1))   # ordered, not a set (hash-seed flake)
     shared = [(w, c) for w, c in counts.items() if c >= MIN_SHARED_WORDS]
     shared.sort(key=lambda pair: -pair[1])      # stable: ties keep first-appearance order
     return [w for w, _ in shared[:3]]
@@ -560,12 +672,19 @@ def _slug_from_words(words):
 def _published_set(published):
     """(ids, page keys/paths) of work already done, so the same idea is not drafted twice."""
     ids, pages = set(), set()
+
+    def add_page(value):
+        if not isinstance(value, str) or not value.strip():
+            return
+        s = value.strip()
+        pages.add(_page_key(s))
+        pages.add(_path(s))
+
     for item in _as_list(published, MAX_ROWS):
         if isinstance(item, str) and item.strip():
             s = item.strip()
-            if s.lower().startswith("http") or s.startswith("/"):
-                pages.add(_page_key(s))
-                pages.add(_path(s))
+            if s.lower().startswith("http") or s.startswith("/") or "/" in s:
+                add_page(s)
             else:
                 ids.add(s[:200])
         elif isinstance(item, dict):
@@ -574,11 +693,29 @@ def _published_set(published):
                 continue
             if isinstance(item.get("id"), str):
                 ids.add(item["id"][:200])
-            page = item.get("page") if isinstance(item.get("page"), str) else item.get("url")
-            if isinstance(page, str) and page.strip():
-                pages.add(_page_key(page))
-                pages.add(_path(page))
+            for key in ("page", "url", "slug"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    add_page(val)
     return ids, pages
+
+
+def _is_published(candidate, done_ids, done_pages):
+    """True when the candidate id, page path, or slug path is already published."""
+    if candidate["id"] in done_ids:
+        return True
+    for value in (candidate.get("page"), candidate.get("slug")):
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if value in done_pages:
+            return True
+        key = _page_key(value)
+        if key in done_pages:
+            return True
+        path = _path(value)
+        if path and path in done_pages:
+            return True
+    return False
 
 
 def plan(gsc_rows, profile, audit_run=None, lessons=None, published=(), limit=5):
@@ -589,11 +726,19 @@ def plan(gsc_rows, profile, audit_run=None, lessons=None, published=(), limit=5)
     host = _norm(prof.get("host") or "") or _host(prof.get("site") or "")
     hosts = _host_set(host)
     origin = _origin(prof.get("site") or "", host)
-    wanted = _int(limit)
-    wanted = 5 if wanted is None else max(1, min(MAX_LIMIT, wanted))
 
-    candidates, refused, seen_refusals = [], [], set()
-    rows = [r for r in (_row(x) for x in _as_list(gsc_rows, MAX_ROWS)) if r]
+    wanted = _int(limit)
+    if wanted is None or wanted < 1 or wanted > MAX_LIMIT:
+        raise ToolError("limit must be an integer between 1 and 50")
+
+    refused, seen_refusals = [], set()
+    rows = []
+    for raw in _as_list(gsc_rows, MAX_ROWS):
+        row, err = _row(raw)
+        if row:
+            rows.append(row)
+        elif err:
+            _refuse(refused, seen_refusals, _bad_row_entry(raw, err))
 
     safe_rows = []
     for row in rows:
@@ -630,18 +775,23 @@ def plan(gsc_rows, profile, audit_run=None, lessons=None, published=(), limit=5)
         page = striking[0]["page"]
         raw_candidates.append(_make("extend", page, _path(page), striking, _class_of(striking)))
 
-    have = {c["page"] for c in raw_candidates if c["page"]}
+    have = {_page_key(c["page"]) for c in raw_candidates if c["page"]}
     for url in audit_urls:
-        if url in have:
+        key = _page_key(url)
+        if key in have:
             continue
-        group = by_page.get(_page_key(url)) or []
+        group = by_page.get(key) or []
         if not group:
             continue
-        have.add(url)
-        raw_candidates.append(_make("extend", url, _path(url), group, "thin_page"))
+        have.add(key)
+        candidate = _make("extend", url, _path(url), group, "thin_page")
+        if candidate["impressions"] > 0:
+            raw_candidates.append(candidate)
 
     pool = [r for r in no_page if r["position"] is None or r["position"] <= POS_MAX]
     for cluster in _clusters([r for r in pool if is_question(r["query"])]):
+        if sum(r["impressions"] for r in cluster) < MIN_IMPRESSIONS:
+            continue
         words = _cluster_words(cluster)
         if len(words) < MIN_SHARED_WORDS:
             continue
@@ -655,25 +805,21 @@ def plan(gsc_rows, profile, audit_run=None, lessons=None, published=(), limit=5)
     raw_candidates.sort(key=lambda c: (-c["score"], c["id"]))
 
     done_ids, done_pages = _published_set(published)
-    drop = _place_drop(prof)
     kept = []
     for candidate in raw_candidates:
-        page = candidate["page"]
-        if candidate["id"] in done_ids:
+        if candidate["impressions"] <= 0:
             continue
-        if page and (_page_key(page) in done_pages or _path(page) in done_pages):
+        if _is_published(candidate, done_ids, done_pages):
             continue
-        others = [p for p in existing if p != candidate["slug"]]
-        why = doorway_reason(candidate["slug"], candidate["queries"], others, prof)
-        if why:
-            _refuse(refused, seen_refusals, dict(candidate, reason=why))
-            continue
-        twin = next((k for k in kept if _slug_swap(candidate["slug"], k["slug"], drop)), None)
-        if twin is not None:
-            _refuse(refused, seen_refusals,
-                    dict(candidate, reason="near-duplicate of candidate %s: only a place, zip or one keyword "
-                                           "differs" % twin["id"]))
-            continue
+        if candidate["mode"] == "new":
+            others = list(existing)
+            for kept_candidate in kept:
+                if kept_candidate["slug"] and kept_candidate["slug"] != candidate["slug"]:
+                    others.append(kept_candidate["slug"])
+            why = doorway_reason(candidate["slug"], candidate["queries"], others, prof)
+            if why:
+                _refuse(refused, seen_refusals, dict(candidate, reason=why))
+                continue
         kept.append(candidate)
 
     return {"candidates": kept[:wanted], "refused": refused[:MAX_LIST]}
@@ -692,18 +838,30 @@ def selftest() -> int:
             raise AssertionError("topics.selftest: " + msg)
         n += 1
 
+    def raises_tool_error(fn):
+        try:
+            fn()
+        except ToolError:
+            return True
+        return False
+
     P = {"site": "https://example.com/", "host": "example.com",
-         "rulings": {"banned_phrases": [], "excluded_areas": ["Springfield"], "competitors": ["Acme PM"],
-                     "own_brand": ["Example Co"]}}
+         "places": ["Shelbyville", "Springfield", "Ogdenville"],
+         "rulings": {"banned_phrases": ["guaranteed approval"], "excluded_areas": ["Springfield"],
+                     "competitors": ["Acme PM"], "own_brand": ["Example Co", "baytown pm"]}}
 
     # safe_query -------------------------------------------------------------------------------------------
     chk(safe_query("how much is landlord insurance", P) == (True, ""), "a plain question is a safe query")
     chk(safe_query("cost per door?", P)[0] is True, "'?' is allowed")
     chk(safe_query("what's an hoa fee", P)[0] is True, "an apostrophe is allowed")
     chk(safe_query("acme pm reviews", P)[0] is False, "a competitor query is refused")
+    chk(safe_query("acme pms reviews", P)[0] is False, "a plural competitor variant is refused")
     chk("competitor" in safe_query("acme pm reviews", P)[1], "the competitor reason says why")
     chk(safe_query("acme landlord forum", P)[0] is True, "a partial competitor word is not a competitor hit")
     chk(safe_query("example co pricing", P)[0] is False, "the own brand is refused")
+    chk(safe_query("is baytown-pm good", P)[0] is False, "a hyphenated own-brand variant is refused")
+    chk(safe_query("guaranteed approval rental", P)[0] is False, "a banned phrase is refused")
+    chk("banned" in safe_query("guaranteed approval rental", P)[1], "the banned reason says why")
     chk(safe_query("landlord help springfield", P)[0] is False, "an excluded area is refused")
     chk(safe_query("rental rates 90210", P)[0] is False, "a 5-digit zip is refused")
     chk(safe_query("caf\u00e9 landlord", P)[0] is False, "a non-ascii query is refused")
@@ -736,6 +894,22 @@ def selftest() -> int:
     chk(out["candidates"][1]["slug"] == "/guides/renters-insurance/", "the new slug comes from the shared words")
     chk(out["candidates"][1]["query_class"] == "question", "question class detected for new clusters")
 
+    # sibling live pages must not refuse each other (M6) ---------------------------------------------------
+    sibling_rows = [{"query": "renters insurance cost", "page": "https://example.com/guides/renters-insurance/",
+                     "impressions": 100, "clicks": 0, "position": 12},
+                    {"query": "landlord insurance cost", "page": "https://example.com/guides/landlord-insurance/",
+                     "impressions": 90, "clicks": 0, "position": 13}]
+    out = plan(sibling_rows, P)
+    chk(len(out["candidates"]) == 2, "sibling extend pages are both allowed")
+    chk([c["mode"] for c in out["candidates"]] == ["extend", "extend"], "both sibling pages are extends")
+
+    # file-name pages can be extended (M7d) ----------------------------------------------------------------
+    file_out = plan([{"query": "landlord forms", "page": "https://example.com/blog/post.html",
+                      "impressions": 100, "clicks": 0, "position": 12}], P)
+    chk(len(file_out["candidates"]) == 1, "file-name page can be extended")
+    chk(file_out["candidates"][0]["slug"] == "/blog/post.html", "file-name slug keeps the path as-is")
+    chk(file_out["candidates"][0]["page"] == "https://example.com/blog/post.html", "file-name page keeps the path as-is")
+
     # band + impression filters ----------------------------------------------------------------------------
     far = [{"query": "flat fee management", "page": "https://example.com/guides/fees/", "impressions": 500,
             "clicks": 1, "position": 55}]
@@ -765,7 +939,12 @@ def selftest() -> int:
         ["candidates"][0]["query_class"] == "thin_page", "path-only audit urls work too")
     chk(plan(thin_rows, P)["candidates"] == [], "without the audit the starved page is not picked")
 
-    # doorway refusals -------------------------------------------------------------------------------------
+    zero_thin_rows = [{"query": "hoa rules", "page": "https://example.com/guides/thin-page/", "impressions": 0,
+                       "clicks": 0, "position": 60}]
+    chk(plan(zero_thin_rows, P, audit_run=thin_run)["candidates"] == [],
+        "a zero-impression audit candidate is skipped")
+
+    # doorway refusals (M7) --------------------------------------------------------------------------------
     chk(doorway_reason("/service-areas/shelbyville/", [], ["/service-areas/springfield/"], P) is not None,
         "a place-swapped slug is refused")
     chk(doorway_reason("/areas/90210/", [], [], P) is not None, "a zip slug is refused")
@@ -774,13 +953,26 @@ def selftest() -> int:
         "an existing slug is refused")
     chk(doorway_reason("/guides/flat-fee/", [], [], P) is None, "no existing pages -> not a doorway")
     chk(doorway_reason("", [], [], P) is not None, "a missing slug is refused")
+    chk(doorway_reason("/guides/insurance-renters/", [], ["/guides/renters-insurance/"], P) is not None,
+        "reordered tokens are refused")
+    chk(doorway_reason("/guides//flat-fee//", [], ["/guides/flat-fee/"], P) is not None,
+        "repeated slashes are normalised and refused")
+    chk(doorway_reason("/guides/renters-insurance/", [], ["/guides/landlord-insurance/"], P) is None,
+        "one-word non-place differences are distinct topics")
+    chk(doorway_reason("/guides/the-renters-insurance/", [], ["/guides/renters-insurance/"], P) is not None,
+        "stopwords and plural folding are applied")
+    chk(doorway_reason("/guides/../flat-fee/", [], [], P) is not None, "a '..' segment is refused")
+    chk(doorway_reason("/guides/./flat-fee/", [], [], P) is not None, "a '.' segment is refused")
+    why = doorway_reason("/areas/shelbyville/", [], ["/areas/springfield/"], P)
+    chk(why is not None and "place" in why, "the place-swap refusal says why")
+
     swap_rows = [{"query": "ogdenville rental laws", "page": "https://example.com/areas/ogdenville/",
                   "impressions": 50, "clicks": 1, "position": 10},
                  {"query": "shelbyville rental rules", "page": "https://example.com/areas/shelbyville/",
                   "impressions": 40, "clicks": 1, "position": 11}]
     out = plan(swap_rows, P)
-    chk(out["candidates"] == [], "place-swapped candidates are refused")
-    chk(any("swapped" in r["reason"] for r in out["refused"]), "the doorway refusal says why")
+    chk([c["mode"] for c in out["candidates"]] == ["extend", "extend"],
+        "extend pages are never doorway-refused")
 
     # lessons weights --------------------------------------------------------------------------------------
     pair = [{"query": "renters insurance pricing guide", "page": "https://example.com/guides/renters-insurance/",
@@ -805,13 +997,28 @@ def selftest() -> int:
     chk(len(plan(pair, P, published=[{"id": first_id, "days_ago": 45}])["candidates"]) == 2,
         "work published more than 30 days ago is not skipped")
 
+    chk(plan(new_qs, P, published=["https://example.com/guides/renters-insurance/"])["candidates"] == [],
+        "published page paths skip new candidates")
+    chk(plan(new_qs, P, published=["/guides/renters-insurance/"])["candidates"] == [],
+        "published site paths skip new candidates")
+    new_id = plan(new_qs, P)["candidates"][0]["id"]
+    chk(plan(new_qs, P, published=[new_id])["candidates"] == [], "published ids skip new candidates")
+
     # stable ids + limit -----------------------------------------------------------------------------------
     again = plan(pair, P)
     chk([c["id"] for c in again["candidates"]] == [c["id"] for c in base["candidates"]], "ids are stable")
     chk(re.match(r"^[0-9a-f]{10}$", first_id) is not None, "ids are sha1 hex[:10]")
     chk(len(plan(pair, P, limit=1)["candidates"]) == 1, "limit caps the list")
-    chk(len(plan(pair, P, limit=0)["candidates"]) == 1, "limit is clamped to at least 1")
-    chk(len(plan(pair, P, limit=10 ** 6)["candidates"]) == 2, "limit is clamped and never invents candidates")
+    chk(raises_tool_error(lambda: plan(pair, P, limit=0)), "limit below 1 is a ToolError")
+    chk(raises_tool_error(lambda: plan(pair, P, limit=10 ** 6)), "limit above 50 is a ToolError")
+    chk(raises_tool_error(lambda: plan([], P, limit="1e400")), "non-finite limit is a ToolError")
+    chk(len(plan(pair, P, limit=50)["candidates"]) == 2, "limit up to 50 is accepted")
+
+    # zero-impression candidates (M7c) ---------------------------------------------------------------------
+    zero_new = [dict(q, impressions=0) for q in new_qs]
+    chk(plan(zero_new, P)["candidates"] == [], "zero-impression new clusters are skipped")
+    low_new = [dict(q, impressions=1) for q in new_qs]
+    chk(plan(low_new, P)["candidates"] == [], "a new cluster needs at least 5 impressions in total")
 
     # hostile input ----------------------------------------------------------------------------------------
     chk(plan(None, None) == {"candidates": [], "refused": []}, "plan(None, None) is empty, not an exception")
@@ -830,4 +1037,14 @@ def selftest() -> int:
         "an over-long query does not raise")
     chk(plan([{"query": "flat fee management", "page": "", "impressions": 5, "position": 9}], P)["candidates"] == [],
         "a single query with no page is not enough for a new page")
+
+    # non-finite / absurd row numbers (M8) -----------------------------------------------------------------
+    over = plan([{"query": "hoa rules", "page": "", "impressions": "1e400", "position": 9}], P)
+    chk(over["candidates"] == [], "overflow impressions do not raise")
+    chk(any("finite" in r["reason"] for r in over["refused"]), "overflow impressions are refused with a reason")
+    nan_out = plan([{"query": "hoa rules", "page": "", "impressions": float("nan"), "position": 9}], P)
+    chk(nan_out["candidates"] == [], "nan impressions do not raise")
+    inf_out = plan([{"query": "hoa rules", "page": "", "impressions": float("inf"), "position": 9}], P)
+    chk(inf_out["candidates"] == [], "inf impressions do not raise")
+
     return n

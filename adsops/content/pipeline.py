@@ -201,7 +201,7 @@ def plan(profile, io, *, audit_run=None, limit=5, today=None):
                 "note": "Search Console is not connected: topics are picked from search evidence only. Connect it "
                         "(read-only scope) or pass gsc rows."}
     p = paths(profile)
-    lessons = learn_mod.read_lessons(profile["_lessons_path"]) if os.path.exists(profile["_lessons_path"]) else None
+    lessons = learn_mod.read_lessons(profile["_lessons_path"], base_dir=profile["_dir"]) if os.path.exists(profile["_lessons_path"]) else None
     done = [r.get("candidate_id") for r in _runs(p) if r.get("stage") == "draft" and r.get("ok")]
     out = topics_mod.plan(rows, profile, audit_run=audit_run, lessons=lessons, published=done, limit=limit + 20)
     skip = tuple(x if x.endswith("/") else x + "/" for x in profile.get("exclude_paths") or [])
@@ -404,7 +404,7 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None, re
     kw = io.callkw(secret_envs)
     lessons_text = ""
     if os.path.exists(profile["_lessons_path"]):
-        lessons_text = learn_mod.read_lessons(profile["_lessons_path"])["text"]
+        lessons_text = learn_mod.read_lessons(profile["_lessons_path"], base_dir=profile["_dir"])["text"]
     ctx, refs, errs, _ = _context(profile, facts, io, budget, candidate)
     did = "%s-%s" % (dt.date.fromtimestamp(io.now()).strftime("%Y%m%d"),
                      hashlib.sha256((str(candidate["id"]) + ("-r1" if revise else "")).encode()).hexdigest()[:10])
@@ -486,7 +486,7 @@ def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=No
     d, cand, wrep = saved["draft"], saved["candidate"], saved["writer"]
     budget = budget or writers.Budget(profile.get("caps"), clock=io.clock)
     secret_envs = writers.secret_env_names(ws, rs, [ed] if ed else [])
-    lessons_text = learn_mod.read_lessons(profile["_lessons_path"])["text"] if os.path.exists(profile["_lessons_path"]) else ""
+    lessons_text = learn_mod.read_lessons(profile["_lessons_path"], base_dir=profile["_dir"])["text"] if os.path.exists(profile["_lessons_path"]) else ""
     # fresh context: site + cited sources RE-FETCHED now, every quote re-found (never trust the saved copy)
     ctx, refs, errs, qerr = _context(profile, facts, io, budget, cand, d.get("sources") or [])
     res = {"stage": "review", "run_id": run_id, "draft_id": draft_id, "candidate_id": cand.get("id"), "ok": False,
@@ -638,7 +638,7 @@ def results(profile, io, *, today=None, update_lessons=False):
     board = learn_mod.scoreboard(rows)
     out = {"pieces": len(pieces), "rows": rows, "scoreboard": board, "connected": True}
     if update_lessons:
-        out["lessons"] = learn_mod.update_lessons(profile["_lessons_path"], board, today.isoformat())
+        out["lessons"] = learn_mod.update_lessons(profile["_lessons_path"], board, today.isoformat(), base_dir=profile["_dir"])
     return out
 
 

@@ -9,20 +9,20 @@ What lives here (SPEC-D, learn.py):
     measure(pieces, daily_rows, today, windows=(14, 28, 56), baseline_days=28) -> [row]
         Per piece, per window: impressions/day, clicks/day and impression-weighted average position before (the
         baseline_days days before published_day) and after (published_day+1 .. published_day+window), plus the relative
-        change. status is "pending" while the window has not been reached yet and "no_data" when the baseline holds
-        fewer than 7 days of data.
+        change. status is "pending" while the window has not been reached yet and "insufficient_data" when the baseline
+        holds fewer than 7 observed days or no baseline impressions, or the after window has no observed row at all.
 
     scoreboard(rows, window=28) -> [{"group", "n", "median_impr_change", "improved_share", "ids"}]
         Groups measured rows by "<content_type>|<query_class>", keeps only rows that reached the window with a usable
-        baseline, and reports the median relative change and the share of pieces that improved.
+        baseline, de-duplicates piece ids, and reports the median relative change and the share of pieces that improved.
 
     update_lessons(path, board, today, min_n=3, max_lines=20) -> {"added", "kept", "dropped"}
-        Rewrites only the "## Learned (AdRails updates this section)" section of LESSONS.md. "## Operator notes" is
-        preserved byte-for-byte. A learned line the operator deleted is recorded in the sidecar
-        LESSONS.suppressed.json and is never added back. The file is capped at 20 KB and the learned section at
-        max_lines lines; the write is atomic (tempfile in the same directory + os.replace).
+        Rewrites only the "## Learned (AdRails updates this section)" section of LESSONS.md. "## Operator notes" and
+        other non-tagged text after the Learned header are preserved. A learned line the operator deleted is recorded in
+        the sidecar LESSONS.suppressed.json and is never added back. The file is capped at 20 KB and the learned section
+        at max_lines lines; the write is atomic (tempfile in the same directory + os.replace).
 
-    read_lessons(path) -> {"text": str, "weights": {group: float}}
+    read_lessons(path) -> {"text": str, "weights": {group: float}, "truncated": bool}
         The two sections (capped at 4000 chars) and planner weights: 1 + clamp(median change, -0.5, 0.5) for every
         learned group with n >= min_n.
 
@@ -49,10 +49,11 @@ MAX_BYTES = 20 * 1024               # hard cap for LESSONS.md (bytes)
 READ_MAX = 4000                     # cap for read_lessons()["text"]
 MIN_N = 3                           # minimum evidence (pieces) before a group becomes a lesson/weight
 BASE_DAYS = 28                      # default baseline window (days before published_day)
-MIN_BASELINE_DAYS = 7               # below this many days of data a window is "no_data"
+MIN_BASELINE_DAYS = 7               # below this many days of data a window is "insufficient_data"
 
 OPERATOR_HEADER = "## Operator notes"
 LEARNED_HEADER = "## Learned (AdRails updates this section)"
+_REFUSED_REASON = "restore LESSONS.suppressed.json or delete LESSONS.md to start over"
 
 _TEMPLATE = (
     "# LESSONS\n"
@@ -77,14 +78,30 @@ _LINE_RX = re.compile(
 # ---------------------------------------------------------------------------------------------------------------------
 # small shared helpers
 # ---------------------------------------------------------------------------------------------------------------------
-def _abs(path):
+def _abs(path, base_dir=None):
     """Absolute path for a LESSONS.md argument (untrusted string, capped)."""
     if not isinstance(path, (str, os.PathLike)):
         raise ToolError("LESSONS.md path must be a string")
     raw = str(path).strip()[:4096]
     if not raw:
         raise ToolError("LESSONS.md path is required")
-    return os.path.abspath(os.path.expanduser(raw))
+    target = os.path.abspath(os.path.expanduser(raw))
+    if base_dir is None:
+        return target
+    if not isinstance(base_dir, (str, os.PathLike)):
+        raise ToolError("base_dir must be a string")
+    base_raw = str(base_dir).strip()[:4096]
+    if not base_raw:
+        raise ToolError("base_dir is required when it is supplied")
+    base = os.path.realpath(os.path.abspath(os.path.expanduser(base_raw)))
+    resolved = os.path.realpath(target)
+    try:
+        common = os.path.commonpath([base, resolved])
+    except ValueError:
+        raise ToolError("LESSONS.md path must be inside base_dir") from None
+    if common != base:
+        raise ToolError("LESSONS.md path must be inside base_dir")
+    return resolved
 
 
 def _as_date(value, field):
@@ -113,6 +130,19 @@ def _num(value, default=0.0):
     return x
 
 
+def _pos_num(value):
+    """Optional finite numeric position; None when absent/garbage."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    if x != x or x in (float("inf"), float("-inf")):
+        return None
+    return x
+
+
 def _change(before, after):
     """Relative change (after-before)/before, or None when it cannot be computed."""
     if before is None or after is None or before <= 0:
@@ -130,11 +160,15 @@ def _one_line(text, limit=120):
     return s[:limit]
 
 
+def _refused_result():
+    return {"added": [], "kept": [], "dropped": [], "refused": _REFUSED_REASON}
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # measure
 # ---------------------------------------------------------------------------------------------------------------------
 def _index_daily(daily_rows):
-    """{page: {day: {"i": impressions, "c": clicks, "p": position*impressions, "n": rows}}}."""
+    """{page: {day: {"i": impressions, "c": clicks, "p": position*impressions, "pw": positioned impressions, "n": rows}}}."""
     if daily_rows is None:
         return {}
     if not isinstance(daily_rows, (list, tuple)):
@@ -154,12 +188,16 @@ def _index_daily(daily_rows):
             d = date.fromisoformat(day.strip()[:10])
         except ValueError:
             continue
-        slot = idx.setdefault(page, {}).setdefault(d, {"i": 0.0, "c": 0.0, "p": 0.0, "n": 0})
+        slot = idx.setdefault(page, {}).setdefault(
+            d, {"i": 0.0, "c": 0.0, "p": 0.0, "pw": 0.0, "n": 0}
+        )
         imp = _num(row.get("impressions"))
-        pos = _num(row.get("position"))
+        pos = _pos_num(row.get("position"))
         slot["i"] += imp
         slot["c"] += _num(row.get("clicks"))
-        slot["p"] += pos * imp
+        if pos is not None and imp > 0:
+            slot["p"] += pos * imp
+            slot["pw"] += imp
         slot["n"] += 1
     return idx
 
@@ -174,31 +212,36 @@ def _lookup(idx, url):
     return {}
 
 
-def _avg_window(daymap, lo, hi):
-    """Per-day means over the observed days inside [lo, hi]; position is impression-weighted."""
+def _avg_window(daymap, lo, hi, full_days):
+    """Per-day means over the FULL [lo, hi] period; missing days are zeroes. Position is impression-weighted."""
+    if full_days <= 0:
+        full_days = 1
     days = [d for d in daymap if lo <= d <= hi]
-    if not days:
-        return {"days": 0, "impr": None, "clicks": None, "position": None}
-    impr = sum(daymap[d]["i"] for d in days)
-    clicks = sum(daymap[d]["c"] for d in days)
-    posw = sum(daymap[d]["p"] for d in days)
+    impr_sum = sum(daymap[d]["i"] for d in days)
+    clicks_sum = sum(daymap[d]["c"] for d in days)
+    pos_sum = sum(daymap[d]["p"] for d in days)
+    pos_weight = sum(daymap[d]["pw"] for d in days)
     return {
         "days": len(days),
-        "impr": impr / len(days),
-        "clicks": clicks / len(days),
-        "position": (posw / impr) if impr > 0 else None,
+        "impr": impr_sum / full_days,
+        "clicks": clicks_sum / full_days,
+        "position": (pos_sum / pos_weight) if pos_weight > 0 else None,
     }
 
 
 def _windows(windows):
+    if windows is None:
+        windows = (14, 28, 56)
+    if not isinstance(windows, (list, tuple)):
+        raise ToolError("windows must be a list or tuple of positive integers")
     out = []
-    for w in list(windows or (14, 28, 56))[:MAX_WINDOWS]:
-        try:
-            wi = int(_num(w, 0))
-        except (TypeError, ValueError):
-            continue
-        if wi > 0 and wi not in out:
-            out.append(wi)
+    for w in list(windows)[:MAX_WINDOWS]:
+        if isinstance(w, bool) or not isinstance(w, int):
+            raise ToolError("windows must contain only positive integers")
+        if w <= 0:
+            raise ToolError("windows must contain only positive integers")
+        if w not in out:
+            out.append(w)
     return out or [14, 28, 56]
 
 
@@ -213,10 +256,15 @@ def measure(pieces, daily_rows, today, windows=(14, 28, 56), baseline_days=BASE_
     wins = _windows(windows)
     idx = _index_daily(daily_rows)
     out = []
+    seen_ids = set()
     for piece in list(pieces or [])[:MAX_PIECES]:
         if not isinstance(piece, dict):
             continue
         pid = _one_line(piece.get("id") or "", 120)
+        if pid:
+            if pid in seen_ids:
+                continue
+            seen_ids.add(pid)
         url = _one_line(piece.get("url") or "", 400)
         content_type = _one_line(piece.get("content_type") or "unknown", 60)
         query_class = _one_line(piece.get("query_class") or "unknown", 60)
@@ -225,10 +273,10 @@ def measure(pieces, daily_rows, today, windows=(14, 28, 56), baseline_days=BASE_
         except ToolError:
             continue
         daymap = _lookup(idx, url)
-        before = _avg_window(daymap, pub - timedelta(days=base_days), pub - timedelta(days=1))
+        before = _avg_window(daymap, pub - timedelta(days=base_days), pub - timedelta(days=1), base_days)
         for w in wins:
             after_end = pub + timedelta(days=w)
-            after = _avg_window(daymap, pub + timedelta(days=1), after_end)
+            after = _avg_window(daymap, pub + timedelta(days=1), after_end, w)
             row = {
                 "id": pid,
                 "url": url,
@@ -250,8 +298,8 @@ def measure(pieces, daily_rows, today, windows=(14, 28, 56), baseline_days=BASE_
             }
             if t < after_end:
                 row["status"] = "pending"
-            elif before["days"] < MIN_BASELINE_DAYS or before["impr"] is None:
-                row["status"] = "no_data"
+            elif before["days"] < MIN_BASELINE_DAYS or before["impr"] <= 0 or after["days"] == 0:
+                row["status"] = "insufficient_data"
             else:
                 row["status"] = "ok"
                 row["impr_before"] = _r6(before["impr"])
@@ -278,7 +326,7 @@ def scoreboard(rows, window=28):
         rows = []
     if not isinstance(rows, (list, tuple)):
         raise ToolError("rows must be a list of measure() rows")
-    for row in list(rows)[:MAX_ROWS]:
+    for pos, row in enumerate(list(rows)[:MAX_ROWS]):
         if not isinstance(row, dict):
             continue
         if row.get("status") != "ok":
@@ -286,7 +334,8 @@ def scoreboard(rows, window=28):
         change = row.get("impr_change")
         if isinstance(change, bool) or not isinstance(change, (int, float)):
             continue
-        if _num(change, None) is None:
+        change_num = _num(change, None)
+        if change_num is None:
             continue
         try:
             row_window = int(_num(row.get("window"), 0))
@@ -298,17 +347,30 @@ def scoreboard(rows, window=28):
         if not isinstance(group, str) or not group.strip():
             group = f"{_one_line(row.get('content_type') or 'unknown', 60)}|" \
                     f"{_one_line(row.get('query_class') or 'unknown', 60)}"
-        groups.setdefault(_one_line(group, 120), []).append((_one_line(row.get("id") or "", 80), float(change)))
+        group = _one_line(group, 120)
+        pid = _one_line(row.get("id") or "", 80)
+        key = pid if pid else f"__anonymous_{pos}"
+        bucket = groups.setdefault(group, {"entries": {}, "order": []})
+        if key in bucket["entries"]:
+            continue
+        bucket["entries"][key] = (pid, float(change_num))
+        bucket["order"].append(key)
     out = []
-    for group, items in list(groups.items())[:MAX_BOARD]:
+    for group, bucket in list(groups.items())[:MAX_BOARD]:
+        items = [bucket["entries"][key] for key in bucket["order"]]
         changes = sorted(c for _, c in items)
-        ids = [pid for pid, _ in items if pid][:50]
+        ids = []
+        seen = set()
+        for pid, _change_value in items:
+            if pid and pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
         out.append({
             "group": group,
             "n": len(items),
             "median_impr_change": round(statistics.median(changes), 6),
             "improved_share": round(sum(1 for c in changes if c > 0) / len(changes), 6),
-            "ids": ids,
+            "ids": ids[:50],
         })
     out.sort(key=lambda r: (-r["n"], r["group"]))
     return out
@@ -320,6 +382,17 @@ def scoreboard(rows, window=28):
 def _sidecar_path(path):
     base, _ext = os.path.splitext(path)
     return base + ".suppressed.json"
+
+
+def _has_learned_header(text):
+    return LEARNED_HEADER in text
+
+
+def _has_tagged_line(text):
+    for line in text[:MAX_TEXT].splitlines():
+        if line.strip().startswith("- [L-"):
+            return True
+    return False
 
 
 def _split_learned(text):
@@ -337,13 +410,11 @@ def _split_learned(text):
 
 
 def _sections(raw):
-    """The two sections of LESSONS.md (operator notes first), as text."""
-    start = raw.find(OPERATOR_HEADER)
-    if start < 0:
-        start = raw.find(LEARNED_HEADER)
-    if start < 0:
+    """The two sections of LESSONS.md in file order, as text."""
+    positions = [p for p in (raw.find(OPERATOR_HEADER), raw.find(LEARNED_HEADER)) if p >= 0]
+    if not positions:
         return ""
-    return raw[start:]
+    return raw[min(positions):]
 
 
 def _learned_lines(body):
@@ -360,6 +431,16 @@ def _learned_lines(body):
         if len(out) >= 500:
             break
     return out
+
+
+def _body_tail(body):
+    """Non-tagged text after the Learned header, preserved byte-for-byte (except tagged lines are removed)."""
+    out = []
+    for line in body[:MAX_TEXT].splitlines(keepends=True):
+        if line.strip().startswith("- [L-"):
+            continue
+        out.append(line)
+    return "".join(out)
 
 
 def _parse_line(line):
@@ -400,46 +481,95 @@ def _board_rows(board, today_iso):
     out = []
     for row in list(board)[:MAX_BOARD]:
         if not isinstance(row, dict):
+            raise ToolError("each scoreboard row must be an object")
+        status = row.get("status")
+        if status not in (None, "ok"):
+            # pending, insufficient_data and legacy no_data never become lessons.
             continue
-        group = _one_line(row.get("group") or "", 120)
+
+        group_value = row.get("group")
+        if not isinstance(group_value, str):
+            raise ToolError("scoreboard row group must be a string")
+        group = _one_line(group_value, 120)
         if not group or "|" not in group:
-            continue
-        n = int(_num(row.get("n"), 0))
-        share = _num(row.get("improved_share"), 0.0)
+            raise ToolError("scoreboard row group must look like 'content_type|query_class'")
+
+        n_value = row.get("n", 0)
+        if isinstance(n_value, bool) or not isinstance(n_value, int):
+            raise ToolError("scoreboard row n must be an integer")
+        if n_value < 0:
+            raise ToolError("scoreboard row n must not be negative")
+        n = n_value
+
+        share_value = row.get("improved_share", 0.0)
+        if isinstance(share_value, bool) or not isinstance(share_value, (int, float)):
+            raise ToolError("scoreboard row improved_share must be a number")
+        share = _num(share_value, 0.0)
         share = 0.0 if share < 0 else (1.0 if share > 1 else share)
-        ids = [_one_line(i, 80) for i in (row.get("ids") or []) if isinstance(i, str)]
+
+        ids_value = row.get("ids", [])
+        if ids_value is None:
+            ids_value = []
+        if not isinstance(ids_value, (list, tuple)):
+            raise ToolError("scoreboard row ids must be a list of strings")
+        ids = []
+        for value in ids_value:
+            if not isinstance(value, str):
+                raise ToolError("scoreboard row ids must be a list of strings")
+            item = _one_line(value, 80)
+            if item:
+                ids.append(item)
+
+        window_value = row.get("window", 28)
+        if isinstance(window_value, bool) or not isinstance(window_value, int):
+            raise ToolError("scoreboard row window must be an integer")
+        if window_value <= 0:
+            raise ToolError("scoreboard row window must be positive")
+
+        change_value = row.get("median_impr_change", 0.0)
+        if isinstance(change_value, bool) or not isinstance(change_value, (int, float)):
+            raise ToolError("scoreboard row median_impr_change must be a number")
+        change = _num(change_value, 0.0)
+
         out.append({
             "group": group,
             "tag": _tag_for(group),
             "n": n,
-            "change": _num(row.get("median_impr_change"), 0.0),
+            "change": change,
             "improved": int(round(share * n)),
-            "window": int(_num(row.get("window"), 28)) or 28,
-            "ids": [i for i in ids if i],
+            "window": window_value,
+            "ids": ids,
         })
     return out
 
 
 def _read_state(path):
+    """(state, status) where status is ok/missing/unreadable; used for fail-safe sidecar checks."""
     state = {"suppressed": [], "known": []}
     try:
-        with open(_sidecar_path(path), "r", encoding="utf-8", errors="replace") as fh:
-            raw = fh.read(MAX_TEXT)
+        with open(_sidecar_path(path), "rb") as fh:
+            raw_bytes = fh.read(MAX_TEXT + 1)
     except FileNotFoundError:
-        return state
+        return state, "missing"
     except OSError:
-        return state
+        return state, "unreadable"
+    if len(raw_bytes) > MAX_TEXT:
+        return state, "unreadable"
+    try:
+        raw = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return state, "unreadable"
     try:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
-        return state
+        return state, "unreadable"
     if not isinstance(parsed, dict):
-        return state
+        return state, "unreadable"
     for key in ("suppressed", "known"):
         values = parsed.get(key)
         if isinstance(values, list):
             state[key] = [v for v in values if isinstance(v, str) and len(v) <= 40][:500]
-    return state
+    return state, "ok"
 
 
 def _atomic_write(path, text):
@@ -464,27 +594,48 @@ def _atomic_write(path, text):
     return path
 
 
-def update_lessons(path, board, today, min_n=MIN_N, max_lines=MAX_LINES):
+def update_lessons(path, board, today, min_n=MIN_N, max_lines=MAX_LINES, base_dir=None):
     """Rewrite the Learned section of LESSONS.md from a scoreboard (operator notes untouched)."""
-    p = _abs(path)
+    p = _abs(path, base_dir)
     t = _as_date(today, "today")
     today_iso = t.isoformat()
-    n_min = max(1, int(_num(min_n, MIN_N)))
+
+    if isinstance(min_n, bool) or not isinstance(min_n, int):
+        raise ToolError("min_n must be an integer >= 3")
+    if min_n < MIN_N:
+        raise ToolError("min_n must be at least 3")
+    n_min = min_n
     n_max = max(1, min(int(_num(max_lines, MAX_LINES)), 200))
 
+    existed = False
     try:
-        with open(p, "r", encoding="utf-8", errors="replace") as fh:
-            existing_text = fh.read(MAX_TEXT)
+        with open(p, "rb") as fh:
+            raw_bytes = fh.read(MAX_BYTES + 1)
+        existed = True
     except FileNotFoundError:
-        existing_text = _TEMPLATE
+        raw_bytes = b""
     except OSError as exc:
         raise ToolError(f"cannot read {os.path.basename(p)}: {exc}") from None
+
+    if existed and len(raw_bytes) > MAX_BYTES:
+        return _refused_result()
+
+    existing_text = raw_bytes.decode("utf-8", errors="replace") if existed else _TEMPLATE
+
+    has_header = _has_learned_header(existing_text)
+    has_tag = _has_tagged_line(existing_text)
+    state, side_status = _read_state(p)
+
+    if existed:
+        if has_tag and not has_header:
+            return _refused_result()
+        if (has_header or has_tag) and side_status != "ok":
+            return _refused_result()
 
     head, body = _split_learned(existing_text)
     existing = _learned_lines(body)
     existing_tags = {tag for tag, _line in existing}
 
-    state = _read_state(p)
     suppressed = list(dict.fromkeys(state["suppressed"]))
     known = state["known"]
     for tag in known:
@@ -527,16 +678,10 @@ def update_lessons(path, board, today, min_n=MIN_N, max_lines=MAX_LINES):
             added.remove(tag)
             added_set.discard(tag)
 
-    text = head + "".join(line + "\n" for _tag, line in entries)
-    while entries and len(text.encode("utf-8")) > MAX_BYTES:
-        tag, _line = entries.pop()
-        text = head + "".join(l + "\n" for _t, l in entries)
-        dropped.append(tag)
-        if tag in kept:
-            kept.remove(tag)
-        if tag in added_set:
-            added.remove(tag)
-            added_set.discard(tag)
+    tail = _body_tail(body)
+    text = head + "".join(line + "\n" for _tag, line in entries) + tail
+    if len(text.encode("utf-8")) > MAX_BYTES:
+        return _refused_result()
 
     _atomic_write(p, text)
     state_out = {
@@ -548,18 +693,26 @@ def update_lessons(path, board, today, min_n=MIN_N, max_lines=MAX_LINES):
     return {"added": added, "kept": kept, "dropped": list(dict.fromkeys(dropped))}
 
 
-def read_lessons(path):
+def read_lessons(path, base_dir=None):
     """The two LESSONS.md sections (<=4000 chars) and the planner weights they imply."""
-    out = {"text": "", "weights": {}}
-    p = _abs(path)
+    out = {"text": "", "weights": {}, "truncated": False}
+    p = _abs(path, base_dir)
     try:
-        with open(p, "r", encoding="utf-8", errors="replace") as fh:
-            raw = fh.read(MAX_TEXT)
+        with open(p, "rb") as fh:
+            raw_bytes = fh.read(MAX_TEXT + 1)
     except FileNotFoundError:
         return out
     except OSError as exc:
-        raise ToolError(f"cannot read {os.path.basename(p)}: {exc}") from None
-    out["text"] = _sections(raw)[:READ_MAX]
+        raise ToolError(f"cannot read {os.path.basename(path)}: {exc}") from None
+
+    truncated = len(raw_bytes) > MAX_TEXT
+    raw = raw_bytes[:MAX_TEXT].decode("utf-8", errors="replace")
+    sections = _sections(raw)
+    out["text"] = sections[:READ_MAX]
+    if len(sections) > READ_MAX:
+        truncated = True
+    out["truncated"] = truncated
+
     _head, body = _split_learned(raw)
     weights = {}
     for _tag, line in _learned_lines(body):
@@ -648,9 +801,10 @@ def selftest() -> int:
     n = _ck(n, p2["impr_before"] is None, "pending rows carry no numbers")
     n = _ck(n, _row(out, "p2", 28)["status"] == "pending", "p2 window 28 must be pending")
     p3 = _row(out, "p3", 14)
-    n = _ck(n, p3["status"] == "no_data", "p3 must be no_data (no baseline rows)")
+    n = _ck(n, p3["status"] == "insufficient_data", "p3 must be insufficient_data (no baseline rows)")
     n = _ck(n, p3["baseline_days"] == 0, "p3 baseline day count should be 0")
-    n = _ck(n, _row(out, "p4", 56)["status"] == "no_data", "p4 (old piece, no rows) must be no_data")
+    n = _ck(n, _row(out, "p4", 56)["status"] == "insufficient_data",
+            "p4 (old piece, no rows) must be insufficient_data")
     n = _ck(n, all(r["id"] != "bad" for r in out), "an invalid published_day is skipped, not guessed")
     n = _ck(n, len(measure([], [], today)) == 0, "empty input gives no rows")
     try:
@@ -658,6 +812,103 @@ def selftest() -> int:
         n = _ck(n, False, "a bad today should raise ToolError")
     except ToolError:
         n = _ck(n, True, "a bad today raises ToolError")
+
+    # M9a: sparse after windows divide by the full window length.
+    sparse_url = "https://example.com/sparse/"
+    sparse_rows = [
+        {"day": (pub_a - timedelta(days=i)).isoformat(), "page": sparse_url,
+         "impressions": 10, "clicks": 1, "position": 5}
+        for i in range(1, 29)
+    ]
+    sparse_rows.append({"day": (pub_a + timedelta(days=1)).isoformat(), "page": sparse_url,
+                        "impressions": 10, "clicks": 0, "position": 5})
+    sparse = measure([{"id": "s1", "url": sparse_url, "published_day": "2026-01-01"}],
+                     sparse_rows, today, windows=(14,))[0]
+    n = _ck(n, sparse["status"] == "ok", "sparse after window is still ok")
+    n = _ck(n, _close(sparse["impr_after"], 10 / 14), "sparse after impressions/day divides by 14")
+    n = _ck(n, sparse["days"] == 1, "shorter observed-day count is still reported")
+
+    # M9b: insufficient_data cases have no numbers.
+    zero_url = "https://example.com/zero/"
+    zero_rows = [
+        {"day": (pub_a - timedelta(days=i)).isoformat(), "page": zero_url,
+         "impressions": 0, "clicks": 0, "position": 5}
+        for i in range(1, 29)
+    ]
+    zero_rows.append({"day": (pub_a + timedelta(days=1)).isoformat(), "page": zero_url,
+                      "impressions": 5, "clicks": 1, "position": 4})
+    zr = measure([{"id": "z1", "url": zero_url, "published_day": "2026-01-01"}],
+                 zero_rows, today, windows=(14,))[0]
+    n = _ck(n, zr["status"] == "insufficient_data", "zero baseline impressions -> insufficient_data")
+    n = _ck(n, zr["impr_before"] is None and zr["impr_change"] is None,
+            "insufficient_data rows carry no numbers")
+
+    no_after_url = "https://example.com/noafter/"
+    no_after_rows = [
+        {"day": (pub_a - timedelta(days=i)).isoformat(), "page": no_after_url,
+         "impressions": 10, "clicks": 1, "position": 5}
+        for i in range(1, 29)
+    ]
+    na = measure([{"id": "n1", "url": no_after_url, "published_day": "2026-01-01"}],
+                 no_after_rows, today, windows=(14,))[0]
+    n = _ck(n, na["status"] == "insufficient_data", "no after rows -> insufficient_data")
+    n = _ck(n, na["days"] == 0 and na["impr_after"] is None, "no after rows produce no after numbers")
+
+    # M9c: position ignores rows without a numeric position and is never wrongly 0.0.
+    pos_url = "https://example.com/pos/"
+    pos_rows = []
+    for i in range(1, 29):
+        pos_row = {"day": (pub_a - timedelta(days=i)).isoformat(), "page": pos_url,
+                   "impressions": 10, "clicks": 1}
+        if i % 2 == 0:
+            pos_row["position"] = 6
+        pos_rows.append(pos_row)
+    for i in range(1, 15):
+        pos_rows.append({"day": (pub_a + timedelta(days=i)).isoformat(), "page": pos_url,
+                         "impressions": 10, "clicks": 1, "position": 4})
+    pr = measure([{"id": "q1", "url": pos_url, "published_day": "2026-01-01"}],
+                 pos_rows, today, windows=(14,))[0]
+    n = _ck(n, _close(pr["pos_before"], 6.0), "position ignores rows without numeric position")
+    n = _ck(n, _close(pr["pos_after"], 4.0), "after position is impression-weighted")
+
+    nopos_url = "https://example.com/nopos/"
+    nopos_rows = [
+        {"day": (pub_a - timedelta(days=i)).isoformat(), "page": nopos_url,
+         "impressions": 10, "clicks": 1}
+        for i in range(1, 29)
+    ]
+    nopos_rows += [
+        {"day": (pub_a + timedelta(days=i)).isoformat(), "page": nopos_url,
+         "impressions": 10, "clicks": 1}
+        for i in range(1, 15)
+    ]
+    npr = measure([{"id": "q2", "url": nopos_url, "published_day": "2026-01-01"}],
+                  nopos_rows, today, windows=(14,))[0]
+    n = _ck(n, npr["pos_before"] is None and npr["pos_after"] is None and npr["pos_change"] is None,
+            "no numeric positions yields None, never 0.0")
+
+    # M9d: duplicate piece ids first wins in measure().
+    dup_pieces = [
+        {"id": "dup", "url": url_a, "content_type": "guide", "query_class": "question",
+         "published_day": "2026-01-01"},
+        {"id": "dup", "url": url_b, "content_type": "guide", "query_class": "question",
+         "published_day": "2026-03-01"},
+    ]
+    dup_out = measure(dup_pieces, rows, today, windows=(14,))
+    n = _ck(n, len(dup_out) == 1 and dup_out[0]["url"] == url_a,
+            "duplicate piece ids keep the first piece")
+
+    # M10b: windows must be a list/tuple of ints.
+    try:
+        measure([], [], today, windows="28")
+        n = _ck(n, False, "windows string should raise ToolError")
+    except ToolError:
+        n = _ck(n, True, "windows string raises ToolError")
+    try:
+        measure([], [], today, windows=(14, "28"))
+        n = _ck(n, False, "non-int windows item should raise ToolError")
+    except ToolError:
+        n = _ck(n, True, "non-int windows item raises ToolError")
 
     ok_rows = [r for r in out if r["status"] == "ok"]
     board = scoreboard(ok_rows, window=14)
@@ -668,6 +919,26 @@ def selftest() -> int:
     n = _ck(n, _close(board[0]["improved_share"], 1.0), "improved share 1/1")
     n = _ck(n, board[0]["ids"] == ["p1"], "ids carry the piece id")
     n = _ck(n, scoreboard(ok_rows, window=99) == [], "no rows for an unmeasured window")
+
+    # M9d: scoreboard counts distinct ids, first row wins for a duplicated id.
+    dup_rows = [
+        {"id": "p1", "content_type": "guide", "query_class": "question", "window": 28,
+         "status": "ok", "impr_change": 0.9}
+    ] * 3
+    bdup = scoreboard(dup_rows, 28)
+    n = _ck(n, len(bdup) == 1 and bdup[0]["n"] == 1 and bdup[0]["ids"] == ["p1"],
+            "scoreboard counts distinct piece ids")
+    n = _ck(n, _close(bdup[0]["median_impr_change"], 0.9),
+            "duplicate scoreboard rows do not skew the median")
+
+    sb_no = scoreboard([
+        {"id": "a", "content_type": "g", "query_class": "q", "window": 28,
+         "status": "no_data", "impr_change": 0.9},
+        {"id": "b", "content_type": "g", "query_class": "q", "window": 28,
+         "status": "insufficient_data", "impr_change": 0.8},
+    ], 28)
+    n = _ck(n, sb_no == [], "no_data/insufficient_data never feed the scoreboard")
+
     synth = [
         {"id": "x1", "content_type": "guide", "query_class": "question", "window": 28, "status": "ok",
          "impr_change": 0.10},
@@ -721,14 +992,28 @@ def selftest() -> int:
         n = _ck(n, op_text in raw2, "operator notes preserved byte-for-byte")
         n = _ck(n, len(_learned_lines(_split_learned(raw2)[1])) == 1, "the learned line is rewritten")
 
+        # LESSONS d: non-tagged text after the Learned header survives, after generated lines.
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n## Operator notes\n\nkeep this after learned\n")
+        update_lessons(path, sb, today, min_n=3, max_lines=20)
+        raw_tail = open(path, encoding="utf-8").read()
+        n = _ck(n, "keep this after learned" in raw_tail, "non-tagged text after Learned survives")
+        tag_pos = raw_tail.find(f"- [{_tag_for('guide|question')}]")
+        note_pos = raw_tail.find("keep this after learned")
+        n = _ck(n, 0 <= tag_pos < note_pos, "generated tagged lines come before preserved notes")
+
         # min_n respected
         small = [{"group": "faq|striking", "n": 2, "median_impr_change": 0.4, "improved_share": 1.0,
                   "ids": ["y1", "y2"]}]
         res = update_lessons(path, small, today, min_n=3, max_lines=20)
-        n = _ck(n, "faq|striking" not in open(path, encoding="utf-8").read(), "n < min_n never becomes a lesson")
+        n = _ck(n, "faq|striking" not in open(path, encoding="utf-8").read(),
+                "n < min_n never becomes a lesson")
         n = _ck(n, _tag_for("faq|striking") in res["dropped"], "below-min_n groups are reported as dropped")
-        res = update_lessons(path, small, today, min_n=2, max_lines=20)
-        n = _ck(n, "faq|striking" in open(path, encoding="utf-8").read(), "n >= min_n becomes a lesson")
+        try:
+            update_lessons(path, small, today, min_n=2, max_lines=20)
+            n = _ck(n, False, "min_n below 3 should raise ToolError")
+        except ToolError:
+            n = _ck(n, True, "min_n below 3 raises ToolError")
 
         # a deleted learned line is suppressed and never re-added
         tag = _tag_for("guide|question")
@@ -763,14 +1048,58 @@ def selftest() -> int:
                 "max_lines caps the learned section")
         n = _ck(n, len(res["dropped"]) == 4, "capped groups are reported as dropped")
 
-        # file size cap
+        # LESSONS f: no silent truncation. Oversized existing file is refused, not rewritten.
         path4 = os.path.join(tmp, "BIG.md")
+        big_note = "n" * (MAX_BYTES + 100)
         with open(path4, "w", encoding="utf-8") as fh:
-            fh.write("# LESSONS\n\n## Operator notes\n\n" + ("n" * 20100) + "\n\n" + LEARNED_HEADER + "\n")
-        update_lessons(path4, many, today, min_n=3, max_lines=20)
-        size = os.path.getsize(path4)
-        n = _ck(n, size <= MAX_BYTES, "LESSONS.md never exceeds 20 KB")
-        n = _ck(n, "n" * 20100 in open(path4, encoding="utf-8").read(), "operator notes survive the size cap")
+            fh.write("# LESSONS\n\n## Operator notes\n\n" + big_note + "\n\n" + LEARNED_HEADER + "\n")
+        before4 = open(path4, "rb").read()
+        res = update_lessons(path4, many, today, min_n=3, max_lines=20)
+        n = _ck(n, res.get("refused") == _REFUSED_REASON, "oversized existing LESSONS.md is refused")
+        n = _ck(n, res["added"] == [] and res["kept"] == [] and res["dropped"] == [],
+                "refused rewrite reports no changes")
+        n = _ck(n, open(path4, "rb").read() == before4,
+                "refused rewrite leaves the file byte-for-byte unchanged")
+        n = _ck(n, os.path.getsize(path4) > MAX_BYTES, "oversized file is not silently cut down")
+
+        # LESSONS f: a rewrite that would exceed MAX_BYTES is refused too.
+        path4b = os.path.join(tmp, "BIG2.md")
+        update_lessons(path4b, [], today, min_n=3, max_lines=20)
+        base4b = open(path4b, "rb").read()
+        pad_len = MAX_BYTES - len(base4b) - 10
+        if pad_len > 0:
+            with open(path4b, "ab") as fh:
+                fh.write(("\n" + "p" * pad_len + "\n").encode("utf-8"))
+        before4b = open(path4b, "rb").read()
+        n = _ck(n, len(before4b) <= MAX_BYTES, "setup keeps the existing file under the cap")
+        res = update_lessons(path4b, many, today, min_n=3, max_lines=20)
+        n = _ck(n, res.get("refused") == _REFUSED_REASON, "a rewrite that would exceed the cap is refused")
+        n = _ck(n, open(path4b, "rb").read() == before4b, "size-refused rewrite leaves the file unchanged")
+
+        # LESSONS e: lost/corrupt sidecar fails safe.
+        path_safe = os.path.join(tmp, "SAFE.md")
+        update_lessons(path_safe, sb, today, min_n=3, max_lines=20)
+        safe_before = open(path_safe, "rb").read()
+        os.remove(_sidecar_path(path_safe))
+        res = update_lessons(path_safe, sb, today, min_n=3, max_lines=20)
+        n = _ck(n, res.get("refused") == _REFUSED_REASON,
+                "missing sidecar with an existing Learned section is refused")
+        n = _ck(n, open(path_safe, "rb").read() == safe_before, "missing sidecar refusal writes nothing")
+        with open(_sidecar_path(path_safe), "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        res = update_lessons(path_safe, sb, today, min_n=3, max_lines=20)
+        n = _ck(n, res.get("refused") == _REFUSED_REASON, "corrupt sidecar is refused")
+        n = _ck(n, open(path_safe, "rb").read() == safe_before, "corrupt sidecar refusal writes nothing")
+
+        path_renamed = os.path.join(tmp, "RENAMED.md")
+        renamed = "# LESSONS\n\n## Learned\n\n- [L-aaaaaa] guide|q: custom\n"
+        with open(path_renamed, "w", encoding="utf-8") as fh:
+            fh.write(renamed)
+        res = update_lessons(path_renamed, sb, today, min_n=3, max_lines=20)
+        n = _ck(n, res.get("refused") == _REFUSED_REASON,
+                "renamed Learned header with tagged lines is refused")
+        n = _ck(n, open(path_renamed, encoding="utf-8").read() == renamed,
+                "renamed header refusal writes nothing")
 
         # read_lessons
         path5 = os.path.join(tmp, "READ.md")
@@ -788,9 +1117,20 @@ def selftest() -> int:
         n = _ck(n, read["weights"].get("guide|question") == 1.5, "weight clamps at 1.5")
         n = _ck(n, read["weights"].get("faq|striking") == 0.5, "weight clamps at 0.5")
         n = _ck(n, "guide|thin_page" not in read["weights"], "groups with n < 3 get no weight")
-        n = _ck(n, OPERATOR_HEADER in read["text"] and LEARNED_HEADER in read["text"], "text carries both sections")
+        n = _ck(n, OPERATOR_HEADER in read["text"] and LEARNED_HEADER in read["text"],
+                "text carries both sections")
         n = _ck(n, len(read["text"]) <= READ_MAX, "text is capped at 4000 chars")
-        n = _ck(n, read_lessons(os.path.join(tmp, "MISSING.md")) == {"text": "", "weights": {}},
+        n = _ck(n, read["truncated"] is False, "small read is not marked truncated")
+
+        path_tr = os.path.join(tmp, "TRUNC.md")
+        with open(path_tr, "w", encoding="utf-8") as fh:
+            fh.write("## Operator notes\n\n" + ("z" * (READ_MAX + 50)) + "\n\n" + LEARNED_HEADER + "\n")
+        read_tr = read_lessons(path_tr)
+        n = _ck(n, len(read_tr["text"]) == READ_MAX, "read_lessons caps the prompt text")
+        n = _ck(n, read_tr.get("truncated") is True, "read_lessons reports truncation")
+
+        n = _ck(n, read_lessons(os.path.join(tmp, "MISSING.md")) ==
+                {"text": "", "weights": {}, "truncated": False},
                 "a missing file reads as empty")
         w = read_lessons(path2)["weights"]
         n = _ck(n, w.get("guide|question") == 1.1, "weight = 1 + median change (clamped)")
@@ -800,5 +1140,48 @@ def selftest() -> int:
             n = _ck(n, False, "an empty path should raise ToolError")
         except ToolError:
             n = _ck(n, True, "an empty path raises ToolError")
+
+        # M10a: malformed board rows raise ToolError, never TypeError.
+        bad_path = os.path.join(tmp, "BAD.md")
+        try:
+            update_lessons(bad_path, [{"group": "a|b", "n": 5, "improved_share": 0.5, "ids": 3}], today)
+            n = _ck(n, False, "non-list ids should raise ToolError")
+        except ToolError:
+            n = _ck(n, True, "non-list ids raises ToolError")
+        except Exception as exc:
+            n = _ck(n, False, f"non-list ids raised {type(exc).__name__}, not ToolError")
+        try:
+            update_lessons(bad_path, [{"group": "a|b", "n": "5", "improved_share": 0.5, "ids": []}], today)
+            n = _ck(n, False, "non-int n should raise ToolError")
+        except ToolError:
+            n = _ck(n, True, "non-int n raises ToolError")
+        except Exception as exc:
+            n = _ck(n, False, f"non-int n raised {type(exc).__name__}, not ToolError")
+        try:
+            update_lessons(bad_path, [{"group": "a|b", "n": 5, "improved_share": 0.5,
+                                       "ids": ["ok", 7]}], today)
+            n = _ck(n, False, "non-string id should raise ToolError")
+        except ToolError:
+            n = _ck(n, True, "non-string id raises ToolError")
+        except Exception as exc:
+            n = _ck(n, False, f"non-string id raised {type(exc).__name__}, not ToolError")
+
+        # LESSONS g: base_dir containment.
+        base = os.path.join(tmp, "base")
+        os.makedirs(base)
+        inside = os.path.join(base, "LESSONS.md")
+        outside = os.path.join(base, "..", "escape.md")
+        try:
+            update_lessons(outside, [], today, base_dir=base)
+            n = _ck(n, False, "update_lessons path outside base_dir should raise ToolError")
+        except ToolError:
+            n = _ck(n, True, "update_lessons rejects a path outside base_dir")
+        try:
+            read_lessons(outside, base_dir=base)
+            n = _ck(n, False, "read_lessons path outside base_dir should raise ToolError")
+        except ToolError:
+            n = _ck(n, True, "read_lessons rejects a path outside base_dir")
+        update_lessons(inside, [], today, base_dir=base)
+        n = _ck(n, os.path.exists(inside), "a path inside base_dir is allowed")
 
     return n

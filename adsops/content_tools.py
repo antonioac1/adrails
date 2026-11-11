@@ -290,7 +290,7 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, http=None, run_cmd=None
         profile = facts_mod.load_profile(_profile_path(cfg, args.get("site")))
         if not os.path.exists(profile["_lessons_path"]):
             return {"path": profile["_lessons_path"], "exists": False, "text": "", "weights": {}}
-        r = learn_mod.read_lessons(profile["_lessons_path"])
+        r = learn_mod.read_lessons(profile["_lessons_path"], base_dir=profile["_dir"])
         return {"path": profile["_lessons_path"], "exists": True, "text": r["text"], "weights": r["weights"]}
 
 

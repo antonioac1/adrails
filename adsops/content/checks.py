@@ -57,6 +57,7 @@ SUPERLATIVES = ("best", "#1", "number one", "leading", "top-rated", "top rated",
 
 # ── total helpers (never raise, never touch the outside world) ────────────────────────────────────────────────
 _SLUG_RE = re.compile(r"\A/[a-z0-9/-]{1,120}/\Z")
+_FILE_SLUG_RE = re.compile(r"\A/[a-z0-9/_-]{0,180}[a-z0-9_-]\.(?:html?|php|aspx?)\Z")   # QA minor: /blog/post.html
 _FENCE_RE = re.compile(r"```.*?```", re.S)
 _LINK_RE = re.compile(r"!?\[([^\]\n]{0,500})\]\(([^()\s]{0,2000})(?:\s+\"[^\"]{0,500}\")?\)")
 _LINK_TITLE_RE = re.compile(r"\]\([^()\s]{0,2000}\s+\"([^\"]{0,500})\"\)")
@@ -407,7 +408,7 @@ def _schema(draft, cfg, err):
     slug = _text(draft.get("slug"), 300).strip()
     if not slug:
         err("SCHEMA", "draft.slug is required (for example /guides/flat-fee/)")
-    elif ".." in slug or not _SLUG_RE.match(slug):
+    elif ".." in slug or "//" in slug or not (_SLUG_RE.match(slug) or (mode == "extend" and _FILE_SLUG_RE.match(slug))):
         err("SCHEMA", 'draft.slug "{}" must look like /lower/case/path/ (no dots, max 120 chars)'
             .format(_clip(slug, 80)))
     ctype = _text(draft.get("content_type"), 40).strip().lower()
