@@ -131,7 +131,11 @@ def _recheck(bundle_dir, man, profile, page_bytes, facts_text):
     res = checks_mod.run(draft, {"profile": profile, "facts_text": facts_text, "verified_quotes": quotes,
                                  "source_labels": [], "corpus": {}, "corpus_complete": True, "known_paths": [],
                                  "today": man.get("today")})
-    bad = sorted({e["code"] for e in res["errors"]} - _CONTEXT_CODES)
+    # round 2 (DeepSeek concern): a NEW page's THIN rule needs no context (it counts the draft's own words), so it is
+    # re-checked here; DUPLICATE/corpus/link/quote/live codes need the review-time corpus and fetches and stay bound
+    # to that review through the audit-chain digest.
+    ignore = _CONTEXT_CODES - ({"THIN"} if draft.get("mode") != "extend" else set())
+    bad = sorted({e["code"] for e in res["errors"]} - ignore)
     if bad:
         raise RailViolation("the content checks fail at publish time (%s); refusing" % ", ".join(bad))
 
@@ -604,7 +608,7 @@ def selftest() -> int:
                 "author": {"name": "Jane Doe", "url": "/team/jane/", "id": "https://example.com/team/jane/#person"},
                 "publish": {"target": "static", "dir": "site"}}
         draft = {"mode": "new", "slug": "/guides/flat-fee/", "title": "Flat fee guide", "description": "d" * 80,
-                 "content_type": "guide", "body_md": "Body text here.", "faq": [], "sources": [], "live_changes": [],
+                 "content_type": "guide", "body_md": "Owners who plan ahead stay calm during a vacancy and talk with tenants early. " * 70, "faq": [], "sources": [], "live_changes": [],
                  "internal_links": [], "jsonld": None}
         rv = {"verdict": "approve", "reviewer": {"model_answered": "openai/gpt-5", "family": "openai"}, "findings": [],
               "writer_family": "zhipu"}
@@ -785,6 +789,10 @@ def selftest() -> int:
                {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bbd"))
         refused(lambda: publish(db["path"], auto2, facts_text="", state_dir=state, chain=chain, now=lambda: T0 + 33 * 86400),
                 "content checks fail", "content checks are re-run at publish (untraced $5,000)")
+        th = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/thin-draft/", body_md="Too short to rank."), rv,
+               {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bth"))
+        refused(lambda: publish(th["path"], auto2, facts_text="", state_dir=state, chain=chain, now=lambda: T0 + 33 * 86400),
+                "THIN", "a thin NEW page is refused at publish (THIN is not context-dependent)")
         if had_hold:
             os.rename(hold_f + ".y", hold_f)
         # git publisher: new branch + one commit, never a push
