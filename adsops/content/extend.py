@@ -172,7 +172,7 @@ def merge_jsonld(blocks, faq, today):
             add = [q for q in questions if " ".join(q["name"].lower().split()) not in have]
             node["mainEntity"] = ents + add
             ops.append("modify node: append %d Question node(s) to the mainEntity of the FAQPage node%s in JSON-LD block %d"
-                       % (len(add), (" with @id %s" % _one(node["@id"], 120)) if node.get("@id") else "", bi + 1))
+                       % (len(add), (" with @id %s" % json.dumps(_one(node["@id"], 80))) if node.get("@id") else "", bi + 1))
         else:
             node = {"@type": "FAQPage", "mainEntity": questions}
             graph_block = next((b for b in after if isinstance(b, dict) and isinstance(b.get("@graph"), list)), None)
@@ -183,7 +183,7 @@ def merge_jsonld(blocks, faq, today):
             else:
                 after.append(dict({"@context": "https://schema.org"}, **node))
                 ops.append("add block: add one new <script type=\"application/ld+json\"> block (a FAQPage) after the "
-                           "existing ones (after the last existing block in page order)")
+                           "last existing block in page order")
     for bi, b in enumerate(after):
         for n in _nodes(b):
             if isinstance(n.get("dateModified"), str) and n["dateModified"] != today:   # typed values left alone
