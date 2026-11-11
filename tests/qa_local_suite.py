@@ -1,7 +1,7 @@
 """Integration QA for the local-business + Google LSA suite through the REAL server build (registration, prompts, the harden()
 wrapper: RBAC / audit chain), with the REAL GoogleAdsClient over a fake HTTP layer so URLs, GAQL and request bodies are exercised.
 Scenario: a new plumbing business with one LSA account. Run: PYTHONPATH=. python3 tests/qa_local_suite.py     the maintainers, 2026-11-06."""
-import json, os, sys, tempfile
+import json, os, re, sys, tempfile
 
 from adsops import auditchain, auth, config, tools
 from adsops.platforms import google_ads
