@@ -471,7 +471,7 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None, re
     return res
 
 
-def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=None, html=False):
+def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=None, html=False, chain=None):
     """Mandatory independent review of a saved draft; on approve, writes the approved bundle."""
     p = paths(profile)
     ws, rs, ed = chains
@@ -523,6 +523,9 @@ def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=No
             return res
     out = bundle_mod.write(p["bundles"], final, rec, final_check, srcs, profile, meta, html=html,
                            live=ctx.get("live_page"))
+    if chain is not None:                              # publish() only accepts bundles recorded here
+        from . import publish as publish_mod
+        publish_mod.record_bundle(chain, out["path"])
     res.update(ok=True, bundle=out["path"])
     return res
 
@@ -537,7 +540,7 @@ def _requote(d, refs, ctx):
     return errs
 
 
-def run_once(profile_path, io, *, candidate_id=None, html=False, audit_run=None, today=None):
+def run_once(profile_path, io, *, candidate_id=None, html=False, audit_run=None, today=None, chain=None):
     """One unattended pass (cron/systemd): plan -> draft -> review -> bundle for the top candidate. Never publishes."""
     profile, facts, chains = load(profile_path)
     p = paths(profile)
@@ -563,7 +566,7 @@ def run_once(profile_path, io, *, candidate_id=None, html=False, audit_run=None,
         row.update(candidate=cand["id"], draft=dres.get("draft_id"), draft_ok=dres["ok"])
         if dres["ok"]:
             rres = review_draft(profile, facts, chains, io, draft_id=dres["draft_id"], budget=budget, run_id=run_id,
-                                html=html)
+                                html=html, chain=chain)
             _log(p, dict(_slim(rres), at=io.now()))
             findings = (rres.get("review") or {}).get("findings") or []
             if rres.get("verdict") == "reject" and findings and int(profile.get("revision_rounds", 1)) >= 1:
@@ -578,7 +581,7 @@ def run_once(profile_path, io, *, candidate_id=None, html=False, audit_run=None,
                                first_review=rres.get("verdict"), first_findings=len(findings))
                     if dres2["ok"]:
                         rres = review_draft(profile, facts, chains, io, draft_id=dres2["draft_id"], budget=budget,
-                                            run_id=run_id, html=html)
+                                            run_id=run_id, html=html, chain=chain)
                         _log(p, dict(_slim(rres), at=io.now(), revision=1))
                     else:
                         rres = dict(rres, verdict="hold", hold_reasons=rres.get("hold_reasons", []) +

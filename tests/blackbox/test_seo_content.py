@@ -449,12 +449,13 @@ class ContentPipelineTests(unittest.TestCase):
         chain = auditchain.AuditChain(os.path.join(self.dir, "chain.jsonl"))
         q = approvals.ApprovalQueue(os.path.join(self.dir, "appr.jsonl"), b"k" * 32)
         state = pipeline.paths(prof)["state"]
+        FT = pipeline.facts_mod.load_facts(prof["_facts_path"])["text"]
         with self.assertRaises(RailViolation):
-            publish.publish(b, prof, state_dir=state, chain=chain, queue=q)
+            publish.publish(b, prof, state_dir=state, chain=chain, queue=q, facts_text=FT)
         q.decide(q.request(publish.plan_id_for(b, prof), "example.com", "publish")["approve_token"])
         # an "extend" bundle is never written by the static publisher: the site's own agent applies IMPLEMENT.md
         with self.assertRaises(RailViolation) as cm:
-            publish.publish(b, prof, state_dir=state, chain=chain, queue=q)
+            publish.publish(b, prof, state_dir=state, chain=chain, queue=q, facts_text=FT)
         self.assertIn("extends an existing page", str(cm.exception))
         rv0 = {"verdict": "approve", "reviewer": {"model_answered": "openai/gpt-5", "family": "openai"}, "findings": [],
                "writer_family": "zhipu"}
@@ -463,7 +464,10 @@ class ContentPipelineTests(unittest.TestCase):
                           {"bundle_id": "n1", "today": "2026-11-10", "writer_model": "glm-5.3",
                            "reviewer_model": "openai/gpt-5", "run_id": "t"})["path"]
         q.decide(q.request(publish.plan_id_for(bn, prof), "example.com", "publish")["approve_token"])
-        out = publish.publish(bn, prof, state_dir=state, chain=chain, queue=q)
+        with self.assertRaises(RailViolation):          # not recorded on the audit chain by a review
+            publish.publish(bn, prof, state_dir=state, chain=chain, queue=q, facts_text=FT)
+        publish.record_bundle(chain, bn)
+        out = publish.publish(bn, prof, state_dir=state, chain=chain, queue=q, facts_text=FT)
         self.assertTrue(out["ok"])
         self.assertTrue(out["files"][0].endswith("guides/brand-new/index.md"))
         self.assertEqual(chain.verify()["ok"], True)
@@ -479,11 +483,14 @@ class ContentPipelineTests(unittest.TestCase):
         b2 = bundle.write(os.path.join(self.dir, "bundles"), d2, rv, {"ok": True, "errors": [], "warnings": []}, {}, prof,
                           {"bundle_id": "x2", "today": "2026-11-10", "writer_model": "glm-5.3",
                            "reviewer_model": "openai/gpt-5", "run_id": "t"})["path"]
+        publish.record_bundle(chain, b2)
         with self.assertRaises(RailViolation) as cm:
-            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 404, "body": ""})
+            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 404, "body": ""},
+                            facts_text=FT)
         self.assertIn("HOLD", str(cm.exception))
         with self.assertRaises(RailViolation) as cm:
-            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 200, "body": "x"})
+            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 200, "body": "x"},
+                            facts_text=FT)
         self.assertIn("HOLD", str(cm.exception))
 
     def test_results_and_lessons_loop(self):

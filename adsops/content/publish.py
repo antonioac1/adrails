@@ -90,6 +90,58 @@ def plan_id_for(bundle_dir, profile=None):
     return "seo-content:" + h.hexdigest()[:32]
 
 
+def manifest_digest(bundle_dir):
+    with open(os.path.join(bundle_dir, "MANIFEST.json"), "rb") as f:
+        return "sha256:" + hashlib.sha256(f.read()).hexdigest()
+
+
+def record_bundle(chain, bundle_dir, actor="pipeline"):
+    """Write the approved bundle's MANIFEST digest into the audit chain when the bundle is created. publish() only
+    accepts bundles whose digest is on the chain (QA minor: an edited page.md + MANIFEST pair is refused)."""
+    man = _read_json(os.path.join(bundle_dir, "MANIFEST.json"))
+    return chain.append("content_bundle", {"bundle_id": man.get("bundle_id"), "manifest": manifest_digest(bundle_dir),
+                                           "site": man.get("site")}, actor=actor)
+
+
+def _on_chain(chain, digest):
+    v = chain.verify()
+    if not v.get("ok"):
+        raise RailViolation("the audit chain does not verify (%s); refusing to publish" % v.get("reason"))
+    return any((e.get("data") or {}).get("manifest") == digest for e in chain.tail(100000, event="content_bundle"))
+
+
+_CONTENT_CODES = {"UNTRACED_NUMBER", "WORD_STATISTIC", "BANNED_PHRASE", "SUPERLATIVE", "COMPETITOR", "EXCLUDED_AREA",
+                  "URL_IN_TEXT", "RAW_HTML", "JSONLD", "AUTHOR", "SCHEMA"}
+
+
+def _recheck(bundle_dir, man, profile, page_bytes, facts_text):
+    """Re-derive page.md from the approved draft.json and re-run the content rules against the CURRENT approved facts."""
+    from . import checks as checks_mod
+    draft = json.loads(_read_verified(bundle_dir, man, "draft.json").decode("utf-8"))
+    expect = bundle_mod.page_md(draft, profile, man.get("today"))
+    if expect.encode("utf-8") != page_bytes:
+        raise RailViolation("page.md is not what the approved draft.json produces; refusing")
+    quotes = [s.get("quote") for s in draft.get("sources") or [] if isinstance(s, dict) and s.get("quote")]
+    res = checks_mod.run(draft, {"profile": profile, "facts_text": facts_text, "verified_quotes": quotes,
+                                 "source_labels": [], "corpus": {}, "corpus_complete": True, "known_paths": [],
+                                 "today": man.get("today")})
+    bad = sorted({e["code"] for e in res["errors"]} & _CONTENT_CODES)
+    if bad:
+        raise RailViolation("the content checks fail at publish time (%s); refusing" % ", ".join(bad))
+
+
+def _site_bound(man, fm, profile):
+    """QA B3: the bundle must have been built for THIS profile's site, and its canonical must be on that host."""
+    from urllib.parse import urlsplit
+    site = (profile.get("site") or "").rstrip("/").lower()
+    if not man.get("site") or man["site"].rstrip("/").lower() != site:
+        raise RailViolation("this bundle was built for %r, not for this site (%r)" % (man.get("site"), profile.get("site")))
+    can = str(fm.get("canonical") or "")
+    host = (urlsplit(can).hostname or "").lower()
+    if host != (profile.get("host") or urlsplit(site).hostname or "").lower() or not can.lower().startswith(site + "/"):
+        raise RailViolation("the bundle's canonical %r is not on this site" % can)
+
+
 def _read_json(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -254,7 +306,7 @@ def _read_verified(bundle_dir, man, name):
 
 
 def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time, actor="agent", fetch=None, git_run=None,
-            dry_run=False):
+            dry_run=False, facts_text=None):
     """Publish one approved bundle through every gate. -> result dict. Raises RailViolation when a gate refuses."""
     st = settings(profile)
     files = state_files(state_dir)
@@ -301,6 +353,12 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
             if mode != "new":
                 raise RailViolation("this bundle extends an existing page: give IMPLEMENT.md to the site's own agent or "
                                     "developer (the static/git publishers only create new pages)")
+            _site_bound(man, fm, profile)
+            if not _on_chain(chain, manifest_digest(bundle_dir)):
+                raise RailViolation("this bundle is not recorded in the audit chain as created by a review; refusing")
+            if facts_text is None:
+                raise RailViolation("publish needs the current approved facts to re-run the content checks")
+            _recheck(bundle_dir, man, profile, page, facts_text)
             record.update(slug=slug)
             targets = [(_target_path(st["dir"], slug, "index.md"), page)]
             if st["html"] and "page.html" in (man.get("files") or {}):
@@ -310,11 +368,15 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                     raise RailViolation("a page already exists at %s and this bundle is not an extension of it" % path)
             if dry_run:
                 return audit(True, would_write=[p for p, _ in targets], note="dry run: nothing written")
-            branch, commit, backups, problems, url = None, None, [], [], None
+            branch, commit, backups, problems, url, orig_branch = None, None, [], [], None, None
             if st["target"] == "git":
                 rc, out = _git(["status", "--porcelain"], st["dir"], git_run)
                 if rc != 0 or out.strip():
                     raise RailViolation("publish.dir is not a clean git working tree; refusing to mix changes")
+                rc, out = _git(["rev-parse", "--abbrev-ref", "HEAD"], st["dir"], git_run)
+                orig_branch = out.strip() if rc == 0 and out.strip() and out.strip() != "HEAD" else None
+                if not orig_branch:
+                    raise RailViolation("publish.dir is not on a named branch; refusing")
                 branch = st["branch_prefix"] + re.sub(r"[^a-z0-9-]", "-", slug.strip("/"))[:50] + "-" + pid[-8:]
                 rc, out = _git(["checkout", "-b", branch], st["dir"], git_run)
                 if rc != 0:
@@ -356,6 +418,23 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                             os.replace(bak, path)
                         except OSError:
                             pass
+            if st["target"] == "git" and branch:
+                if problems:                              # QA M4: leave the operator's repo exactly as it was
+                    _git(["reset", "-q", "--hard"], st["dir"], git_run)
+                    for path, _ in targets:
+                        if os.path.exists(path):
+                            rc, out = _git(["ls-files", "--error-unmatch", "--", os.path.relpath(path, st["dir"])],
+                                           st["dir"], git_run)
+                            if rc != 0:
+                                try:
+                                    os.unlink(path)
+                                except OSError:
+                                    pass
+                    _git(["checkout", "-q", orig_branch], st["dir"], git_run)
+                    _git(["branch", "-D", branch], st["dir"], git_run)
+                    branch, commit = None, None
+                else:                                     # success: the commit stays on its branch, the checkout goes back
+                    _git(["checkout", "-q", orig_branch], st["dir"], git_run)
             row = dict(record, ok=not problems, at=now(), files=[p for p, _ in targets], backups=[b for _, b in backups],
                        branch=branch, commit=commit, url=url, problems=problems)
             with open(files["log"], "a", encoding="utf-8") as f:
@@ -408,6 +487,10 @@ def selftest() -> int:
         os.makedirs(site)
         chain = auditchain.AuditChain(os.path.join(tmp, "chain.jsonl"))
         CLOCK = lambda: T0     # B1: every publish in this selftest runs on a fixed clock, never the real one
+        def W(*a, **k):
+            o = bundle_mod.write(*a, **k)
+            record_bundle(chain, o["path"])
+            return o
         q = approvals.ApprovalQueue(os.path.join(tmp, "appr.jsonl"), b"x" * 32, now=CLOCK)
         prof = {"site": "https://example.com/", "host": "example.com", "_dir": tmp,
                 "author": {"name": "Jane Doe", "url": "/team/jane/", "id": "https://example.com/team/jane/#person"},
@@ -419,77 +502,80 @@ def selftest() -> int:
               "writer_family": "zhipu"}
         meta = {"bundle_id": "b1", "today": "2026-11-10", "writer_model": "glm-5.3", "reviewer_model": "openai/gpt-5",
                 "run_id": "r1"}
-        out = bundle_mod.write(os.path.join(tmp, "bundles"), draft, rv, {"ok": True, "errors": [], "warnings": []}, {},
+        out = W(os.path.join(tmp, "bundles"), draft, rv, {"ok": True, "errors": [], "warnings": []}, {},
                                prof, meta)
         bdir = out["path"]
         pid = plan_id_for(bdir, prof)
-        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "no request on file",
+        refused(lambda: publish(bdir, prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "no request on file",
                 "human mode needs an approval")
         req = q.request(pid, "example.com", "publish /guides/flat-fee/")
-        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "pending", "pending is not approved")
+        refused(lambda: publish(bdir, prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "pending", "pending is not approved")
         q.decide(req["approve_token"])
-        r = publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK, dry_run=True)
+        r = publish(bdir, prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK, dry_run=True)
         ck(r["ok"] and r["dry_run"] and not os.path.exists(os.path.join(site, "guides/flat-fee/index.md")), "dry run")
-        r = publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK)
+        r = publish(bdir, prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK)
         target = os.path.join(site, "guides", "flat-fee", "index.md")
         ck(r["ok"] and os.path.exists(target), "published after approval")
         with open(target, "rb") as f, open(os.path.join(bdir, "page.md"), "rb") as g:
             ck(f.read() == g.read(), "published bytes == bundle bytes")
-        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "already published", "no double publish")
+        refused(lambda: publish(bdir, prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "already published", "no double publish")
         ck(chain.verify().get("ok", True) is not False and any(e["event"] == "content_publish" for e in chain.tail(20)),
            "audit chain records publishes")
         # integrity: tamper with an approved bundle
-        out2 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/second/"), rv,
+        out2 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/second/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b2"))
         with open(os.path.join(out2["path"], "page.md"), "a", encoding="utf-8") as f:
             f.write("\nInjected: 68% of owners save $5,000.\n")
-        refused(lambda: publish(out2["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "integrity", "tamper refused")
+        refused(lambda: publish(out2["path"], prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "integrity", "tamper refused")
         # existing page + new mode refused; symlink refused
-        out3 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/flat-fee/"), rv,
+        out3 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/flat-fee/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b3"))
         p3 = plan_id_for(out3["path"], prof)
         q.decide(q.request(p3, "example.com", "x")["approve_token"])
-        refused(lambda: publish(out3["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "already exists",
+        refused(lambda: publish(out3["path"], prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "already exists",
                 "new bundle may not overwrite a page")
         os.makedirs(os.path.join(tmp, "elsewhere"))
         os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(site, "evil"))
-        out4 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/evil/x/"), rv,
+        out4 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/evil/x/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b4"))
         q.decide(q.request(plan_id_for(out4["path"], prof), "example.com", "x")["approve_token"])
-        refused(lambda: publish(out4["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "symlink", "symlink refused")
+        refused(lambda: publish(out4["path"], prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "symlink", "symlink refused")
         # kill switch and HOLD
         open(state_files(state)["stop"], "w").close()
-        refused(lambda: publish(out4["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "kill switch", "STOP")
+        refused(lambda: publish(out4["path"], prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "kill switch", "STOP")
         os.unlink(state_files(state)["stop"])
         # auto mode: caps + window + HOLD tripped by a failed live check
         auto = dict(prof, publish={"target": "static", "dir": "site", "mode": "auto", "verify_url": True,
                                    "auto": {"max_per_day": 1, "max_per_week": 3, "window": "07:00-12:00",
                                             "tz": "America/New_York"}})
         nine_am = dt.datetime(2026, 11, 11, 9, 0, tzinfo=__import__("zoneinfo").ZoneInfo("America/New_York")).timestamp()
-        out5 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-one/"), rv,
+        out5 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-one/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b5"))
-        refused(lambda: publish(out5["path"], auto, state_dir=state, chain=chain, now=lambda: nine_am - 3 * 3600),
+        refused(lambda: publish(out5["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am - 3 * 3600),
                 "only inside", "outside the window refused")
-        r = publish(out5["path"], auto, state_dir=state, chain=chain, now=lambda: nine_am,
+        r = publish(out5["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am,
                     fetch=lambda u: {"status": 200, "body": "<h1>Flat fee guide</h1>"})
         ck(r["ok"], "auto publish inside window with a passing live check")
-        out6 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-two/"), rv,
+        out6 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-two/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b6"))
-        refused(lambda: publish(out6["path"], auto, state_dir=state, chain=chain, now=lambda: nine_am + 60),
+        refused(lambda: publish(out6["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am + 60),
                 "cap reached", "daily cap")
-        refused(lambda: publish(out6["path"], auto, state_dir=state, chain=chain, now=lambda: nine_am + 86400,
+        refused(lambda: publish(out6["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am + 86400,
                                 fetch=lambda u: {"status": 500, "body": ""}), "HOLD written", "failed live check trips HOLD")
         ck(os.path.exists(state_files(state)["hold"]), "HOLD file exists")
         os.rename(state_files(state)["hold"], state_files(state)["hold"] + ".x")
-        outx = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/ext/", mode="extend"), rv,
-                                {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bx"))
+        from . import extend as extend_mod
+        outx = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/ext/", mode="extend"), rv,
+                                {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bx"),
+                                live=extend_mod.live_page("<html><head><title>T</title></head><body><h1>T</h1></body></html>",
+                                                          "https://example.com/guides/ext/"))
         q.decide(q.request(plan_id_for(outx["path"], prof), "example.com", "x")["approve_token"])
-        refused(lambda: publish(outx["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "extends an existing page",
+        refused(lambda: publish(outx["path"], prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK), "extends an existing page",
                 "extend bundles are not written by the static/git publisher")
         os.rename(state_files(state)["hold"] + ".x", state_files(state)["hold"])
-        out7 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-three/"), rv,
+        out7 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-three/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b7"))
-        refused(lambda: publish(out7["path"], auto, state_dir=state, chain=chain, now=lambda: nine_am + 2 * 86400),
+        refused(lambda: publish(out7["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am + 2 * 86400),
                 "HOLD", "HOLD stops later publishes")
         try:
             settings(dict(prof, publish={"target": "static", "dir": "site", "mode": "auto"}))
@@ -498,7 +584,7 @@ def selftest() -> int:
             ck(True, "auto without caps refused")
         # not-approved bundle cannot even be written
         try:
-            bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/held/"), dict(rv, verdict="hold"),
+            W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/held/"), dict(rv, verdict="hold"),
                              {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b8"))
             ck(False, "held review must not produce a bundle")
         except ToolError:
@@ -511,7 +597,7 @@ def selftest() -> int:
             except ToolError:
                 ck(True, "bad window %s refused" % bad_window)
         try:
-            bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/samefam/"),
+            W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/samefam/"),
                              dict(rv, writer_family="openai"), {"ok": True, "errors": [], "warnings": []}, {}, prof,
                              dict(meta, bundle_id="bsf"))
             sf = [d for d in os.listdir(os.path.join(tmp, "bundles")) if "samefam" in d][0]
@@ -519,6 +605,47 @@ def selftest() -> int:
         except ToolError:
             ck(True, "same-family bundle not even written")
         ck(_SLUG_FULL.fullmatch("/x/\n") is None and _SLUG_FULL.fullmatch("/a/b-c/") is not None, "slug fullmatch")
+        # QA B3: a bundle built for another site is refused (auto mode, no human in the loop)
+        hold_f = state_files(state)["hold"]
+        had_hold = os.path.exists(hold_f)
+        if had_hold:
+            os.rename(hold_f, hold_f + ".y")
+        other = dict(prof, site="https://other.example/", host="other.example")
+        ob = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/other-site/"), rv,
+               {"ok": True, "errors": [], "warnings": []}, {}, other, dict(meta, bundle_id="bos"))
+        auto2 = dict(prof, publish={"target": "static", "dir": "site", "mode": "auto",
+                                    "auto": {"max_per_day": 9, "max_per_week": 40, "window": "00:00-23:59", "tz": "UTC"}})
+        refused(lambda: publish(ob["path"], auto2, facts_text="", state_dir=state, chain=chain, now=lambda: T0 + 30 * 86400),
+                "built for", "another site's bundle refused in auto mode (QA B3)")
+        q.decide(q.request(plan_id_for(ob["path"], prof), "example.com", "x")["approve_token"])
+        refused(lambda: publish(ob["path"], prof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK),
+                "built for", "another site's bundle refused in human mode even when approved (QA B3)")
+        # not on the audit chain -> refused; consistent page.md + MANIFEST edit -> refused by the re-derivation
+        nb = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/unrecorded/"), rv,
+                              {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bun"))
+        refused(lambda: publish(nb["path"], auto2, facts_text="", state_dir=state, chain=chain, now=lambda: T0 + 31 * 86400),
+                "audit chain", "a bundle that no review recorded is refused")
+        tb = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/tamper-both/"), rv,
+               {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="btb"))
+        pmd = os.path.join(tb["path"], "page.md")
+        with open(pmd, "a", encoding="utf-8") as fh:
+            fh.write("\n68% of owners save $5,000.\n")
+        mf = os.path.join(tb["path"], "MANIFEST.json")
+        with open(mf, encoding="utf-8") as fh:
+            m2 = json.load(fh)
+        with open(pmd, "rb") as fh:
+            m2["files"]["page.md"] = hashlib.sha256(fh.read()).hexdigest()
+        with open(mf, "w", encoding="utf-8") as fh:
+            json.dump(m2, fh)
+        record_bundle(chain, tb["path"])                 # even if the attacker can also write the chain
+        refused(lambda: publish(tb["path"], auto2, facts_text="", state_dir=state, chain=chain, now=lambda: T0 + 32 * 86400),
+                "approved draft.json", "page.md edited consistently with MANIFEST is refused (QA minor)")
+        db = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/bad-draft/", body_md="Owners save $5,000."), rv,
+               {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bbd"))
+        refused(lambda: publish(db["path"], auto2, facts_text="", state_dir=state, chain=chain, now=lambda: T0 + 33 * 86400),
+                "content checks fail", "content checks are re-run at publish (untraced $5,000)")
+        if had_hold:
+            os.rename(hold_f + ".y", hold_f)
         # git publisher: new branch + one commit, never a push
         calls = []
 
@@ -526,19 +653,44 @@ def selftest() -> int:
             calls.append(argv)
             if argv[1:3] == ["status", "--porcelain"]:
                 return 0, ""
+            if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
+                return 0, "main\n"
             if argv[1] == "rev-parse":
                 return 0, "abc123\n"
             return 0, ""
         gsite = os.path.join(tmp, "gsite")
         os.makedirs(gsite)
         gprof = dict(prof, publish={"target": "git", "dir": "gsite"})
-        out9 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/git-one/"), rv,
+        out9 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/git-one/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b9"))
         q.decide(q.request(plan_id_for(out9["path"], gprof), "example.com", "x")["approve_token"])
         os.unlink(state_files(state)["hold"])
-        r = publish(out9["path"], gprof, state_dir=state, chain=chain, queue=q, now=CLOCK, git_run=git_run)
+        r = publish(out9["path"], gprof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK, git_run=git_run)
         ck(r["ok"] and r["branch"].startswith("adrails/content-") and r["commit"] == "abc123", "git branch + commit")
         ck(not any("push" in a for a in calls) and any(a[1] == "checkout" for a in calls), "git never pushes")
+        ck(calls[-1][1:] == ["checkout", "-q", "main"], "after a git publish the checkout returns to the original branch")
+        calls.clear()
+
+        def git_fail(argv, cwd):
+            calls.append(argv)
+            if argv[1:3] == ["status", "--porcelain"]:
+                return 0, ""
+            if argv[1:3] == ["rev-parse", "--abbrev-ref"]:
+                return 0, "main\n"
+            if argv[1] == "commit":
+                return 1, "boom"
+            if argv[1] == "ls-files":
+                return 1, ""
+            return 0, ""
+        o10 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/git-two/"), rv,
+                {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b10"))
+        q.decide(q.request(plan_id_for(o10["path"], gprof), "example.com", "x")["approve_token"])
+        refused(lambda: publish(o10["path"], gprof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK,
+                                git_run=git_fail), "HOLD", "a failed git commit is a HOLD")
+        verbs = [a[1] for a in calls]
+        ck("reset" in verbs and verbs[-2:] == ["checkout", "branch"] and calls[-1][2] == "-D",
+           "failed git publish: reset, back to the original branch, branch deleted (QA M4)")
+        ck(not os.path.exists(os.path.join(gsite, "guides", "git-two", "index.md")), "failed git publish removes its file")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return n

@@ -211,7 +211,8 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, http=None, run_cmd=None
         profile, facts, chains, io = setup(args)
         with pipeline._RunLock(pipeline.paths(profile)["lock"]):
             pipeline.daily_gate(profile, pipeline.paths(profile), now())
-            r = pipeline.review_draft(profile, facts, chains, io, draft_id=args["draft_id"], html=bool(args.get("html")))
+            r = pipeline.review_draft(profile, facts, chains, io, draft_id=args["draft_id"], html=bool(args.get("html")),
+                                      chain=_chain(cfg))
         pipeline._log(pipeline.paths(profile), dict(pipeline._slim(r), at=now()))
         return r
 
@@ -262,6 +263,7 @@ def register(srv, ctx, cfg, gsc_client=None, fetch=None, http=None, run_cmd=None
             return {"plan_id": r["plan_id"], "request_id": r["request_id"], "status": r["status"],
                     "note": "a human approves with adsops_approval_decide and the approve token; then call action=publish"}
         out = publish_mod.publish(b, profile, state_dir=state, chain=_chain(cfg), queue=q, now=now,
+                                  facts_text=facts_mod.load_facts(profile["_facts_path"])["text"],
                                   actor=os.environ.get("ADRAILS_PRINCIPAL") or "agent", fetch=fetch,
                                   dry_run=args["action"] == "dry_run")
         if out.get("ok") and not out.get("dry_run"):
@@ -316,7 +318,7 @@ def main(argv=None, cfg=None):
         if a.stage == "run":
             profile = facts_mod.load_profile(a.profile)
             out = pipeline.run_once(a.profile, make_io(cfg, profile), candidate_id=a.candidate, html=a.html,
-                                    audit_run=_audit_run(cfg, profile["host"]))
+                                    audit_run=_audit_run(cfg, profile["host"]), chain=_chain(cfg))
         elif a.stage == "plan":
             profile, facts, chains = pipeline.load(a.profile)
             out = pipeline.plan(profile, make_io(cfg, profile), audit_run=_audit_run(cfg, profile["host"]))
@@ -343,8 +345,9 @@ def main(argv=None, cfg=None):
                 if publish_mod.plan_id_for(b, profile) in done:
                     continue
                 try:
-                    out["published"].append(publish_mod.publish(b, profile, state_dir=p["state"], chain=_chain(cfg),
-                                                                queue=q, dry_run=a.dry_run))
+                    out["published"].append(publish_mod.publish(
+                        b, profile, state_dir=p["state"], chain=_chain(cfg), queue=q, dry_run=a.dry_run,
+                        facts_text=facts_mod.load_facts(profile["_facts_path"])["text"]))
                 except RailViolation as e:
                     out["refused"].append({"bundle_id": bid, "reason": scrub(str(e), 300)})
                     if "HOLD" in str(e) or "kill switch" in str(e) or "cap reached" in str(e):

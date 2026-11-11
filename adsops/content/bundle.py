@@ -509,6 +509,17 @@ def _write_file(path, text, mode=0o644):
     return hashlib.sha256(data).hexdigest()
 
 
+def page_md(draft, profile, today, meta=None):
+    """page.md exactly as write() produces it (publish re-derives it from draft.json and compares bytes)."""
+    page = front_matter(draft, profile, _today({"today": today}), meta) + "\n" + _body_block(draft) + "\n"
+    faq = _faq(draft)
+    if faq:
+        page += "\n## FAQ\n\n"
+        for item in faq:
+            page += "### %s\n\n%s\n\n" % (item["q"], item["a"])
+    return page
+
+
 def implement_md_extend(draft, profile, review, meta, live, ops):
     """IMPLEMENT.md for an EXTEND bundle (QA B2): additive only, head untouched, JSON-LD merged, verifier mandatory."""
     from . import extend as extend_mod
@@ -579,14 +590,7 @@ def write(out_dir, draft, review, checks, sources, profile, meta, html=False, li
             raise ToolError("bundle.write: an extend bundle needs the live page (head + JSON-LD) it extends")
         from . import extend as extend_mod
         ext_files, ext_ops, _after = extend_mod.bundle_files(draft, live, today)
-    fm = front_matter(draft, profile, today, meta)
-    body = _body_block(draft)
-    page = fm + "\n" + body + "\n"
-    faq = _faq(draft)
-    if faq:
-        page += "\n## FAQ\n\n"
-        for item in faq:
-            page += "### %s\n\n%s\n\n" % (item["q"], item["a"])
+    page = page_md(draft, profile, today, meta)
     impl = (implement_md_extend(draft, profile, review, meta, live, ext_ops) if ext_files
             else implement_md(draft, profile, review, meta))
     summary = _sources_summary(sources)
