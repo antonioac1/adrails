@@ -379,6 +379,47 @@ def _path_tokens(path):
     return frozenset(out)
 
 
+def _path_seq(path):
+    """The folded tokens of a path, in order (same folding as _path_tokens)."""
+    out = []
+    for word in _PATH_SPLIT_RE.split(path.strip("/")):
+        w = word.lower()
+        if not w or w in _DOORWAY_STOPWORDS:
+            continue
+        if len(w) > 3 and w.endswith("s"):
+            w = w[:-1]
+        out.append(w)
+    return out
+
+
+# Folder-ish words that say nothing about the topic; they do not count as a shared template.
+_GENERIC_TOKENS = frozenset("guide blog article resource page post news learn help".split())
+# Audience words: "renters-insurance" vs "landlord-insurance" are different topics, not a doorway swap.
+_AUDIENCE_TOKENS = frozenset("landlord tenant renter owner homeowner investor buyer seller manager agent "
+                             "realtor association hoa board".split())
+# Single-word US state names: "eviction-process-florida" is the same page with a place bolted on.
+_STATE_TOKENS = frozenset("alabama alaska arizona arkansas california colorado connecticut delaware florida "
+                          "georgia hawaii idaho illinois indiana iowa kansas kentucky louisiana maine maryland "
+                          "massachusetts michigan minnesota mississippi missouri montana nebraska nevada ohio "
+                          "oklahoma oregon pennsylvania tennessee texas utah vermont virginia washington "
+                          "wisconsin wyoming".split())
+
+
+def _slot_swap(a_seq, b_seq):
+    """(a_slot, b_slot, shared) when the two token lists share a template and differ in ONE contiguous slot."""
+    n = 0
+    while n < len(a_seq) and n < len(b_seq) and a_seq[n] == b_seq[n]:
+        n += 1
+    m = 0
+    while (m < len(a_seq) - n and m < len(b_seq) - n
+           and a_seq[len(a_seq) - 1 - m] == b_seq[len(b_seq) - 1 - m]):
+        m += 1
+    a_slot = a_seq[n:len(a_seq) - m]
+    b_slot = b_seq[n:len(b_seq) - m]
+    shared = [t for t in a_seq[:n] + a_seq[len(a_seq) - m:] if t not in _GENERIC_TOKENS]
+    return a_slot, b_slot, shared
+
+
 def _place_tokens(profile):
     """Folded words of profile["places"] and profile["rulings"]["excluded_areas"]."""
     tokens = set()
@@ -410,8 +451,34 @@ def _place_tokens(profile):
 
 
 def _place_like(token, place_tokens):
-    """True for a known place word, a five-digit zip, or any all-digit token."""
-    return token in place_tokens or token.isdigit() or re.fullmatch(r"\d{5}", token) is not None
+    """True for a known place word, a state name, or any all-digit token (zip, year, number)."""
+    return token in place_tokens or token in _STATE_TOKENS or token.isdigit()
+
+
+def _template_doorway(path, other, place_tokens, topic_words):
+    """Why `path` is `other` with one slot swapped or a place bolted on, else None (QA round 2 N2)."""
+    a_slot, b_slot, shared = _slot_swap(_path_seq(path), _path_seq(other))
+    if not shared or len(a_slot) > 3 or len(b_slot) > 3 or not (a_slot or b_slot):
+        return None
+    slot = a_slot + b_slot
+    if all(_place_like(t, place_tokens) for t in a_slot) and all(_place_like(t, place_tokens) for t in b_slot) \
+            and any(_place_like(t, place_tokens) for t in slot):
+        what = "a place name, zip or number swapped" if a_slot and b_slot else "a place name or number"
+        return "%s differs from %s only by %s" % (path[:80], other[:80], what)
+    if not a_slot or not b_slot:
+        return None                       # a topic word added ("eviction-process" -> "eviction-process-timeline")
+    if any(t in _AUDIENCE_TOKENS or t in topic_words for t in slot):
+        return None                       # a different audience or an owner-approved sibling topic
+    if len(a_slot) == 1 and len(b_slot) == 1 and len(shared) >= 2:
+        return ("%s is %s with one keyword swapped (%r for %r) - same template, likely a doorway; add the word to "
+                "rulings.topic_words if these are genuinely different topics" % (path[:80], other[:80], a_slot[0],
+                                                                                 b_slot[0]))
+    if len(shared) >= 2 and not any(t in _AUDIENCE_TOKENS for t in shared):
+        # a 1-3 word slot swapped inside a 2+ word template whose other instance is a live/candidate page
+        return ("%s is %s with %r swapped for %r - same template, likely a place or keyword doorway; add the words "
+                "to rulings.topic_words if these are genuinely different topics"
+                % (path[:80], other[:80], "-".join(a_slot), "-".join(b_slot)))
+    return None
 
 
 def _place_swap(a_tokens, b_tokens, place_tokens):
@@ -439,6 +506,12 @@ def doorway_reason(slug, queries, existing_paths, profile):
             return "slug has a digits-only segment (%r) - that is a zip/year page, not a topic" % path[:80]
     my_tokens = _path_tokens(path)
     place_tokens = _place_tokens(profile)
+    rulings = profile.get("rulings") if isinstance(profile, dict) else None
+    topic_words = set()
+    if isinstance(rulings, dict):
+        for w in _as_list(rulings.get("topic_words"), 200):
+            if isinstance(w, str):
+                topic_words.update(_path_seq(w.lower()))
     for raw in _as_list(existing_paths, MAX_PATHS):
         if not isinstance(raw, str) or not raw.strip():
             continue
@@ -452,6 +525,18 @@ def doorway_reason(slug, queries, existing_paths, profile):
             return "%s has the same topic tokens as existing page %s" % (path[:80], other[:80])
         if _place_swap(my_tokens, other_tokens, place_tokens):
             return "%s is %s with only a place name or zip swapped" % (path[:80], other[:80])
+        why = _template_doorway(path, other, place_tokens, topic_words)
+        if why:
+            return why
+        my_places = {t for t in my_tokens if _place_like(t, place_tokens)}
+        other_places = {t for t in other_tokens if _place_like(t, place_tokens)}
+        my_rest = my_tokens - my_places - _GENERIC_TOKENS
+        if my_places and other_places and my_places != other_places and my_rest \
+                and my_rest <= other_tokens - other_places:
+            return ("%s is a place page (%s) on the same topic as place page %s"
+                    % (path[:80], "-".join(sorted(my_places))[:40], other[:80]))
+        if len(my_tokens - _GENERIC_TOKENS) >= 3 and my_tokens <= other_tokens:
+            return "%s covers a subset of the topic of existing page %s" % (path[:80], other[:80])
     return None
 
 
@@ -812,7 +897,7 @@ def plan(gsc_rows, profile, audit_run=None, lessons=None, published=(), limit=5)
         if _is_published(candidate, done_ids, done_pages):
             continue
         if candidate["mode"] == "new":
-            others = list(existing)
+            others = list(existing) + sorted(p for p in done_pages if isinstance(p, str) and p.startswith("/"))
             for kept_candidate in kept:
                 if kept_candidate["slug"] and kept_candidate["slug"] != candidate["slug"]:
                     others.append(kept_candidate["slug"])
@@ -1047,4 +1132,38 @@ def selftest() -> int:
     inf_out = plan([{"query": "hoa rules", "page": "", "impressions": float("inf"), "position": 9}], P)
     chk(inf_out["candidates"] == [], "inf impressions do not raise")
 
+    # QA round 2 N2: same template + place/zip/keyword swap, vs live slugs and vs other candidates -----------
+    for new_slug, live, refused_ in [
+            ("/property-management/clearwater/", "/property-management/tampa/", True),
+            ("/tampa-property-management/", "/orlando-property-management/", True),
+            ("/tampa/property-management/", "/orlando/property-management/", True),
+            ("/landlord-insurance-tampa/", "/landlord-insurance-orlando/", True),
+            ("/property-management/st-petersburg/", "/property-management/tampa/", True),
+            ("/rent-prices-33613/", "/rent-prices-33612/", True),
+            ("/guides/eviction-process-florida/", "/guides/eviction-process/", True),
+            ("/guides/flat-fee-pricing/", "/guides/flat-fee-contracts/", True),
+            ("/guides/security-deposit-rules/", "/guides/lease-renewal-rules/", False),
+            ("/guides/hoa-rules-for-landlords/", "/guides/hoa-rules-for-tenants/", False),
+            ("/guides/how-much-rent-can-i-charge/", "/guides/how-to-set-rent/", False),
+            ("/guides/eviction-process-timeline/", "/guides/eviction-process/", False)]:
+        chk((doorway_reason(new_slug, [], [live], P) is not None) == refused_,
+            "N2 %s vs %s refused=%s" % (new_slug, live, refused_))
+    PW = dict(P, rulings=dict(P.get("rulings") or {}, topic_words=["pricing"]))
+    chk(doorway_reason("/guides/flat-fee-pricing/", [], ["/guides/flat-fee-contracts/"], PW) is None,
+        "rulings.topic_words allows an owner-approved sibling topic")
+    PP = dict(P, places=["Tampa", "Clearwater", "St Petersburg"])
+    chk(doorway_reason("/guides/property-st-petersburg/", [], ["/property-management/tampa/"], PP) is not None,
+        "a question-cluster slug naming a known place is refused against a place page on the same topic")
+    city_rows = lambda city: [{"query": q % city, "page": "", "impressions": 10, "position": 22}
+                              for q in ("how much does landlord insurance cost in %s",
+                                        "what does landlord insurance cover in %s",
+                                        "is landlord insurance required in %s")]
+    live_city = [{"query": "property management tampa cost", "impressions": 80, "position": 14,
+                  "page": "https://example.com/property-management/tampa/"}]
+    out_n2 = plan(live_city, P)
+    chk([c["mode"] for c in out_n2["candidates"]] == ["extend"], "extends are never doorway-blocked")
+    out_pub = plan(city_rows("tampa"), P,
+                   published=["https://example.com/guides/how-much-does-landlord-insurance-cost-in-tampa/"])
+    chk(all(c["mode"] != "new" or "tampa" not in c["slug"] for c in out_pub["candidates"]),
+        "a near-slug of a published page is refused")
     return n
