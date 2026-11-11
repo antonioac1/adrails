@@ -496,11 +496,11 @@ class ContentPipelineTests(unittest.TestCase):
                            "reviewer_model": "openai/gpt-5", "run_id": "t"})["path"]
         publish.record_bundle(chain, b2)
         with self.assertRaises(RailViolation) as cm:
-            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 404, "body": ""},
+            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 404, "body": ""}, sleep=lambda s: None,
                             facts_text=FT)
         self.assertIn("HOLD", str(cm.exception))
         with self.assertRaises(RailViolation) as cm:
-            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 200, "body": "x"},
+            publish.publish(b2, prof, state_dir=state, chain=chain, fetch=lambda u: {"status": 200, "body": "x"}, sleep=lambda s: None,
                             facts_text=FT)
         self.assertIn("HOLD", str(cm.exception))
 

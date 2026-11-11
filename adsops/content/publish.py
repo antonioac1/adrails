@@ -202,8 +202,10 @@ def _auto_gate(st, rows, now):
     tz = ZoneInfo(st["tz"])
     local = dt.datetime.fromtimestamp(now, tz)
     (h1, m1), (h2, m2) = st["window"]
-    cur = local.hour * 60 + local.minute
-    if not (h1 * 60 + m1) <= cur < (h2 * 60 + m2):
+    # QA N10: the window is anchored at its local start time and lasts its length in real minutes, so a window that
+    # falls in the skipped hour on the spring-forward day still opens (it starts at the first real instant after it)
+    start = dt.datetime(local.year, local.month, local.day, h1, m1, tzinfo=tz).timestamp()
+    if not start <= now < start + ((h2 * 60 + m2) - (h1 * 60 + m1)) * 60:
         raise RailViolation("auto publish only inside %02d:%02d-%02d:%02d %s (now %s)" % (h1, m1, h2, m2, st["tz"],
                                                                                          local.strftime("%H:%M")))
     day = local.date()
@@ -305,6 +307,18 @@ def _git(argv, cwd, run=None):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
+def _prune_dirs(paths, base):
+    """Remove directories this publish created and left empty (QA N9), never above publish.dir."""
+    for path in paths:
+        d = os.path.dirname(path)
+        while d and os.path.commonpath([os.path.realpath(d), base]) == base and os.path.realpath(d) != base:
+            try:
+                os.rmdir(d)                               # only succeeds when empty
+            except OSError:
+                break
+            d = os.path.dirname(d)
+
+
 def _read_verified(bundle_dir, man, name):
     """Read a bundle file ONCE and check those exact bytes against the manifest (review D#6: no swap after verify)."""
     with open(os.path.join(bundle_dir, name), "rb") as f:
@@ -314,8 +328,39 @@ def _read_verified(bundle_dir, man, name):
     return data
 
 
+def _title_of(body):
+    from . import extend as extend_mod
+    try:
+        return " ".join(html_unescape(extend_mod.head_facts(str(body or "")[:3_000_000]).get("title") or "").split())
+    except ToolError:
+        return ""
+
+
+def html_unescape(s):
+    import html as _h
+    return _h.unescape(s or "")
+
+
+def live_check(url, title, fetch, sleep=time.sleep, tries=3):
+    """QA N5: parsed, unescaped, whitespace-normalised <title> must equal the page title; retried before acting.
+    -> None when fine, else a precise description of what mismatched."""
+    want = " ".join(html_unescape(title).split())
+    last = None
+    for i in range(tries):
+        r = fetch(url)
+        r = r if isinstance(r, dict) else {}
+        got = _title_of(r.get("body"))
+        if r.get("status") == 200 and not r.get("error") and (not want or got == want):
+            return None
+        last = "status %s, error %s, expected title %r, live title %r" % (r.get("status"), r.get("error"), want[:120],
+                                                                         got[:120])
+        if i < tries - 1:
+            sleep(2 * (i + 1))
+    return last
+
+
 def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time, actor="agent", fetch=None, git_run=None,
-            dry_run=False, facts_text=None):
+            dry_run=False, facts_text=None, sleep=time.sleep):
     """Publish one approved bundle through every gate. -> result dict. Raises RailViolation when a gate refuses."""
     st = settings(profile)
     files = state_files(state_dir)
@@ -420,11 +465,9 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                             problems.append("written file differs from the bundle: %s" % path)
                 if st["verify_url"] and not problems:
                     url = (profile.get("site") or "").rstrip("/") + slug
-                    r = (fetch or _default_fetch)(url)
-                    r = r if isinstance(r, dict) else {}
-                    title = str(fm.get("title") or "")
-                    if r.get("status") != 200 or r.get("error") or (title and title not in str(r.get("body") or "")):
-                        problems.append("live check failed for %s (status %s)" % (url, r.get("status")))
+                    why = live_check(url, str(fm.get("title") or ""), fetch or _default_fetch, sleep=sleep)
+                    if why:
+                        problems.append("live check failed for %s after 3 tries: %s" % (url, why))
             except Exception as e:                        # noqa: BLE001 - convert, restore, HOLD
                 problems.append("publish failed after writing started: %s" % scrub(str(e) or type(e).__name__, 200))
             if problems and st["target"] == "static":    # review fr#1: never leave a page live after a failed check
@@ -440,9 +483,11 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                             os.unlink(path)
                         except OSError:
                             problems.append("could not remove %s" % path)
+                _prune_dirs([pth for pth, _ in targets], st["dir"])
             if st["target"] == "git" and branch:
                 if problems:                              # QA M4: leave the operator's repo exactly as it was
                     _git(["reset", "-q", "--hard"], st["dir"], git_run)
+                    _prune_later = [pth for pth, _ in targets]
                     for path, _ in targets:
                         if os.path.exists(path):
                             rc, out = _git(["ls-files", "--error-unmatch", "--", os.path.relpath(path, st["dir"])],
@@ -457,8 +502,12 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                         if rc_ != 0:
                             problems.append("git rollback step %s failed: %s; the repo needs a human" % (argv_[0], scrub(out_, 120)))
                     branch, commit = None, None
+                    _prune_dirs(_prune_later, st["dir"])
                 else:                                     # success: the commit stays on its branch, the checkout goes back
-                    _git(["checkout", "-q", orig_branch], st["dir"], git_run)
+                    rc_, out_ = _git(["checkout", "-q", orig_branch], st["dir"], git_run)
+                    if rc_ != 0:                          # QA N9: a failure state, with the repo described
+                        problems.append("committed %s on branch %s but could not return to %s (%s): the repo is left on "
+                                        "%s; a human must check it out" % (commit, branch, orig_branch, scrub(out_, 120), branch))
             row = dict(record, ok=not problems, at=now(), files=[p for p, _ in targets], backups=[b for _, b in backups],
                        branch=branch, commit=commit, url=url, problems=problems)
             with open(files["log"], "a", encoding="utf-8") as f:
@@ -581,15 +630,33 @@ def selftest() -> int:
         refused(lambda: publish(out5["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am - 3 * 3600),
                 "only inside", "outside the window refused")
         r = publish(out5["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am,
-                    fetch=lambda u: {"status": 200, "body": "<h1>Flat fee guide</h1>"})
+                    sleep=lambda s: None, fetch=lambda u: {"status": 200, "body": "<title>Flat fee guide</title><h1>Flat fee guide</h1>"})
         ck(r["ok"], "auto publish inside window with a passing live check")
         out6 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-two/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b6"))
         refused(lambda: publish(out6["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am + 60),
                 "cap reached", "daily cap")
         refused(lambda: publish(out6["path"], auto, facts_text="", state_dir=state, chain=chain, now=lambda: nine_am + 86400,
-                                fetch=lambda u: {"status": 500, "body": ""}), "HOLD written", "failed live check trips HOLD")
+                                sleep=lambda s: None, fetch=lambda u: {"status": 500, "body": ""}), "HOLD written", "failed live check trips HOLD")
         ck(os.path.exists(state_files(state)["hold"]), "HOLD file exists")
+        ck(live_check("u", "Tom's &amp; Jerry \u2013 caf\u00e9", lambda u: {"status": 200, "body":
+                      "<title>Tom&#39;s &amp;amp; Jerry &ndash; caf&eacute;</title>"}, sleep=lambda s: None) is None,
+           "titles with quotes, &, en dash and non-ASCII compare unescaped (QA N5)")
+        tries = []
+        ck("expected title" in (live_check("u", "A", lambda u: tries.append(1) or {"status": 200, "body": "<title>B</title>"},
+                                           sleep=lambda s: None) or ""), "a real mismatch is described")
+        ck(len(tries) == 3, "the live check retries 3 times before acting")
+        from zoneinfo import ZoneInfo
+        dst = settings(dict(prof, publish={"target": "static", "dir": "site", "mode": "auto",
+                                           "auto": {"max_per_day": 1, "max_per_week": 1, "window": "02:00-03:00",
+                                                    "tz": "America/New_York"}}))
+        t_open = dt.datetime(2027, 3, 14, 3, 30, tzinfo=ZoneInfo("America/New_York")).timestamp()
+        try:
+            _auto_gate(dst, [], t_open)
+            ck(True, "a 02:00-03:00 window opens on the spring-forward day (QA N10)")
+        except RailViolation:
+            ck(False, "a 02:00-03:00 window opens on the spring-forward day (QA N10)")
+        refused(lambda: _auto_gate(dst, [], t_open + 3600), "only inside", "and closes an hour later")
         ck(not os.path.exists(os.path.join(site, "guides", "auto-two", "index.md")),
            "a page whose post-publish check failed is taken down again (review fr#1)")
         os.rename(state_files(state)["hold"], state_files(state)["hold"] + ".x")
@@ -720,6 +787,25 @@ def selftest() -> int:
         ck("reset" in verbs and verbs[-2:] == ["checkout", "branch"] and calls[-1][2] == "-D",
            "failed git publish: reset, back to the original branch, branch deleted (QA M4)")
         ck(not os.path.exists(os.path.join(gsite, "guides", "git-two", "index.md")), "failed git publish removes its file")
+        ck(not os.path.exists(os.path.join(gsite, "guides", "git-two")), "and the directory it created (QA N9)")
+        calls.clear()
+
+        def git_noback(argv, cwd):
+            r = git_fail(argv, cwd)
+            if argv[1] == "commit":
+                return 0, ""
+            if argv[1] == "checkout" and argv[2] == "-q":
+                return 1, "error: cannot switch"
+            if argv[1] == "rev-parse" and "--abbrev-ref" not in argv:
+                return 0, "abc999\n"
+            return r
+        o11 = W(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/git-three/"), rv,
+                {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b11"))
+        q.decide(q.request(plan_id_for(o11["path"], gprof), "example.com", "x")["approve_token"])
+        if os.path.exists(state_files(state)["hold"]):
+            os.unlink(state_files(state)["hold"])
+        refused(lambda: publish(o11["path"], gprof, facts_text="", state_dir=state, chain=chain, queue=q, now=CLOCK,
+                                git_run=git_noback), "could not return", "checkout-back failure is a failure state (QA N9)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return n
