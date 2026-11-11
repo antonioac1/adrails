@@ -47,7 +47,8 @@ WRITER_SYSTEM = (
     "5. Mode \"extend\": the CURRENT page stays as it is. body_md contains ONLY the new sections you add (do not repeat "
     "the current page). Set \"insert_after\" to the exact text of a heading on the current page after which the new "
     "sections go (or null for the end of the main content). You may correct at most %d live sentences: each goes in "
-    "live_changes with before (copied exactly from CURRENT_PAGE_TEXT), after and reason.\n"
+    "live_changes with before (copied exactly from CURRENT_PAGE_TEXT), after and reason. The page's title, description "
+    "and structured data stay as they are: title/description you write are ignored for an extend, and jsonld must be null.\n"
     "6. Answer with ONE JSON object and nothing else:\n"
     "{\"mode\": ..., \"slug\": ..., \"title\": \"<=70 chars\", \"description\": \"70-170 chars\", \"content_type\": "
     "\"answer-extension\"|\"guide\"|\"faq\"|\"comparison\", \"body_md\": \"Markdown, no H1, no front matter\", "
@@ -240,7 +241,7 @@ def _context(profile, facts, io, budget, cand, draft_sources=(), refs=None, site
     deadline = io.clock() + max(30.0, min(900.0, budget.remaining_s() - 60))
     known, corpus, complete, errs = site if site is not None else site_pages(io, profile, deadline)
     errs = list(errs)
-    live_text = None
+    live_text, live_page = None, None
     if cand["mode"] == "extend":
         page = cand.get("page") or ""
         for u, t in corpus.items():
@@ -250,6 +251,18 @@ def _context(profile, facts, io, budget, cand, draft_sources=(), refs=None, site
                 break
         if live_text is None:
             errs.append("the page to extend was not fetched from the site: %s" % scrub(page, 200))
+        else:                                         # QA B2: the live head + JSON-LD, so the bundle can be additive
+            raw = _fetch_raw(io, page) or {}
+            try:
+                if raw.get("status") != 200 or raw.get("error") or raw.get("truncated"):
+                    raise ToolError("status %s" % raw.get("status"))
+                from . import extend as extend_mod
+                live_page = extend_mod.live_page(raw.get("body") or "", page)
+                if live_page["jsonld_unparseable"]:
+                    raise ToolError("the live page has JSON-LD that does not parse")
+            except ToolError as e:
+                live_text, live_page = None, None
+                errs.append("the page to extend could not be modelled safely: %s" % scrub(str(e), 200))
     if refs is None:
         refs, rerr = reference_sources(io, profile, [s.get("url") for s in draft_sources if isinstance(s, dict)], deadline)
         errs += rerr
@@ -257,7 +270,7 @@ def _context(profile, facts, io, budget, cand, draft_sources=(), refs=None, site
     if draft_sources:
         quotes, labels, qerr = sources_mod.verify_quotes(list(draft_sources), refs)
     ctx = {"profile": profile, "facts_text": facts["text"], "verified_quotes": quotes, "source_labels": labels,
-           "_site": (known, corpus, complete, errs), "corpus": corpus, "corpus_complete": complete, "live_text": live_text, "known_paths": known,
+           "_site": (known, corpus, complete, errs), "corpus": corpus, "live_page": live_page, "corpus_complete": complete, "live_text": live_text, "known_paths": known,
            "today": dt.date.fromtimestamp(io.now()).isoformat(), "queries": cand.get("queries") or []}
     return ctx, refs, errs, qerr
 
@@ -430,6 +443,9 @@ def draft(profile, facts, chains, io, *, candidate, budget=None, run_id=None, re
             _held(p, did, res)
             return res
         d["mode"], d["slug"] = candidate["mode"], candidate["slug"]          # the plan decides where the page goes
+        if candidate["mode"] == "extend" and (ctx.get("live_page") or {}).get("head"):
+            head = ctx["live_page"]["head"]           # QA B2: an extension never changes the head or replaces JSON-LD
+            d["title"], d["description"], d["jsonld"] = head.get("title") or "", head.get("description") or "", None
         for k, v in (("faq", []), ("sources", []), ("live_changes", []), ("internal_links", []), ("jsonld", None),
                      ("insert_after", None)):
             d.setdefault(k, v)
@@ -496,7 +512,17 @@ def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=No
             "writer_model": wrep.get("model_answered"), "reviewer_model": rv["reviewer"]["model_answered"],
             "run_id": run_id or ""}
     srcs = {u: {"final": r.get("final"), "sha256": r.get("sha256"), "status": r.get("status")} for u, r in refs.items()}
-    out = bundle_mod.write(p["bundles"], rv["draft"], rec, final_check, srcs, profile, meta, html=html)
+    final = rv["draft"]
+    if final.get("mode") == "extend":                  # the reviewer may not re-head the page either
+        head = (ctx.get("live_page") or {}).get("head") or {}
+        if (final.get("title") or "") != (head.get("title") or "") or (final.get("description") or "") != \
+                (head.get("description") or "") or final.get("jsonld"):
+            res.update(verdict="hold", hold_reasons=rv["hold_reasons"] + ["an extension may not change the title, "
+                                                                          "description or JSON-LD of the live page"])
+            _held(p, draft_id, res)
+            return res
+    out = bundle_mod.write(p["bundles"], final, rec, final_check, srcs, profile, meta, html=html,
+                           live=ctx.get("live_page"))
     res.update(ok=True, bundle=out["path"])
     return res
 

@@ -227,7 +227,8 @@ class ContentPipelineTests(unittest.TestCase):
 
     def test_reviewer_edit_is_rechecked_and_kept_when_clean(self):
         d = self.good_draft()
-        edited = dict(d, body_md=d["body_md"] + " Read every statement.")
+        # an extension keeps the live head: the reviewer edits the body only (title "Fees" and no description live)
+        edited = dict(d, title="Fees", description="", jsonld=None, body_md=d["body_md"] + " Read every statement.")
         self.models.script("w", ("glm-5.3", d, "stop"))
         self.models.script("r", ("openai/gpt-5", {"verdict": "approve", "findings": [], "edited_draft": edited}, "stop"))
         r = self.run_once()
@@ -247,6 +248,35 @@ class ContentPipelineTests(unittest.TestCase):
             held = json.load(f)
         self.assertIn("UNTRACED_NUMBER", {e["code"] for e in held["errors"]})
         self.assertFalse(os.path.exists(os.path.join(self.dir, "bundles")) and os.listdir(os.path.join(self.dir, "bundles")))
+
+    def test_extend_bundle_is_additive(self):
+        self.pages["https://example.com/guides/fees/"] = (
+            "<!doctype html><html><head><title>Fees</title><meta name=\"description\" content=\"Old\">"
+            "<script type=\"application/ld+json\">{\"@context\":\"https://schema.org\",\"@graph\":[{\"@type\":"
+            "\"BreadcrumbList\"},{\"@type\":\"FAQPage\",\"mainEntity\":[]},{\"@type\":\"WebPage\",\"dateModified\":"
+            "\"2026-01-01\"}]}</script></head><body><main><h1>Fees</h1><p>%s</p></main></body></html>" % LIVE_P)
+        self.models.script("w", ("glm-5.3", self.good_draft(title="A brand new title"), "stop"))
+        self.models.script("r", ("openai/gpt-5", {"verdict": "approve"}, "stop"))
+        r = self.run_once()
+        self.assertEqual(r["verdict"], "approve", r)
+        b = r["bundle"]
+        after = json.load(open(os.path.join(b, "jsonld.after.json")))
+        self.assertEqual([n["@type"] for n in after[0]["@graph"]], ["BreadcrumbList", "FAQPage", "WebPage"])
+        self.assertEqual(len(after[0]["@graph"][1]["mainEntity"]), 1)
+        impl = open(os.path.join(b, "IMPLEMENT.md"), encoding="utf-8").read()
+        self.assertIn("ALREADY LIVE", impl)
+        self.assertNotIn("A brand new title", impl)
+        self.assertIn('"Fees"', impl)
+        self.assertTrue(os.path.exists(os.path.join(b, "verify_extend.py")))
+
+    def test_reviewer_reheading_an_extension_is_held(self):
+        d = self.good_draft()
+        self.models.script("w", ("glm-5.3", d, "stop"))
+        self.models.script("r", ("openai/gpt-5", {"verdict": "approve", "edited_draft": dict(d, title="Fees",
+                                                  description="A new description for this page that is long enough.",
+                                                  jsonld=None)}, "stop"))
+        r = self.run_once()
+        self.assertEqual(r["verdict"], "hold")
 
     def test_reviewer_edit_adding_a_number_is_held(self):
         d = self.good_draft()

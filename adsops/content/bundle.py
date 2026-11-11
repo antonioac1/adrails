@@ -209,7 +209,10 @@ def front_matter(draft, profile, today, meta=None):
         rows.append(("insert_after", _one_line(draft.get("insert_after"), 200) or None))
         rows.append(("live_changes", [{"before": _one_line(c.get("before"), 400), "after": _one_line(c.get("after"), 400)}
                                       for c in _lst(draft.get("live_changes"), 50) if isinstance(c, dict)]))
-    rows.append(("jsonld", bundle_jsonld(draft, profile, today)))
+    rows.append(("jsonld", bundle_jsonld(draft, profile, today) if mode == "new" else
+                 "MERGE: see jsonld.after.json (an extension never replaces the live page's structured data)"))
+    if mode == "extend":
+        rows.append(("head", "unchanged: an extension keeps the live title, description, H1, canonical and og tags"))
     rows.append(("sources", _sources(draft)))
     rows.append(("internal_links_to_add", [dict(l, to=slug) for l in _links(draft)]))
     lines = ["---"]
@@ -505,7 +508,44 @@ def _write_file(path, text, mode=0o644):
     return hashlib.sha256(data).hexdigest()
 
 
-def write(out_dir, draft, review, checks, sources, profile, meta, html=False):
+def implement_md_extend(draft, profile, review, meta, live, ops):
+    """IMPLEMENT.md for an EXTEND bundle (QA B2): additive only, head untouched, JSON-LD merged, verifier mandatory."""
+    from . import extend as extend_mod
+    writer = _cap((meta or {}).get("writer_model"), 80) or "unknown"
+    slug = _slug(draft)
+    links = _links(draft)
+    out = ["# Implementation instructions - extend %s" % slug, "",
+           "You are an AI coding agent. Implement this extension exactly as described. Do not make choices of your own.",
+           "Written by %s, passed the deterministic checks, adversarially reviewed and approved by %s."
+           % (writer, _reviewer_label(review, meta)),
+           "Bundle %s, generated %s." % (_cap((meta or {}).get("bundle_id"), 64) or "n/a", _today(meta)), "",
+           extend_mod.implement_section(draft, live, ops, _one_line), "## 5. Internal links", ""]
+    if not links:
+        out.append("No internal links are queued. Add none.")
+    for i, link in enumerate(links, 1):
+        out.append('%d. on page `%s` link the existing text "%s" to `%s` (if that text is not on the page, report it; do '
+                   'not rewrite the page)' % (i, link["from"], link["anchor"], slug))
+    out += ["", "## 6. Do not", "",
+            "- Change the title, meta description, H1, canonical, og/twitter tags, URL or template of this page.",
+            "- Replace, delete, merge or reorder any JSON-LD block or node.",
+            "- Add facts, numbers, claims, images, headings or links that are not in `page.md`.",
+            "- Touch any page other than this one and the pages named in section 5.",
+            "- Edit the files in this bundle directory.", "",
+            "## 7. Acceptance checks you must run", "",
+            "1. Save the live page source you started from as ORIGINAL.html and your result as NEW.html, then run",
+            "   `python3 verify_extend.py ORIGINAL.html NEW.html`. It must print `OK`. It checks: the original is the",
+            "   reviewed page (sha256), the head and H1 are unchanged, the JSON-LD equals `jsonld.after.json`, and the",
+            "   only other differences are ONE inserted block after the anchor and the declared live changes.",
+            "2. The visible text of the inserted block reads the same as the body of `page.md` (no words added or dropped).",
+            "3. Each internal link from section 5 is present with the given anchor and target.",
+            "", "## 8. How to report back", "",
+            "Reply with: the full output of verify_extend.py, the diff summary (files, lines added and removed), each",
+            "internal link and whether it was added, and anything you could not do. Do not claim a check passed unless",
+            "you ran it.", ""]
+    return "\n".join(out)
+
+
+def write(out_dir, draft, review, checks, sources, profile, meta, html=False, live=None):
     """Write the approved bundle atomically. Refuses unless the review verdict is 'approve' and checks ok."""
     if not isinstance(draft, dict):
         raise ToolError("bundle.write: draft must be a dict")
@@ -532,6 +572,12 @@ def write(out_dir, draft, review, checks, sources, profile, meta, html=False):
     if os.path.exists(final):
         raise ToolError("bundle.write: refused — %s already exists, refusing to overwrite." % name)
 
+    ext_files, ext_ops = {}, []
+    if _cap(draft.get("mode"), 20) == "extend":
+        if not isinstance(live, dict):
+            raise ToolError("bundle.write: an extend bundle needs the live page (head + JSON-LD) it extends")
+        from . import extend as extend_mod
+        ext_files, ext_ops, _after = extend_mod.bundle_files(draft, live, today)
     fm = front_matter(draft, profile, today, meta)
     body = _body_block(draft)
     page = fm + "\n" + body + "\n"
@@ -540,7 +586,8 @@ def write(out_dir, draft, review, checks, sources, profile, meta, html=False):
         page += "\n## FAQ\n\n"
         for item in faq:
             page += "### %s\n\n%s\n\n" % (item["q"], item["a"])
-    impl = implement_md(draft, profile, review, meta)
+    impl = (implement_md_extend(draft, profile, review, meta, live, ext_ops) if ext_files
+            else implement_md(draft, profile, review, meta))
     summary = _sources_summary(sources)
     reviewer = review.get("reviewer") if isinstance(review.get("reviewer"), dict) else {}
 
@@ -556,8 +603,13 @@ def write(out_dir, draft, review, checks, sources, profile, meta, html=False):
                                             json.dumps(checks, indent=1, ensure_ascii=True) + "\n")
         hashes["sources.json"] = _write_file(os.path.join(tmp, "sources.json"),
                                              json.dumps(summary, indent=1, ensure_ascii=True) + "\n")
-        if html:
+        if html and not ext_files:
             hashes["page.html"] = _write_file(os.path.join(tmp, "page.html"), render_html(draft, profile))
+        for name, text in ext_files.items():
+            hashes[name] = _write_file(os.path.join(tmp, name), text)
+        # the exact approved draft, so publish can re-run the content checks on what it is about to write (QA minor)
+        hashes["draft.json"] = _write_file(os.path.join(tmp, "draft.json"),
+                                           json.dumps(draft, indent=1, ensure_ascii=True, sort_keys=True) + "\n")
         manifest = {
             "files": hashes,
             "bundle_id": bundle_id,
@@ -565,6 +617,9 @@ def write(out_dir, draft, review, checks, sources, profile, meta, html=False):
             "verdict": "approve",
             "reviewer_model": _cap(reviewer.get("model_answered"), 80) or _cap(meta.get("reviewer_model"), 80),
             "writer_model": _cap(meta.get("writer_model"), 80),
+            # QA B3: a bundle is bound to the site it was built for
+            "site": _cap(profile.get("site"), 300), "host": _cap(profile.get("host"), 300),
+            "today": today, "mode": _cap(draft.get("mode"), 20),
         }
         _write_file(os.path.join(tmp, "MANIFEST.json"), json.dumps(manifest, indent=1, ensure_ascii=True) + "\n")
         os.rename(tmp, final)
@@ -752,8 +807,26 @@ def selftest() -> int:
         chk("EXTEND" in ext_impl, "extend is labelled as an extend")
         chk("date_published" not in front_matter(ext, profile, "2026-11-10", meta),
             "extend front matter has no date_published")
-        res2 = write(os.path.join(root, "ext"), ext, review, checks, sources, profile, meta)
+        from . import extend as extend_mod
+        live = extend_mod.live_page("<html><head><title>T</title></head><body><h1>T</h1><p>We charge a management fee."
+                                    "</p></body></html>", "https://example.com/x/")
+        try:
+            write(os.path.join(root, "ext0"), ext, review, checks, sources, profile, meta)
+            chk(False, "extend without the live page must be refused")
+        except ToolError:
+            chk(True, "extend bundle refused without the live page (QA B2)")
+        res2 = write(os.path.join(root, "ext"), ext, review, checks, sources, profile, meta, live=live)
         chk(verify(res2["path"])[0] is True, "extend bundle verifies")
+        names = set(os.listdir(res2["path"]))
+        chk({"verify_extend.py", "extend.json", "jsonld.before.json", "jsonld.after.json", "draft.json"} <= names,
+            "extend bundle ships the verifier, the merge spec and the approved draft")
+        with open(os.path.join(res2["path"], "IMPLEMENT.md"), encoding="utf-8") as fh:
+            ximpl = fh.read()
+        chk("ALREADY LIVE" in ximpl and "verify_extend.py" in ximpl and "<h1>" not in ximpl.split("## 3.")[0],
+            "extend IMPLEMENT explains an extend and requires the verifier")
+        chk("exactly one `<h1>`" not in ximpl, "extend IMPLEMENT never demands a new H1 (QA B2)")
+        with open(os.path.join(res2["path"], "MANIFEST.json"), encoding="utf-8") as fh:
+            chk(json.load(fh).get("site") == profile.get("site"), "manifest records the site (QA B3)")
 
         # tampering with a single byte must fail verification
         tampered = os.path.join(root, "tampered")
