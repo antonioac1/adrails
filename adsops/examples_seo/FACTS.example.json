@@ -1,18 +1,9 @@
 {
  "version": 1,
- "approved_by": "Jane Doe",
- "approved_at": "2026-11-10",
+ "proposed": true,
+ "note": "PLACEHOLDER. Replace every fact with true statements about YOUR business, delete the REPLACE markers, then a human approves it: adsops-mcp seo-run --profile site-profile.json --approve-facts \"Your Name\". The pipeline refuses this file until then.",
  "facts": [
-  {
-   "id": "fee",
-   "text": "Our management fee is $99 per month per home.",
-   "source": "https://www.example.com/pricing/"
-  },
-  {
-   "id": "area",
-   "text": "We serve owners in Example County.",
-   "source": "https://www.example.com/about/"
-  }
- ],
- "approval_sha256": "c64d22343f804db988f9ddfa3fcc56d337bcfc7b0077560d0855db8453f2bf02"
+  {"id": "fee", "text": "REPLACE: our management fee is $X per month per home.", "source": "https://www.example.com/pricing/"},
+  {"id": "area", "text": "REPLACE: we serve owners in <your county>.", "source": "https://www.example.com/about/"}
+ ]
 }

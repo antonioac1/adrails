@@ -291,6 +291,17 @@ def _validate_facts(raw_facts):
     return facts, lines
 
 
+_PLACEHOLDER = re.compile(r"\bREPLACE\b|<your ")
+
+
+def _refuse_placeholders(facts):
+    """QA N1: a copied example is never a real approval."""
+    for f in facts or []:
+        blob = " ".join(str(f.get(k, "")) for k in ("text", "source")) if isinstance(f, dict) else str(f)
+        if _PLACEHOLDER.search(blob):
+            _fail("the facts file still contains placeholder text (REPLACE markers): write your own facts first.")
+
+
 def approval_hash(facts, approved_by=None, approved_at=None):
     """The binding hash over the exact `facts` list AND who approved it on which day. It makes any later edit visible
     (tamper-evident); it is not a signature: whoever can write the file can also re-run the approval."""
@@ -539,6 +550,7 @@ def load_facts(path, today=None):
 
     raw_facts = data.get("facts")
     facts, lines = _validate_facts(raw_facts)
+    _refuse_placeholders(raw_facts)   # QA N1
 
     expected = data.get("approval_sha256")
     actual = approval_hash(raw_facts, data.get("approved_by"), data.get("approved_at"))
@@ -568,6 +580,7 @@ def approve_file(path, approved_by, today=None):
 
     raw_facts = data.get("facts")
     _validate_facts(raw_facts)
+    _refuse_placeholders(raw_facts)   # QA N1
 
     data.pop("proposed", None)
     data["approved_by"] = approver
@@ -1080,4 +1093,13 @@ def selftest() -> int:
         chk(fails(lambda: write_proposal(os.path.join(root, "..", "escape.json"), prop, base_dir=contained_dir),
                   "inside"), "write_proposal refuses an escape from base_dir")
 
+    with tempfile.TemporaryDirectory() as td:
+        ex = os.path.join(td, "F.json")
+        with open(ex, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "facts": [{"id": "fee", "text": "REPLACE: our fee is $X."}]}, fh)
+        try:
+            approve_file(ex, "Lazy Copier", today=date(2026, 11, 11))
+            chk(False, "placeholder facts must not be approvable")
+        except ToolError:
+            chk(True, "placeholder facts cannot be approved (QA N1)")
     return n

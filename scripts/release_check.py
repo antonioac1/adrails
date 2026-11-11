@@ -86,10 +86,10 @@ def offline():
     from adsops.content import facts as _f
     try:
         _f.load_facts(os.path.join(ROOT, "adsops", "examples_seo", "FACTS.example.json"))
+        ok_f, why_f = False, "the shipped example loads as APPROVED"
+    except Exception:                                            # noqa: BLE001 - refusal is the expected result
         ok_f, why_f = True, ""
-    except Exception as e:                                       # noqa: BLE001
-        ok_f, why_f = False, str(e)[:160]
-    check("FACTS.example.json loads as an approved facts file", ok_f, why_f)
+    check("FACTS.example.json is an unapproved placeholder (QA N1)", ok_f, why_f)
     from adsops import guides as _g
     check("playbook seo-content ships", any(p["name"] == "seo-content" for p in _g.available()))
     st = os.popen("cd %s && git status --porcelain 2>/dev/null" % ROOT).read().strip()
