@@ -192,3 +192,19 @@ pages, Search Console query strings, and every model output (writer, reviewer, e
   pages, same host (and its www twin) only, redirects re-checked on every hop; sources only https on allowed domains.
 - **Learning gone wrong.** No code or weights change. LESSONS.md lines are generated only for groups with 3+ measured pieces,
   carry their evidence, are capped (20 lines, 20 KB), and a line the operator deletes is suppressed for good.
+
+### Addendum 2026-11-11 (QA fix round on 0.12)
+- **Wrong-site publish:** blocked. A bundle records its site; publish compares it and the canonical host with the profile
+  inside the lock, in every mode and target.
+- **Edited bundle published in auto mode:** blocked unless the attacker can also rewrite the audit chain. A review appends
+  the bundle's MANIFEST digest to the chain; publish needs that record, re-derives page.md from the approved draft.json and
+  re-runs the content checks against the current FACTS. **Residual:** someone with write access to the chain, the bundle
+  and the facts file as the server's user can still forge all three (same boundary as every local file).
+- **Extensions damaging live pages:** an extend bundle never carries a new title, description, H1, canonical or og tags; its
+  JSON-LD is a merge (`jsonld.after.json`), and the shipped `verify_extend.py` refuses any other change. **Residual:** the
+  verifier works on the page source; a CMS that rewrites markup may need a looser comparison.
+- **Spoofed spellings:** format characters are stripped (and also read as spaces) and Cyrillic/Greek lookalikes are folded
+  before every rule; words that mix scripts are held. **Residual:** confusables outside the documented table (for example
+  Armenian or mathematical letters beyond what NFKC folds) are not folded.
+- **Facts approval:** `approval_sha256` makes edits after approval visible; it is not a signature.
+- **Hidden page text:** CSS-hidden text in a live page is passed to models as data (fenced), not removed.
