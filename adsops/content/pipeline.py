@@ -532,11 +532,11 @@ def review_draft(profile, facts, chains, io, *, draft_id, budget=None, run_id=No
             return res
     out = bundle_mod.write(p["bundles"], final, rec, final_check, srcs, profile, meta, html=html,
                            live=ctx.get("live_page"))
-    if chain is not None:                              # publish() only accepts bundles recorded here
-        from . import publish as publish_mod
-        publish_mod.record_bundle(chain, out["path"])
-    else:
-        res["note"] = "bundle not recorded on the audit chain: the publisher will refuse it (IMPLEMENT.md still applies)"
+    if chain is None:                                  # QA N6: the default path records on the profile's own chain
+        from .. import auditchain
+        chain = auditchain.AuditChain(os.path.join(p["state"], "audit-chain.jsonl"))
+    from . import publish as publish_mod                # publish() only accepts bundles recorded here
+    publish_mod.record_bundle(chain, out["path"])
     res.update(ok=True, bundle=out["path"])
     return res
 

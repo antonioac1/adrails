@@ -62,7 +62,36 @@ def _profile_path(cfg, site):
     return m[site]
 
 
+def _fixtures(cfg):
+    """TEST ONLY (QA N15): config "seo_content": {"test_fixtures": {"gsc": "rows.json", "site": "pages.json"}} serves
+    Search Console rows and site pages from local files so the CLI stages can be exercised end to end with a loopback
+    model endpoint. rows.json = {"query,page": [raw GSC rows], "date,page": [...]}; pages.json = {url: html}. Every run
+    that uses them says so in its output ("fixtures": true). Never configure this for a real site."""
+    fx = ((cfg or {}).get("seo_content") or {}).get("test_fixtures")
+    if not fx:
+        return None, None
+    base = os.path.dirname(os.path.abspath(os.path.expanduser((cfg or {}).get("_config_path") or ".")))
+    with open(os.path.join(base, fx["gsc"]), encoding="utf-8") as f:
+        rows = json.load(f)
+    with open(os.path.join(base, fx["site"]), encoding="utf-8") as f:
+        pages = json.load(f)
+
+    def gsc(site, start, end, dims):
+        return rows.get(",".join(dims), [])
+
+    def fetch(url):
+        if url not in pages:
+            return {"url": url, "status": 404, "headers": {}, "body": "", "truncated": False, "error": None, "ctype": ""}
+        ct = "application/xml" if url.endswith(".xml") else "text/html; charset=utf-8"
+        return {"url": url, "status": 200, "headers": {"content-type": ct}, "body": pages[url], "truncated": False,
+                "error": None, "ctype": ct}
+    return gsc, fetch
+
+
 def make_io(cfg, profile, gsc_client=None, fetch=None, http=None, run_cmd=None, now=time.time):
+    fx_gsc, fx_fetch = _fixtures(cfg)
+    if fx_gsc is not None:
+        return pipeline.IO(fetch=fx_fetch, http=http, run_cmd=run_cmd, gsc=lambda s, a, b, d: fx_gsc(s, a, b, d), now=now)
     client = gsc_client
     if client is None:
         try:
@@ -96,10 +125,15 @@ def _audit_run(cfg, host):
         return None
 
 
+class _Ctx:                                               # QA N6: the CLI has no server ctx
+    now = staticmethod(time.time)
+
+
 def _queue(cfg, ctx):
+    """The signed approvals queue (needs ADRAILS_APPROVAL_SECRET, 32+ chars). None when approvals are not configured."""
     try:
         from .enterprise_tools import _approval_queue
-        return _approval_queue(cfg or {}, ctx)
+        return _approval_queue(cfg or {}, ctx or _Ctx())
     except ToolError:
         return None
 
@@ -329,7 +363,9 @@ def main(argv=None, cfg=None):
     ap.add_argument("--approve-facts", metavar="NAME", help="a human approves the profile's facts file as NAME "
                                                             "(records the date and a hash of the approved content)")
     ap.add_argument("--config", help="AdRails config (Search Console credential, approvals, audit chain)")
-    ap.add_argument("--stage", choices=["run", "plan", "results", "publish", "facts"], default="run")
+    ap.add_argument("--stage", choices=["run", "plan", "results", "publish", "facts", "request"], default="run",
+                    help="request: ask for a human approval of --bundle (prints the signed approve/reject tokens)")
+    ap.add_argument("--approve-token", help="a human approves (or rejects) a publish request with the signed token")
     ap.add_argument("--candidate")
     ap.add_argument("--bundle", help="publish: bundle id (default: every approved, unpublished bundle, oldest first)")
     ap.add_argument("--dry-run", action="store_true")
@@ -353,8 +389,39 @@ def main(argv=None, cfg=None):
     if cfg is None and a.config:
         from . import config as config_mod
         cfg = config_mod.load_config(a.config)
+        cfg["_config_path"] = os.path.abspath(a.config)
     cfg = cfg or {"audit_log": os.path.join(os.path.dirname(os.path.abspath(a.profile)), "state", "audit.jsonl")}
+    fixtures = bool(_fixtures(cfg)[0]) if cfg else False
     try:
+        if a.approve_token:                                # QA N6: human approval from the CLI, audited
+            q = _queue(cfg, None)
+            if q is None:
+                raise ToolError("approvals are not configured: set ADRAILS_APPROVAL_SECRET (32+ chars)")
+            out = q.decide(a.approve_token, decided_by=os.environ.get("USER") or "human")
+            _chain(cfg).append("content_approval_decision", {"request_id": out.get("request_id"),
+                                                             "status": out.get("status"), "plan": out.get("plan_id")},
+                               actor=os.environ.get("USER") or "human")
+            print(json.dumps(out, indent=1, default=str))
+            return 0
+        if a.stage == "request":
+            profile = facts_mod.load_profile(a.profile)
+            if not a.bundle:
+                raise ToolError("--stage request needs --bundle ID")
+            b = _bundle_path(profile, a.bundle)
+            man, rv = publish_mod.check_bundle(b)
+            q = _queue(cfg, None)
+            if q is None:
+                raise ToolError("approvals are not configured: set ADRAILS_APPROVAL_SECRET (32+ chars)")
+            st = publish_mod.settings(profile)
+            r = q.request(publish_mod.plan_id_for(b, profile), profile["host"],
+                          "publish bundle %s to %s %s (reviewed by %s)" % (a.bundle, st["target"], st.get("dir") or "",
+                                                                          (rv.get("reviewer") or {}).get("model_answered")),
+                          risk="medium")
+            _chain(cfg).append("content_approval_request", {"request_id": r["request_id"], "plan": r["plan_id"],
+                                                            "bundle": a.bundle}, actor="cli")
+            out = dict(r, note="a HUMAN approves with: adsops-mcp seo-run --profile P --approve-token <approve_token>")
+            print(json.dumps(out, indent=1, default=str))
+            return 0
         if a.stage == "run":
             profile = facts_mod.load_profile(a.profile)
             out = pipeline.run_once(a.profile, make_io(cfg, profile), candidate_id=a.candidate, html=a.html,
@@ -398,6 +465,8 @@ def main(argv=None, cfg=None):
     except ToolError as e:
         print(json.dumps({"ok": False, "error": scrub(str(e), 500)}))
         return 2
+    if fixtures and isinstance(out, dict):
+        out["fixtures"] = True
     print(json.dumps(out, indent=1, default=str))
     return 0
 
