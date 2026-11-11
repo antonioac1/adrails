@@ -45,6 +45,42 @@ _ONCE_CHARS = {
 }
 _ZERO = "\u200b\u200c\u200d\u2060\ufeff\u180e\u00ad"     # PM (GLM review #2): soft hyphen is dropped, not a dash
 _TRANS = str.maketrans(_ONCE_CHARS)
+# QA M11: Cyrillic/Greek letters that look like Latin ones fold to their ASCII skeleton before ANY rule matches
+# (a documented subset of Unicode confusables: the lookalikes that can spell English words).
+_CONFUSABLES = {
+    "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
+    "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04bb": "h", "\u0261": "g", "\u043a": "k",
+    "\u043c": "m", "\u043d": "h", "\u0442": "t", "\u0432": "b", "\u044c": "b", "\u0491": "r",
+    "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M", "\u041d": "H", "\u041e": "O",
+    "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0425": "X", "\u0423": "Y", "\u0406": "I", "\u0408": "J",
+    "\u0405": "S", "\u03b1": "a", "\u03b5": "e", "\u03bf": "o", "\u03c1": "p", "\u03c4": "t", "\u03ba": "k",
+    "\u03b9": "i", "\u03bd": "v", "\u03c5": "u", "\u03c7": "x", "\u0391": "A", "\u0392": "B", "\u0395": "E",
+    "\u0396": "Z", "\u0397": "H", "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
+    "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X",
+}
+_CONF = str.maketrans(_CONFUSABLES)
+
+
+def strip_format(s):
+    """Remove every Unicode format character (category Cf: zero-width spaces/joiners, bidi marks, soft hyphen...)."""
+    return "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
+
+
+def mixed_script_words(text, limit=20):
+    """Words that mix Latin letters with Cyrillic or Greek ones ("guar\u0430nteed"): a spoofing signal (QA M11)."""
+    out = []
+    for w in re.findall(r"\w+", strip_format(text or "")):
+        scripts = set()
+        for ch in w:
+            if ch.isalpha():
+                name = unicodedata.name(ch, "")
+                scripts.add("LATIN" if name.startswith("LATIN") else "CYRILLIC" if name.startswith("CYRILLIC")
+                            else "GREEK" if name.startswith("GREEK") else "OTHER")
+        if "LATIN" in scripts and scripts & {"CYRILLIC", "GREEK"}:
+            out.append(w)
+            if len(out) >= limit:
+                break
+    return out
 _DROP = str.maketrans({c: None for c in _ZERO})
 
 _WS_RE = re.compile(r"\s+")
@@ -115,8 +151,8 @@ def _prepare(text):
     if not s:
         return ""
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = unicodedata.normalize("NFKC", s.translate(_DROP))       # PM (GLM review #2): fullwidth digits, ligatures, ...
-    s = s.translate(_TRANS)
+    s = unicodedata.normalize("NFKC", strip_format(s.translate(_DROP)))   # fullwidth digits, ligatures; all Cf removed
+    s = s.translate(_TRANS).translate(_CONF)                              # QA M11: lookalike letters -> ASCII
     return _WS_RE.sub(" ", s).strip()
 
 
@@ -530,4 +566,9 @@ def selftest() -> int:
     chk(trace("vacancy fell 5%", "vacancy fell 5% last year") == [], "a quoted percent traces the same percent")
     chk(len(word_statistics("twice as many owners renew")) == 1, "twice as many is a word statistic")
     chk(len(trace("x" + "9" * 50 + " homes")) >= 0 and len(trace("we have " + "9" * 50 + " homes")) == 1, "41+ digit token is flagged")
+    chk(norm("guaranteed\u200breturns") == "guaranteedreturns" and norm("guar\u0430nteed") == "guaranteed",
+        "zero-width removed and Cyrillic a folded (QA M11)")
+    chk(norm("\u0410cme \u0420M") == "acme pm" and norm("\u202eabc") == "abc", "uppercase lookalikes + bidi marks")
+    chk(mixed_script_words("we are guar\u0430nteed") == ["guar\u0430nteed"] and mixed_script_words("\u043f\u0440\u0438\u0432\u0435\u0442 hello") == [],
+        "mixed-script words detected, pure Cyrillic words are not")
     return n

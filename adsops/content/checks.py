@@ -24,6 +24,7 @@ Public helpers: `visible_text(draft)`, `strip_markdown(md)`, `md_links(md)`.
 import html as html_mod
 import json
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 from ..errors import ToolError, scrub
@@ -530,7 +531,13 @@ def _run(draft, ctx, err, warn, stats, errors_so_far=lambda: []):
 
     # 3. ruling checks on the visible text ---------------------------------------------------------------
     low_text = numbers.norm(under)
-    low = low_text
+    # QA M11: a format character (zero-width space, joiner, soft hyphen, bidi mark) may stand where a space was: rule
+    # matching sees the text both with those characters dropped and with them read as spaces.
+    spaced = "".join(" " if unicodedata.category(ch) == "Cf" else ch for ch in under)
+    low = low_text + "\n" + numbers.norm(spaced)
+    for w in numbers.mixed_script_words(visible):
+        err("MIXED_SCRIPT", 'the word "{}" mixes Latin with Cyrillic or Greek letters (lookalike spoofing)'.format(
+            _clip(w, 60)))
     # PM (lesson from REVIEW-C F1): verified source quotes are published in the bundle too, so the rulings that are
     # about WHAT the page says (banned phrases, excluded areas, competitors) also run on them.
     low = low + "\n" + numbers.norm("\n".join(_strings(_mdict(ctx).get("verified_quotes"), MAX_TEXT // 4)))
@@ -1062,4 +1069,10 @@ def selftest() -> int:
     chk("UNTRACED_NUMBER" in {e["code"] for e in r_ld["errors"]}, "a JSON-LD price is traced like body text (GLM #4)")
     r_ent = run(draft(body_md=body + " Acme&#32;PM is slower."), ctx())
     chk("COMPETITOR" in {e["code"] for e in r_ent["errors"]}, "HTML entities are decoded before the rulings (GLM #5)")
+    for spoof, code in (("guaranteed\u200breturns", "BANNED_PHRASE"), ("guar\u0430nteed returns", "BANNED_PHRASE"),
+                        ("Acme\u200c PM", "COMPETITOR"), ("\u0410cme PM", "COMPETITOR"), ("Spr\u0456ngfield", "EXCLUDED_AREA"),
+                        ("Spring\u00adfield", "EXCLUDED_AREA"), ("the b\u0435st team", "SUPERLATIVE")):
+        rc = codes(run(draft(body_md=body + " We offer " + spoof + " here."), ctx()))
+        chk(code in rc, "spoofed %r is caught as %s (QA M11): %s" % (spoof, code, sorted(rc)))
+    chk("MIXED_SCRIPT" in codes(run(draft(body_md=body + " guar\u0430nteed"), ctx())), "mixed-script word held")
     return n

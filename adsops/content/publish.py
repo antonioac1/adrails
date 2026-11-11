@@ -111,7 +111,7 @@ def _on_chain(chain, digest):
 
 
 _CONTENT_CODES = {"UNTRACED_NUMBER", "WORD_STATISTIC", "BANNED_PHRASE", "SUPERLATIVE", "COMPETITOR", "EXCLUDED_AREA",
-                  "URL_IN_TEXT", "RAW_HTML", "JSONLD", "AUTHOR", "SCHEMA"}
+                  "URL_IN_TEXT", "RAW_HTML", "JSONLD", "AUTHOR", "SCHEMA", "MIXED_SCRIPT"}
 
 
 def _recheck(bundle_dir, man, profile, page_bytes, facts_text):
