@@ -200,6 +200,10 @@ old, new = (open(p, encoding="utf-8").read() for p in sys.argv[1:3])
 VOID = set("area base br col embed hr img input link meta param source track wbr".split())
 FORBID = set("script iframe object embed style form link meta template noscript details dialog svg math base frame "
              "frameset input button select textarea".split())
+# round 2 review: the insert may only use elements whose text a browser renders as page content (allowlist)
+ALLOW = set("p h1 h2 h3 h4 h5 h6 ul ol li dl dt dd a strong em b i u s small mark sub sup abbr cite q code pre kbd "
+            "blockquote br hr table thead tbody tfoot tr th td caption div section article aside span figure "
+            "figcaption".split())
 HIDE_CLASS = re.compile(r"(^|\s)(hidden|d-none|sr-only|visually-hidden|invisible|collapse)(\s|$)", re.I)
 fails = []
 if max(len(old), len(new)) > 5000000:
@@ -208,15 +212,14 @@ if hashlib.sha256(old.encode("utf-8", "surrogatepass")).hexdigest() != spec["ori
     fails.append("ORIGINAL.html is not the page this bundle was reviewed against (sha256 differs): stop and report")
 class P(HTMLParser):
     def __init__(s):
-        super().__init__(convert_charrefs=True); s.t, s.ld, s._ld = [], [], None
+        super().__init__(convert_charrefs=True); s.t, s.ld, s._ld, s.ldattrs = [], [], None, []
     def handle_starttag(s, tag, attrs):
         if tag == "script" and any(k == "type" and (v or "").strip().lower() == "application/ld+json" for k, v in attrs):
-            s._ld = []; return
+            s.ldattrs.append(tuple(sorted((k, v or "") for k, v in attrs))); s._ld = []; return
         s.t.append(("S", tag, tuple(sorted((k, v or "") for k, v in attrs))))
     def handle_startendtag(s, tag, attrs):
+        # "<div/>" leaves a div OPEN in HTML: only void elements close themselves (round 2 review)
         s.handle_starttag(tag, attrs)
-        if tag not in VOID and s._ld is None:
-            s.t.append(("E", tag))
     def handle_endtag(s, tag):
         if tag == "script" and s._ld is not None:
             s.ld.append("".join(s._ld)); s._ld = None; return
@@ -238,9 +241,13 @@ def parse(h):
     p = P(); p.feed(h); p.close()
     if p._ld is not None:
         p.t.append(("X", "unclosed script"))
-    return p.t, p.ld
-O, _ = parse(old)
-N, ldn = parse(new)
+    return p.t, p.ld, p.ldattrs
+O, _, lda_o = parse(old)
+N, ldn, lda_n = parse(new)
+# JSON-LD script tags are compared separately; their attributes may not change (a new block: type only)
+_ok_ld = set(lda_o) | {(("type", "application/ld+json"),)}
+if any(a not in _ok_ld for a in lda_n):
+    fails.append("a JSON-LD <script> tag has attributes the original page does not have")
 def _nodup(pairs):
     if len({k for k, _ in pairs}) != len(pairs):
         raise ValueError("duplicate JSON key")
@@ -251,9 +258,14 @@ except (ValueError, RecursionError):
     got = None
 if got != after:
     fails.append("the JSON-LD blocks are not exactly jsonld.after.json (same blocks and nodes, same order)")
+_prot, _open = set(), []
+for i, tok in enumerate(O):          # text in <head>, <title> and <h1> is protected: declared changes never apply there
+    if tok[0] == "S" and tok[1] in ("head", "title", "h1"): _open.append(tok[1])
+    elif tok[0] == "E" and tok[1] in _open: _open.remove(tok[1])
+    elif tok[0] == "T" and _open: _prot.add(i)
 for c in spec["live_changes"]:
     for i, tok in enumerate(O):
-        if tok[0] == "T" and c["before"] and c["before"] in tok[1]:
+        if tok[0] == "T" and i not in _prot and c["before"] and c["before"] in tok[1]:
             O[i] = ("T", " ".join(tok[1].replace(c["before"], c["after"], 1).split())); break
     else:
         fails.append("declared change not found on the original page: %r" % c["before"][:80])
@@ -296,7 +308,8 @@ if p is not None:
             if t[0] in "CDX":
                 fails.append("the inserted block contains a comment, declaration or unclosed element"); break
             if t[0] == "S":
-                if t[1] in FORBID: fails.append("the inserted block contains a <%s> element" % t[1])
+                if t[1] in FORBID or t[1] not in ALLOW:
+                    fails.append("the inserted block contains a <%s> element" % t[1])
                 for a, v in t[2]:
                     if a.startswith("on") or a in ("hidden", "aria-hidden", "style", "srcdoc", "inert"):
                         fails.append("the inserted block uses the %r attribute" % a)
@@ -320,6 +333,14 @@ sys.exit(1 if fails else 0)
 '''
 
 
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^ {0,3}\1[ \t]*$|\Z)", re.M | re.S)
+
+
+def _no_code(body):
+    """Markdown without fenced code blocks (a '# x' line inside a fence is not a heading)."""
+    return _FENCE_RE.sub("", body)
+
+
 def bundle_files(draft, live, today):
     """-> (files {name: text}, ops, after_blocks) for an extend bundle."""
     after, ops = merge_jsonld(live["jsonld"], draft.get("faq"), today)
@@ -329,7 +350,7 @@ def bundle_files(draft, live, today):
     hrefs = sorted({l["target"] for l in checks_mod.md_links(body)})
     spec = {"page": live["url"], "original_sha256": live["sha256"], "insert_after": draft.get("insert_after"),
             "insert_words": words, "allowed_hrefs": hrefs,
-            "insert_headings": [len(h) for h in re.findall(r"^(#{1,6})[ \t]", body, re.M)],
+            "insert_headings": [len(h) for h in re.findall(r"^ {0,3}(#{1,6})[ \t]", _no_code(body), re.M)],
             "live_changes": [{"before": c.get("before", ""), "after": c.get("after", "")}
                              for c in draft.get("live_changes") or [] if isinstance(c, dict)],
             "head_unchanged": live["head"], "jsonld_ops": ops}
@@ -490,10 +511,42 @@ def selftest() -> int:
         "h2 -> h6": good.replace("<h2>New</h2>", "<h6>New</h6>"),
         "unclosed <p>": good.replace("<p>New text.</p>", "<p>New text.</p><p>"),
         "hiding class": good.replace("<p>New text.</p>", "<p class=\"sr-only\">New text.</p>"),
+        # round 2 adversarial reviews
+        "ld+json tag gains attributes": good.replace("<script type=\"application/ld+json\">",
+                                                     "<script type=\"application/ld+json\" onload=\"x()\" src=\"https://e/x\">"),
+        "text inside <title> in the insert": good.replace("<p>New text.</p>", "<title>New text.</title>"),
+        "text inside <canvas> in the insert": good.replace("<p>New text.</p>", "<canvas>New text.</canvas>"),
+        "non-void self-closing <div/>": good.replace("<p>New text.</p>", "<div id=\"x\"/><p>New text.</p>"),
     }
     for label, bad in damage.items():
         rc, out = verify(bad)
         ck(rc == 1, "QA N3 damage refused: %s (%s)" % (label, out.strip()[:80]))
+    # round 2 review: a declared change is never applied to <title>/<h1> text (even when the same text is there)
+    tmp_h = tempfile.mkdtemp(prefix="adrails-ext-h1-")
+    page_h = page.replace("<h1>Rent or Sell?</h1>", "<h1>Call us.</h1>")
+    files_h, _, after_h = bundle_files(draft, live_page(page_h, "https://ex.com/a/"), "2026-11-11")
+    for name, text in files_h.items():
+        with open(os.path.join(tmp_h, name), "w", encoding="utf-8") as f:
+            f.write(text)
+    with open(os.path.join(tmp_h, "orig.html"), "w", encoding="utf-8") as f:
+        f.write(page_h)
+    good_h = re.sub(_LD_RE, lambda m: "<script type=\"application/ld+json\">%s</script>" % json.dumps(after_h[0]), page_h)
+    good_h = good_h.replace("<p>We charge $149.</p>\n", "<p>We charge $149.</p>\n<h2>New</h2>\n<p>New text.</p>\n")
+
+    def verify_h(new_html):
+        with open(os.path.join(tmp_h, "new.html"), "w", encoding="utf-8") as f:
+            f.write(new_html)
+        r = subprocess.run([sys.executable, os.path.join(tmp_h, "verify_extend.py"), os.path.join(tmp_h, "orig.html"),
+                            os.path.join(tmp_h, "new.html")], capture_output=True, text=True)
+        return r.returncode
+    ck(verify_h(good_h.replace("<p>Call us.</p>", "<p>Call us today.</p>")) == 0, "declared body change verifies")
+    ck(verify_h(good_h.replace("<h1>Call us.</h1>", "<h1>Call us today.</h1>")) == 1,
+       "a declared change applied to the H1 instead of the body fails")
+    ck(bundle_files(dict(draft, body_md="## New\n\n```\n# not a heading\n```\n\nNew text."), live,
+                    "2026-11-11")[0]["extend.json"].count('"insert_headings"') == 1 and
+       json.loads(bundle_files(dict(draft, body_md="## New\n\n```\n# not a heading\n```\n\nNew text."), live,
+                               "2026-11-11")[0]["extend.json"])["insert_headings"] == [2],
+       "a '#' line inside a code fence is not an expected heading")
     # QA N4: a merge that ADDS a new JSON-LD block verifies when implemented correctly
     page2 = page.replace(re.search(_LD_RE, page).group(0), "")
     live2 = live_page(page2, "https://ex.com/a/")

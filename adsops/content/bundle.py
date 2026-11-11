@@ -408,12 +408,15 @@ def _inline(raw):
     return "".join(out)
 
 
-def render_html(draft, profile, jsonld=None):
+def render_html(draft, profile, jsonld=None, today=None):
     """Minimal standalone page: everything escaped, markdown subset only, links limited to '/...' and https."""
     if not isinstance(draft, dict):
         raise ToolError("bundle.render_html: draft must be a dict")
-    today = _cap(draft.get("date_modified") or "", 20)
-    today = today if DATE_RX.match(today) else __import__("datetime").date.today().isoformat()   # no fixed year
+    # deterministic: the draft's date, else the bundle day passed in; the wall clock only as a last resort
+    day = _cap(draft.get("date_modified") or "", 20)
+    if not DATE_RX.match(day):
+        day = _cap(today or "", 20)
+    today = day if DATE_RX.match(day) else __import__("datetime").date.today().isoformat()
     slug = _slug(draft)
     canonical = _canonical(profile, slug)
     data = jsonld if isinstance(jsonld, (dict, list)) else bundle_jsonld(draft, profile, today)
@@ -609,7 +612,7 @@ def write(out_dir, draft, review, checks, sources, profile, meta, html=False, li
         hashes["sources.json"] = _write_file(os.path.join(tmp, "sources.json"),
                                              json.dumps(summary, indent=1, ensure_ascii=True) + "\n")
         if html and not ext_files:
-            hashes["page.html"] = _write_file(os.path.join(tmp, "page.html"), render_html(draft, profile))
+            hashes["page.html"] = _write_file(os.path.join(tmp, "page.html"), render_html(draft, profile, today=today))
         for name, text in ext_files.items():
             hashes[name] = _write_file(os.path.join(tmp, name), text)
         # the exact approved draft, so publish can re-run the content checks on what it is about to write (QA minor)

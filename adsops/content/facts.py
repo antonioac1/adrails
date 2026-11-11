@@ -291,7 +291,8 @@ def _validate_facts(raw_facts):
     return facts, lines
 
 
-_PLACEHOLDER = re.compile(r"\bREPLACE\b|<your ")
+# Upper-case markers only: "We replace locks within 24 hours" is a real fact, "REPLACE: ..." is a template line.
+_PLACEHOLDER = re.compile(r"\bREPLACE(?:_ME)?\b|\bTODO\b|\bFIXME\b|\bYOUR_[A-Z_]+\b|(?i:[<\[{]\s*your\b)")
 
 
 def _refuse_placeholders(facts):
@@ -1102,4 +1103,12 @@ def selftest() -> int:
             chk(False, "placeholder facts must not be approvable")
         except ToolError:
             chk(True, "placeholder facts cannot be approved (QA N1)")
+    for txt, bad in (("REPLACE_ME our fee", True), ("TODO fee", True), ("Fee in <Your county>", True),
+                     ("[your city] fee", True), ("YOUR_FEE per month", True), ("We replace locks within a day", False),
+                     ("Replace the filter yearly", False), ("Your rent is due on the 1st", False)):
+        try:
+            _refuse_placeholders([{"text": txt}])
+            chk(not bad, "placeholder variant must be refused: %r" % txt)
+        except ToolError:
+            chk(bad, "a real fact must not be refused as a placeholder: %r" % txt)
     return n

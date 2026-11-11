@@ -1166,4 +1166,7 @@ def selftest() -> int:
                    published=["https://example.com/guides/how-much-does-landlord-insurance-cost-in-tampa/"])
     chk(all(c["mode"] != "new" or "tampa" not in c["slug"] for c in out_pub["candidates"]),
         "a near-slug of a published page is refused")
+    out_pub2 = plan(city_rows("tampa"), P, published=["https://example.com/guides/landlord-insurance-orlando/"])
+    chk(not [c for c in out_pub2["candidates"] if c["mode"] == "new"],
+        "a published page given as a full URL is part of the doorway comparison")
     return n

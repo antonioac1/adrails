@@ -397,8 +397,12 @@ def main(argv=None, cfg=None):
             q = _queue(cfg, None)
             if q is None:
                 raise ToolError("approvals are not configured: set ADRAILS_APPROVAL_SECRET (32+ chars)")
+            ch = _chain(cfg)
+            # round 2 review: record the intent BEFORE the token is consumed, so an unwritable chain refuses without
+            # spending the approval (no token material is recorded)
+            ch.append("content_approval_deciding", {"via": "cli"}, actor=os.environ.get("USER") or "human")
             out = q.decide(a.approve_token, decided_by=os.environ.get("USER") or "human")
-            _chain(cfg).append("content_approval_decision", {"request_id": out.get("request_id"),
+            ch.append("content_approval_decision", {"request_id": out.get("request_id"),
                                                              "status": out.get("status"), "plan": out.get("plan_id")},
                                actor=os.environ.get("USER") or "human")
             print(json.dumps(out, indent=1, default=str))

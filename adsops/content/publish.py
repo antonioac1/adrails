@@ -125,7 +125,7 @@ def _recheck(bundle_dir, man, profile, page_bytes, facts_text):
         raise RailViolation("page.md is not what the approved draft.json produces; refusing")
     if "page.html" in (man.get("files") or {}):
         html_bytes = _read_verified(bundle_dir, man, "page.html")
-        if bundle_mod.render_html(draft, profile).encode("utf-8") != html_bytes:
+        if bundle_mod.render_html(draft, profile, today=man.get("today")).encode("utf-8") != html_bytes:
             raise RailViolation("page.html is not what the approved draft.json renders; refusing")
     quotes = [s.get("quote") for s in draft.get("sources") or [] if isinstance(s, dict) and s.get("quote")]
     res = checks_mod.run(draft, {"profile": profile, "facts_text": facts_text, "verified_quotes": quotes,
@@ -326,11 +326,21 @@ def _git(argv, cwd, run=None):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
-def _prune_dirs(paths, base):
-    """Remove directories this publish created and left empty (QA N9), never above publish.dir."""
+def _prune_dirs(paths, base, created=None):
+    """Remove directories this publish created and left empty (QA N9), never above publish.dir. With `created` (the
+    set of directories that did not exist before this publish) a pre-existing empty folder is never removed."""
+    base = os.path.realpath(base)
     for path in paths:
         d = os.path.dirname(path)
-        while d and os.path.commonpath([os.path.realpath(d), base]) == base and os.path.realpath(d) != base:
+        while d:
+            try:
+                rd = os.path.realpath(d)
+                if os.path.commonpath([rd, base]) != base or rd == base:
+                    break
+            except ValueError:
+                break
+            if created is not None and rd not in created:
+                break
             try:
                 os.rmdir(d)                               # only succeeds when empty
             except OSError:
@@ -442,6 +452,12 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
             targets = [(_target_path(st["dir"], slug, "index.md"), page)]
             if st["html"] and "page.html" in (man.get("files") or {}):
                 targets.append((_target_path(st["dir"], slug, "index.html"), _read_verified(bundle_dir, man, "page.html")))
+            _created, _base_r = set(), os.path.realpath(st["dir"])
+            for _pth, _ in targets:                       # folders that do not exist yet = the only ones we may prune
+                _d = os.path.realpath(os.path.dirname(_pth))
+                while _d.startswith(_base_r + os.sep) and not os.path.exists(_d):
+                    _created.add(_d)
+                    _d = os.path.dirname(_d)
             for path, _ in targets:
                 if os.path.exists(path) and mode != "extend":
                     raise RailViolation("a page already exists at %s and this bundle is not an extension of it" % path)
@@ -504,7 +520,7 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                             os.unlink(path)
                         except OSError:
                             problems.append("could not remove %s" % path)
-                _prune_dirs([pth for pth, _ in targets], st["dir"])
+                _prune_dirs([pth for pth, _ in targets], st["dir"], _created)
             if st["target"] == "git" and branch:
                 if problems:                              # QA M4: leave the operator's repo exactly as it was
                     _git(["reset", "-q", "--hard"], st["dir"], git_run)
@@ -523,7 +539,7 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                         if rc_ != 0:
                             problems.append("git rollback step %s failed: %s; the repo needs a human" % (argv_[0], scrub(out_, 120)))
                     branch, commit = None, None
-                    _prune_dirs(_prune_later, st["dir"])
+                    _prune_dirs(_prune_later, st["dir"], _created)
                 else:                                     # success: the commit stays on its branch, the checkout goes back
                     rc_, out_ = _git(["checkout", "-q", orig_branch], st["dir"], git_run)
                     if rc_ != 0:                          # QA N9: a failure state, with the repo described
@@ -539,15 +555,18 @@ def publish(bundle_dir, profile, *, state_dir, chain, queue=None, now=time.time,
                 # cannot see it. Write HOLD (blocks every further publish) and fail loudly; best effort only.
                 problems.append("published but the publish log could not be written (%s); the page at %s is live and "
                                 "unrecorded" % (scrub(str(exc), 120), url or st.get("dir")))
+                held = True
                 try:
                     with open(files["hold"], "w", encoding="utf-8") as f:
                         f.write("%s HOLD: %s\n" % (dt.datetime.fromtimestamp(now(), dt.timezone.utc).isoformat(),
                                                     "; ".join(problems)))
-                except OSError:
-                    pass
-                audit(False, error="publish log write failed; HOLD written", problems=problems)
-                raise RailViolation("post-publish record failed (%s); HOLD written to %s" % ("; ".join(problems)[:300],
-                                                                                            files["hold"])) from None
+                except OSError as exc2:
+                    held = False
+                    problems.append("the HOLD file could not be written either (%s): STOP the scheduler by hand"
+                                    % scrub(str(exc2), 120))
+                where = ("HOLD written to %s" % files["hold"]) if held else "HOLD could NOT be written"
+                audit(False, error="publish log write failed; " + where, problems=problems)
+                raise RailViolation("post-publish record failed (%s); %s" % ("; ".join(problems)[:400], where)) from None
             if problems:
                 with open(files["hold"], "w", encoding="utf-8") as f:
                     f.write("%s HOLD: %s\n" % (dt.datetime.fromtimestamp(now(), dt.timezone.utc).isoformat(),
@@ -841,6 +860,13 @@ def selftest() -> int:
            "failed git publish: reset, back to the original branch, branch deleted (QA M4)")
         ck(not os.path.exists(os.path.join(gsite, "guides", "git-two", "index.md")), "failed git publish removes its file")
         ck(not os.path.exists(os.path.join(gsite, "guides", "git-two")), "and the directory it created (QA N9)")
+        pd = os.path.join(tmp, "prune")
+        os.makedirs(os.path.join(pd, "pre", "made"))
+        _prune_dirs([os.path.join(pd, "pre", "made", "index.md")], pd, {os.path.realpath(os.path.join(pd, "pre", "made"))})
+        ck(not os.path.exists(os.path.join(pd, "pre", "made")) and os.path.isdir(os.path.join(pd, "pre")),
+           "only folders this publish created are pruned; a pre-existing empty folder stays (round 2 review)")
+        _prune_dirs([os.path.join("relative-dir", "x", "index.md")], pd, set())
+        ck(True, "a relative path never raises in _prune_dirs")
         calls.clear()
 
         def git_noback(argv, cwd):
