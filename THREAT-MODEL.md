@@ -206,5 +206,15 @@ pages, Search Console query strings, and every model output (writer, reviewer, e
 - **Spoofed spellings:** format characters are stripped (and also read as spaces) and Cyrillic/Greek lookalikes are folded
   before every rule; words that mix scripts are held. **Residual:** confusables outside the documented table (for example
   Armenian or mathematical letters beyond what NFKC folds) are not folded.
-- **Facts approval:** `approval_sha256` makes edits after approval visible; it is not a signature.
+- **Facts approval:** `approval_sha256` is a tamper-evidence hash, NOT a signature. It shows that the facts changed after
+  approval; it does not prove who approved them. Anyone who can write FACTS.json can recompute it. The same holds for the
+  bundle MANIFEST digest. Only the publish approval tokens are keyed (HMAC with ADRAILS_APPROVAL_SECRET).
+- **Placeholder facts:** the shipped FACTS.example.json is unapproved and marked REPLACE; load and approve refuse any
+  file that still contains placeholder text.
 - **Hidden page text:** CSS-hidden text in a live page is passed to models as data (fenced), not removed.
+- **Extend verification (round 2):** `verify_extend.py` compares the token structure: the insert must sit immediately
+  after the anchor section, be balanced, contain no comment, hidden/aria-hidden/inert/style attribute, hiding class,
+  template/noscript/iframe, use the declared heading levels and words, and everything outside it must be identical;
+  the JSON-LD graph must equal `jsonld.after.json` exactly (new blocks allowed). **Residual:** CSS in an external
+  stylesheet that hides the inserted section's id or class cannot be seen from the HTML.
+- **Doorway pages:** see CLAIMS C2 for exactly what is refused and the known gap (unlisted city names).
