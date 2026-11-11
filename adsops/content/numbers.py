@@ -58,6 +58,9 @@ _CONFUSABLES = {
     "\u0396": "Z", "\u0397": "H", "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
     "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X",
 }
+_SMALL_CAPS = dict(zip("\u1d00\u0299\u1d04\u1d05\u1d07\ua730\u0262\u029c\u026a\u1d0a\u1d0b\u029f\u1d0d\u0274"
+                       "\u1d0f\u1d18\ua7af\u0280\ua731\u1d1b\u1d1c\u1d20\u1d21\u028f\u1d22", "abcdefghijklmnopqrstuvwyz"))
+_CONFUSABLES.update(_SMALL_CAPS)                       # QA round 2 N5: small capitals spell words too
 _CONF = str.maketrans(_CONFUSABLES)
 
 
@@ -161,6 +164,8 @@ def _prepare(text):
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = "".join(ch for ch in s.translate(_DROP) if unicodedata.category(ch) != "Cf")
     s = strip_format(unicodedata.normalize("NFKC", s))   # NFKC composes real accents first; leftover marks/fillers go
+    # QA round 2 N5: accents fold to their base letters for rule matching ("guara\u0301nteed" -> "guaranteed")
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if unicodedata.category(ch) != "Mn")
     s = s.translate(_TRANS).translate(_CONF)                              # QA M11: lookalike letters -> ASCII
     return _WS_RE.sub(" ", s).strip()
 
@@ -582,5 +587,7 @@ def selftest() -> int:
         "mixed-script words detected, pure Cyrillic words are not")
     chk(norm("r\u034fisk") == "risk" and norm("guaranteed\ufe0freturns") == "guaranteedreturns" and norm("guar\u1160anteed") == "guaranteed",
         "combining joiner, variation selector and Hangul filler removed")
-    chk(norm("caf\u00e9") == "caf\u00e9" and norm("cafe\u0301") == "caf\u00e9", "real accents survive (NFKC composes them)")
+    chk(norm("caf\u00e9") == "cafe" and norm("cafe\u0301") == "cafe", "accented and decomposed forms fold alike")
+    chk(norm("guara\u0301nteed") == "guaranteed" and norm("\u1d00\u1d04\u1d0d\u1d07") == "acme",
+        "combining accents and small capitals fold (QA r2 N5)")
     return n

@@ -52,7 +52,7 @@ DEFAULT_DUP = {"jaccard": 0.30, "containment": 0.50}
 MODES = ("new", "extend")
 CONTENT_TYPES = ("answer-extension", "guide", "faq", "comparison")
 
-_SUPER_RE = re.compile(r"(?<![\w#])(?:#\s?1|no\.?\s?1|number[\s-]+one)(?![\w])", re.I)   # PM (GLM checks #15)
+_SUPER_RE = re.compile(r"(?<![\w#])(?:#[\s_*\\]{0,4}1|no\.?\s?1|number[\s_-]+one)(?![\w])", re.I)   # PM (GLM checks #15)
 SUPERLATIVES = ("best", "#1", "number one", "leading", "top-rated", "top rated", "premier", "unmatched", "unbeatable",
                 "guaranteed", "guarantee", "most trusted", "highest rated", "world-class")
 
@@ -183,6 +183,8 @@ def strip_markdown(md):
     s = _FENCE_RE.sub(lambda m: " " + m.group(0).strip("`") + " ", s)   # PM (GLM checks #1): fence content is visible
     s = html_mod.unescape(s)                    # PM (GLM #5): "Chea&#112;est" renders as "Cheapest"
     s = _LINK_RE.sub(lambda m: m.group(1), s)
+    # QA round 2 N5: intra-word emphasis and escapes render as ONE word ("guara**nte**ed", "guar\\anteed")
+    s = re.sub(r"(?<=\w)(?:\*{1,3}|_{1,3}|~~|\\)(?=\w)", "", s)
     s = _HEAD_RE.sub("", s)
     s = _QUOTE_RE.sub("", s)
     s = _RULE_RE.sub(" ", s)
@@ -1075,4 +1077,14 @@ def selftest() -> int:
         rc = codes(run(draft(body_md=body + " We offer " + spoof + " here."), ctx()))
         chk(code in rc, "spoofed %r is caught as %s (QA M11): %s" % (spoof, code, sorted(rc)))
     chk("MIXED_SCRIPT" in codes(run(draft(body_md=body + " guar\u0430nteed"), ctx())), "mixed-script word held")
+    for spoof in ("guara**nte**ed returns", "guar\\anteed returns", "guara\u0301nteed returns"):
+        chk("BANNED_PHRASE" in codes(run(draft(body_md=body + " We offer " + spoof + " here."), ctx())),
+            "QA r2 N5 residue held: %r" % spoof)
+    for sup in ("the #_1 team", "the #\n1 team", "the #\n\n1 team"):
+        chk("SUPERLATIVE" in codes(run(draft(body_md=body + " We are " + sup + "."), ctx())), "split #1 held: %r" % sup)
+    _base = set(codes(run(draft(body_md=body), ctx())))
+    for nm in ("Jos\u00e9 Mu\u00f1oz", "Zo\u00eb Kr\u00fcger", "Fran\u00e7ois L\u00e9vesque", "\u0141ukasz Wi\u015bniewski",
+               "Nguy\u1ec5n V\u0103n An", "Bj\u00f6rk Gu\u00f0mundsd\u00f3ttir", "snake_case_name", "file\\path"):
+        chk(set(codes(run(draft(body_md=body + " Our partner " + nm + " helps owners."), ctx()))) <= _base,
+            "no false positive on %r" % nm)
     return n
