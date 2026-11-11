@@ -85,6 +85,8 @@ def _abs(path, base_dir=None):
     raw = str(path).strip()[:4096]
     if not raw:
         raise ToolError("LESSONS.md path is required")
+    if ".." in re.split(r"[\\/]+", raw):
+        raise ToolError("LESSONS.md path must not contain '..'")      # QA round 2: refused even without base_dir
     target = os.path.abspath(os.path.expanduser(raw))
     if base_dir is None:
         return target
@@ -384,6 +386,9 @@ def _sidecar_path(path):
     return base + ".suppressed.json"
 
 
+_LEARNED_LIKE_RE = re.compile(r"(?im)^[ \t]{0,3}#{1,6}[ \t]*learned\b")
+
+
 def _has_learned_header(text):
     return LEARNED_HEADER in text
 
@@ -628,6 +633,11 @@ def update_lessons(path, board, today, min_n=MIN_N, max_lines=MAX_LINES, base_di
 
     if existed:
         if has_tag and not has_header:
+            return _refused_result()
+        # QA round 2: a renamed/edited Learned header must be refused, not silently replaced by a fresh section
+        if _LEARNED_LIKE_RE.search(existing_text.replace(LEARNED_HEADER, "")):
+            return _refused_result()
+        if not has_header and side_status == "ok" and (state["known"] or state["suppressed"]):
             return _refused_result()
         if (has_header or has_tag) and side_status != "ok":
             return _refused_result()
@@ -1100,6 +1110,27 @@ def selftest() -> int:
                 "renamed Learned header with tagged lines is refused")
         n = _ck(n, open(path_renamed, encoding="utf-8").read() == renamed,
                 "renamed header refusal writes nothing")
+        # QA round 2: header renamed after AdRails wrote lessons (no tagged line left, sidecar knows them)
+        path_g7 = os.path.join(tmp, "G7.md")
+        g7_board = [{"group": "guide|q", "n": 5, "median_impr_change": 0.5, "improved_share": 0.8,
+                     "ids": list("abcde")}]
+        update_lessons(path_g7, g7_board, today, min_n=3, max_lines=20)
+        with open(path_g7, encoding="utf-8") as fh:
+            g7 = fh.read().replace(LEARNED_HEADER, "## Learned")
+        g7 = "\n".join(l for l in g7.splitlines() if not l.startswith("- [L-")) + "\n"
+        with open(path_g7, "w", encoding="utf-8") as fh:
+            fh.write(g7)
+        res = update_lessons(path_g7, g7_board, today, min_n=3, max_lines=20)
+        n = _ck(n, res.get("refused") == _REFUSED_REASON, "renamed Learned header (lessons known) is refused")
+        n = _ck(n, open(path_g7, encoding="utf-8").read() == g7, "renamed header refusal (G7) writes nothing")
+        for bad in (os.path.join(tmp, "x", "..", "..", "trav", "LESSONS.md"), "../LESSONS.md"):
+            for fn in (lambda b=bad: update_lessons(b, [], today), lambda b=bad: read_lessons(b)):
+                try:
+                    fn()
+                    n = _ck(n, False, "a '..' lessons path must be refused without base_dir")
+                except ToolError:
+                    n = _ck(n, True, "a '..' lessons path is refused without base_dir")
+        n = _ck(n, not os.path.exists(os.path.join(os.path.dirname(tmp), "trav")), "traversal wrote nothing")
 
         # read_lessons
         path5 = os.path.join(tmp, "READ.md")
