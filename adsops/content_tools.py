@@ -70,11 +70,19 @@ def _fixtures(cfg):
     fx = ((cfg or {}).get("seo_content") or {}).get("test_fixtures")
     if not fx:
         return None, None
+    if os.environ.get("ADRAILS_TEST_FIXTURES") != "1":   # round 2 review: never by config alone on a real site
+        raise ToolError("seo_content.test_fixtures is set but ADRAILS_TEST_FIXTURES=1 is not: fixtures are for tests "
+                        "only; remove test_fixtures from the config")
     base = os.path.dirname(os.path.abspath(os.path.expanduser((cfg or {}).get("_config_path") or ".")))
-    with open(os.path.join(base, fx["gsc"]), encoding="utf-8") as f:
-        rows = json.load(f)
-    with open(os.path.join(base, fx["site"]), encoding="utf-8") as f:
-        pages = json.load(f)
+    try:
+        with open(os.path.join(base, fx["gsc"]), encoding="utf-8") as f:
+            rows = json.load(f)
+        with open(os.path.join(base, fx["site"]), encoding="utf-8") as f:
+            pages = json.load(f)
+        if not isinstance(rows, dict) or not isinstance(pages, dict):
+            raise ValueError("fixture files must hold JSON objects")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ToolError("seo_content.test_fixtures could not be loaded: %s" % scrub(str(exc), 200)) from None
 
     def gsc(site, start, end, dims):
         return rows.get(",".join(dims), [])
@@ -391,8 +399,9 @@ def main(argv=None, cfg=None):
         cfg = config_mod.load_config(a.config)
         cfg["_config_path"] = os.path.abspath(a.config)
     cfg = cfg or {"audit_log": os.path.join(os.path.dirname(os.path.abspath(a.profile)), "state", "audit.jsonl")}
-    fixtures = bool(_fixtures(cfg)[0]) if cfg else False
+    fixtures = False
     try:
+        fixtures = bool(_fixtures(cfg)[0]) if cfg else False
         if a.approve_token:                                # QA N6: human approval from the CLI, audited
             q = _queue(cfg, None)
             if q is None:

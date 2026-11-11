@@ -83,6 +83,12 @@ def head_facts(html):
     return {"title": p.title, "description": p.description, "canonical": p.canonical, "og": p.og, "h1": p.h1}
 
 
+def _nodup_pairs(pairs):
+    if len({k for k, _ in pairs}) != len(pairs):
+        raise ValueError("duplicate JSON key")
+    return dict(pairs)
+
+
 def jsonld_blocks(html):
     """-> list of (parsed_or_None, raw_text) for every ld+json block, in page order."""
     out = []
@@ -102,7 +108,7 @@ def live_page(html, url):
     blocks = []
     for raw in p.ld:
         try:
-            blocks.append(json.loads(raw))
+            blocks.append(json.loads(raw, object_pairs_hook=_nodup_pairs))   # duplicate keys = unparseable (refused)
         except (ValueError, RecursionError):
             blocks.append(None)
     return {"url": url, "sha256": hashlib.sha256(html.encode("utf-8", "surrogatepass")).hexdigest(),
@@ -177,7 +183,7 @@ def merge_jsonld(blocks, faq, today):
             else:
                 after.append(dict({"@context": "https://schema.org"}, **node))
                 ops.append("add block: add one new <script type=\"application/ld+json\"> block (a FAQPage) after the "
-                           "existing ones, anywhere in the page")
+                           "existing ones (after the last existing block in page order)")
     for bi, b in enumerate(after):
         for n in _nodes(b):
             if isinstance(n.get("dateModified"), str) and n["dateModified"] != today:   # typed values left alone
@@ -190,7 +196,8 @@ def merge_jsonld(blocks, faq, today):
 VERIFIER = r'''#!/usr/bin/env python3
 """verify_extend.py ORIGINAL.html NEW.html  (shipped in an AdRails extend bundle; stdlib only). Prints OK or FAIL lines.
 NEW must parse to exactly ORIGINAL's structure plus ONE well-formed inserted block placed right after the anchor section,
-with only the declared live changes, and with JSON-LD equal to jsonld.after.json (new blocks may be added anywhere)."""
+with only the declared live changes, and with JSON-LD equal to jsonld.after.json (blocks in the same page order; a new block
+goes after the existing ones)."""
 import hashlib, json, os, re, sys
 from html.parser import HTMLParser
 here = os.path.dirname(os.path.abspath(__file__))
@@ -205,6 +212,15 @@ ALLOW = set("p h1 h2 h3 h4 h5 h6 ul ol li dl dt dd a strong em b i u s small mar
             "blockquote br hr table thead tbody tfoot tr th td caption div section article aside span figure "
             "figcaption".split())
 HIDE_CLASS = re.compile(r"(^|\s)(hidden|d-none|sr-only|visually-hidden|invisible|collapse)(\s|$)", re.I)
+# round 2 review: any class token that reads as hiding, at any breakpoint/framework spelling
+HIDE_TOKEN = re.compile(r"(^|[-_:])(none|hidden|hide|invisible|collapsed?|offscreen|off-screen|clip|clipped)($|[-_])|"
+                        r"sr-only|screen-?reader|visually-?hidden|opacity-0|(^|:)(max-)?[hw]-0$|"
+                        r"text-transparent|indent", re.I)
+# attributes an inserted element may carry (no src/srcset/ping/style/on*/data-*: nothing loads, nothing hides)
+ALLOW_ATTR = set("href class id title rel target colspan rowspan scope start reversed type lang dir headers abbr "
+                 "cite datetime".split())
+HIDE_ANCESTOR = set("template noscript details dialog head title datalist noembed noframes select textarea "
+                    "script style object canvas audio video svg math".split())
 fails = []
 if max(len(old), len(new)) > 5000000:
     print("FAIL page too large to verify"); sys.exit(1)
@@ -239,6 +255,7 @@ class P(HTMLParser):
     def handle_pi(s, d): s.t.append(("D", d.strip().lower()))
 def parse(h):
     p = P(); p.feed(h); p.close()
+    p.t = [(t[0], t[1].lower(), t[2]) if t[0] == "S" else t for t in p.t]
     if p._ld is not None:
         p.t.append(("X", "unclosed script"))
     return p.t, p.ld, p.ldattrs
@@ -297,6 +314,29 @@ if spec.get("insert_after"):
 else:
     p = next((i for i, t in enumerate(O) if t == ("E", "main")), None)
     p = p if p is not None else next((i for i, t in enumerate(O) if t == ("E", "body")), len(O))
+def _hiding(tag, attrs):
+    for a, v in attrs:
+        if a in ("hidden", "aria-hidden", "inert"): return a
+        if a == "style" and re.search(r"display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?![.\d]*[1-9])|"
+                                      r"(height|width|max-height)\s*:\s*0(?![.\d]*[1-9])|clip|text-indent\s*:\s*-", v or "", re.I):
+            return "style"
+        if a == "class" and any(HIDE_TOKEN.search(c) for c in (v or "").split()): return "class"
+    if tag in HIDE_ANCESTOR and not (tag == "details" and any(a == "open" for a, _ in attrs)): return tag
+    return None
+if p is not None:                                # round 2 review: the insert point must not be inside a hidden region
+    _stack = []
+    for t in O[:p]:
+        if t[0] == "S" and t[1] not in VOID: _stack.append(t)
+        elif t[0] == "E":
+            for j in range(len(_stack) - 1, -1, -1):
+                if _stack[j][1] == t[1]:
+                    del _stack[j:]; break
+    for t in _stack:
+        why = _hiding(t[1], t[2])
+        if why:
+            fails.append("the insert point is inside a hidden or non-rendered <%s> (%s) of the original page" % (t[1], why))
+            break
+_page_classes = {c for t in O if t[0] == "S" for a, v in t[2] if a == "class" for c in (v or "").split()}
 if p is not None:
     k = len(N) - len(O)
     if k <= 0 or N[:p] != O[:p] or N[p + k:] != O[p:]:
@@ -311,9 +351,14 @@ if p is not None:
                 if t[1] in FORBID or t[1] not in ALLOW:
                     fails.append("the inserted block contains a <%s> element" % t[1])
                 for a, v in t[2]:
-                    if a.startswith("on") or a in ("hidden", "aria-hidden", "style", "srcdoc", "inert"):
+                    if a.startswith("on") or a in ("hidden", "aria-hidden", "style", "srcdoc", "inert") or a not in ALLOW_ATTR:
                         fails.append("the inserted block uses the %r attribute" % a)
-                    if a == "class" and HIDE_CLASS.search(v): fails.append("the inserted block uses a hiding class")
+                    if a == "class":
+                        for c in (v or "").split():
+                            if HIDE_CLASS.search(c) or HIDE_TOKEN.search(c):
+                                fails.append("the inserted block uses a hiding class (%r)" % c)
+                            elif c not in _page_classes:
+                                fails.append("the inserted block uses the class %r, which the original page does not use" % c)
                     if a == "href" and v not in spec.get("allowed_hrefs", []):
                         fails.append("the inserted block links to %r, which page.md does not" % v)
                 if HEAD.match(t[1]): heads.append(int(t[1][1]))
@@ -325,7 +370,7 @@ if p is not None:
         if stack: fails.append("the inserted block leaves <%s> unclosed" % stack[-1])
         if heads != spec.get("insert_headings", heads):
             fails.append("the inserted headings are h%s, expected h%s" % (heads, spec.get("insert_headings")))
-        words = re.findall(r"[a-z0-9]+", " ".join(t[1] for t in ins if t[0] == "T").lower())
+        words = re.findall(r"\w+", " ".join(t[1] for t in ins if t[0] == "T").casefold())
         if words != spec.get("insert_words"):
             fails.append("the visible text of the inserted block is not exactly the body of page.md")
 print("\n".join("FAIL " + f for f in dict.fromkeys(fails)) if fails else "OK")
@@ -346,7 +391,10 @@ def bundle_files(draft, live, today):
     after, ops = merge_jsonld(live["jsonld"], draft.get("faq"), today)
     from . import checks as checks_mod
     body = draft.get("body_md") or ""
-    words = re.findall(r"[a-z0-9]+", " ".join(html_mod.unescape(checks_mod.strip_markdown(body)).split()).lower())
+    words = re.findall(r"\w+", " ".join(html_mod.unescape(checks_mod.strip_markdown(body)).split()).casefold())
+    for c in draft.get("live_changes") or []:
+        if isinstance(c, dict) and not str(c.get("before") or "").strip():
+            raise ToolError("a declared live change has an empty 'before' text")
     hrefs = sorted({l["target"] for l in checks_mod.md_links(body)})
     spec = {"page": live["url"], "original_sha256": live["sha256"], "insert_after": draft.get("insert_after"),
             "insert_words": words, "allowed_hrefs": hrefs,
@@ -517,6 +565,9 @@ def selftest() -> int:
         "text inside <title> in the insert": good.replace("<p>New text.</p>", "<title>New text.</title>"),
         "text inside <canvas> in the insert": good.replace("<p>New text.</p>", "<canvas>New text.</canvas>"),
         "non-void self-closing <div/>": good.replace("<p>New text.</p>", "<div id=\"x\"/><p>New text.</p>"),
+        "class the page does not use": good.replace("<p>New text.</p>", "<p class=\"screen-reader-text\">New text.</p>"),
+        "remote image beacon": good.replace("<p>New text.</p>", "<p>New text.</p><img src=\"https://e.example/p.gif\">"),
+        "different non-Latin words": good.replace("<p>New text.</p>", "<p>New text. \u0442\u0435\u043a\u0441\u0442</p>"),
     }
     for label, bad in damage.items():
         rc, out = verify(bad)
@@ -547,6 +598,31 @@ def selftest() -> int:
        json.loads(bundle_files(dict(draft, body_md="## New\n\n```\n# not a heading\n```\n\nNew text."), live,
                                "2026-11-11")[0]["extend.json"])["insert_headings"] == [2],
        "a '#' line inside a code fence is not an expected heading")
+    # round 2 review (GLM): an anchor inside a closed <details>/hidden region of the ORIGINAL is refused
+    for wrap_open, wrap_close in (("<details><summary>More</summary>", "</details>"), ("<div hidden>", "</div>")):
+        tmp_d = tempfile.mkdtemp(prefix="adrails-ext-d-")
+        page_d = page.replace("<h2>The fee, plainly</h2>\n<p>We charge $149.</p>\n",
+                              wrap_open + "<h2>The fee, plainly</h2>\n<p>We charge $149.</p>\n" + wrap_close + "\n")
+        files_d, _, after_d = bundle_files(dict(draft, live_changes=[]), live_page(page_d, "https://ex.com/a/"), "2026-11-11")
+        for name, text in files_d.items():
+            with open(os.path.join(tmp_d, name), "w", encoding="utf-8") as f:
+                f.write(text)
+        with open(os.path.join(tmp_d, "orig.html"), "w", encoding="utf-8") as f:
+            f.write(page_d)
+        impl_d = re.sub(_LD_RE, lambda m: "<script type=\"application/ld+json\">%s</script>" % json.dumps(after_d[0]), page_d)
+        impl_d = impl_d.replace("<p>We charge $149.</p>\n", "<p>We charge $149.</p>\n<h2>New</h2>\n<p>New text.</p>\n")
+        with open(os.path.join(tmp_d, "new.html"), "w", encoding="utf-8") as f:
+            f.write(impl_d)
+        r = subprocess.run([sys.executable, os.path.join(tmp_d, "verify_extend.py"), os.path.join(tmp_d, "orig.html"),
+                            os.path.join(tmp_d, "new.html")], capture_output=True, text=True)
+        ck(r.returncode == 1 and "insert point" in r.stdout, "insert point inside %s is refused" % wrap_open)
+    dup_live = live_page(page.replace('{"@context"', '{"@context":"x","@context"', 1), "https://ex.com/a/")
+    ck(dup_live["jsonld_unparseable"] == 1, "duplicate JSON keys in the live JSON-LD make it unparseable (merge refuses)")
+    try:
+        bundle_files(dict(draft, live_changes=[{"before": " ", "after": "x"}]), live, "2026-11-11")
+        ck(False, "an empty live-change 'before' must be refused")
+    except ToolError:
+        ck(True, "an empty live-change 'before' is refused at bundle time")
     # QA N4: a merge that ADDS a new JSON-LD block verifies when implemented correctly
     page2 = page.replace(re.search(_LD_RE, page).group(0), "")
     live2 = live_page(page2, "https://ex.com/a/")

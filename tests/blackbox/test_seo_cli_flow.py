@@ -25,7 +25,7 @@ class CliFlow(unittest.TestCase):
         self.addCleanup(models.close)
         d = tempfile.mkdtemp(prefix="adrails-cli-")
         env = dict(os.environ, PYTHONPATH=os.getcwd(), T_GLM_KEY="glm-k", T_GPT_KEY="gpt-k",
-                   ADRAILS_APPROVAL_SECRET="s" * 40)
+                   ADRAILS_APPROVAL_SECRET="s" * 40, ADRAILS_TEST_FIXTURES="1")
 
         def cli(*args):
             p = subprocess.run([sys.executable, "-m", "adsops", "seo-run"] + list(args), capture_output=True, text=True,
@@ -62,6 +62,12 @@ class CliFlow(unittest.TestCase):
                    "seo_content": {"test_fixtures": {"gsc": "gsc.json", "site": "pages.json"}}},
                   open(os.path.join(d, "config.json"), "w"))
         C = os.path.join(d, "config.json")
+        noenv = dict(env); noenv.pop("ADRAILS_TEST_FIXTURES")
+        p0 = subprocess.run([sys.executable, "-m", "adsops", "seo-run", "--profile", P, "--config", C, "--stage", "plan"],
+                            capture_output=True, text=True, env=noenv, timeout=120, cwd=os.getcwd())
+        self.assertNotEqual(p0.returncode, 0)
+        self.assertIn("ADRAILS_TEST_FIXTURES", p0.stdout + p0.stderr)
+        self.assertNotIn("Traceback", p0.stdout + p0.stderr)
         plan = cli("--profile", P, "--config", C, "--stage", "plan")
         self.assertTrue(plan["fixtures"])
         self.assertEqual([c["mode"] for c in plan["candidates"]], ["new"])

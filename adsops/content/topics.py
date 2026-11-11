@@ -403,6 +403,11 @@ _STATE_TOKENS = frozenset("alabama alaska arizona arkansas california colorado c
                           "massachusetts michigan minnesota mississippi missouri montana nebraska nevada ohio "
                           "oklahoma oregon pennsylvania tennessee texas utah vermont virginia washington "
                           "wisconsin wyoming".split())
+# same folding as _path_seq ("texas" -> "texa"), so a state in a slug is recognised (round 2 GLM review)
+_STATE_TOKENS = frozenset(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in _STATE_TOKENS) | _STATE_TOKENS
+_MULTI_STATES = frozenset([("new", "hampshire"), ("new", "jersey"), ("new", "mexico"), ("new", "york"),
+                           ("north", "carolina"), ("north", "dakota"), ("south", "carolina"), ("south", "dakota"),
+                           ("west", "virginia"), ("rhode", "island")])
 
 
 def _slot_swap(a_seq, b_seq):
@@ -461,8 +466,11 @@ def _template_doorway(path, other, place_tokens, topic_words):
     if not shared or len(a_slot) > 3 or len(b_slot) > 3 or not (a_slot or b_slot):
         return None
     slot = a_slot + b_slot
-    if all(_place_like(t, place_tokens) for t in a_slot) and all(_place_like(t, place_tokens) for t in b_slot) \
-            and any(_place_like(t, place_tokens) for t in slot):
+
+    def placey(run):
+        return all(_place_like(t, place_tokens) for t in run) or tuple(run) in _MULTI_STATES
+    if placey(a_slot) and placey(b_slot) and (any(_place_like(t, place_tokens) for t in slot)
+                                              or tuple(a_slot) in _MULTI_STATES or tuple(b_slot) in _MULTI_STATES):
         what = "a place name, zip or number swapped" if a_slot and b_slot else "a place name or number"
         return "%s differs from %s only by %s" % (path[:80], other[:80], what)
     if not a_slot or not b_slot:
@@ -1169,4 +1177,8 @@ def selftest() -> int:
     out_pub2 = plan(city_rows("tampa"), P, published=["https://example.com/guides/landlord-insurance-orlando/"])
     chk(not [c for c in out_pub2["candidates"] if c["mode"] == "new"],
         "a published page given as a full URL is part of the doorway comparison")
+    for st_slug in ("/guides/eviction-process-texas/", "/guides/eviction-process-new-york/",
+                    "/guides/eviction-process-illinois/"):
+        chk(doorway_reason(st_slug, [], ["/guides/eviction-process/"], P) is not None,
+            "a state bolted on is refused: %s" % st_slug)
     return n

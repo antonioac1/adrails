@@ -231,7 +231,10 @@ class _Lock:
         self.path, self.fh = path, None
 
     def __enter__(self):
-        fh = open(self.path, "a+")
+        try:
+            fh = open(self.path, "a+")
+        except OSError as exc:
+            raise RailViolation("cannot open the lock file %s: %s" % (self.path, scrub(str(exc), 120))) from None
         try:
             try:
                 import fcntl
@@ -240,9 +243,13 @@ class _Lock:
                 import msvcrt
                 fh.seek(0)
                 msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
+        except OSError as exc:
             fh.close()
-            raise RailViolation("another publish or run is in progress (lock %s)" % self.path) from None
+            import errno as _errno
+            if exc.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK, _errno.EACCES, getattr(_errno, "EDEADLK", -1)) \
+                    or exc.errno is None:
+                raise RailViolation("another publish or run is in progress (lock %s)" % self.path) from None
+            raise RailViolation("could not lock %s: %s" % (self.path, scrub(str(exc), 120))) from None
         try:
             os.chmod(self.path, 0o600)
         except OSError:

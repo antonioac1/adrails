@@ -213,8 +213,12 @@ pages, Search Console query strings, and every model output (writer, reviewer, e
   file that still contains placeholder text.
 - **Hidden page text:** CSS-hidden text in a live page is passed to models as data (fenced), not removed.
 - **Extend verification (round 2):** `verify_extend.py` compares the token structure: the insert must sit immediately
-  after the anchor section, be balanced, contain no comment, hidden/aria-hidden/inert/style attribute, hiding class,
-  template/noscript/iframe, use the declared heading levels and words, and everything outside it must be identical;
-  the JSON-LD graph must equal `jsonld.after.json` exactly (new blocks allowed). **Residual:** CSS in an external
-  stylesheet that hides the inserted section's id or class cannot be seen from the HTML.
+  after the anchor section and not inside a hidden or non-rendered region of the original (closed details, hidden,
+  template, noscript...), be balanced, use only rendered content elements and a small attribute allowlist (no src,
+  style, on*, hidden/aria-hidden/inert), only class names the original page already uses and none that read as
+  hiding, the declared heading levels and exactly the words of page.md; everything outside it must be identical; the
+  JSON-LD graph must equal `jsonld.after.json` exactly (a new block goes after the existing ones; script attributes
+  unchanged). **Residual:** a class or id the original page already uses can still be styled as hidden by the site's
+  own CSS (the verifier does not evaluate stylesheets); a reviewer of the implementation should look at the rendered
+  page.
 - **Doorway pages:** see CLAIMS C2 for exactly what is refused and the known gap (unlisted city names).
