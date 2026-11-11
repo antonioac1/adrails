@@ -400,13 +400,15 @@ def selftest() -> int:
             return ck(needle in str(e), msg + " (got: %s)" % e)
         ck(False, msg + " (not refused)")
 
+    T0 = dt.datetime(2026, 11, 2, 12, 0, tzinfo=dt.timezone.utc).timestamp()   # Monday, ISO week 45
     tmp = tempfile.mkdtemp(prefix="adrails-pub-")
     try:
         state = os.path.join(tmp, "state")
         site = os.path.join(tmp, "site")
         os.makedirs(site)
         chain = auditchain.AuditChain(os.path.join(tmp, "chain.jsonl"))
-        q = approvals.ApprovalQueue(os.path.join(tmp, "appr.jsonl"), b"x" * 32)
+        CLOCK = lambda: T0     # B1: every publish in this selftest runs on a fixed clock, never the real one
+        q = approvals.ApprovalQueue(os.path.join(tmp, "appr.jsonl"), b"x" * 32, now=CLOCK)
         prof = {"site": "https://example.com/", "host": "example.com", "_dir": tmp,
                 "author": {"name": "Jane Doe", "url": "/team/jane/", "id": "https://example.com/team/jane/#person"},
                 "publish": {"target": "static", "dir": "site"}}
@@ -421,19 +423,19 @@ def selftest() -> int:
                                prof, meta)
         bdir = out["path"]
         pid = plan_id_for(bdir, prof)
-        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q), "no request on file",
+        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "no request on file",
                 "human mode needs an approval")
         req = q.request(pid, "example.com", "publish /guides/flat-fee/")
-        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q), "pending", "pending is not approved")
+        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "pending", "pending is not approved")
         q.decide(req["approve_token"])
-        r = publish(bdir, prof, state_dir=state, chain=chain, queue=q, dry_run=True)
+        r = publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK, dry_run=True)
         ck(r["ok"] and r["dry_run"] and not os.path.exists(os.path.join(site, "guides/flat-fee/index.md")), "dry run")
-        r = publish(bdir, prof, state_dir=state, chain=chain, queue=q)
+        r = publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK)
         target = os.path.join(site, "guides", "flat-fee", "index.md")
         ck(r["ok"] and os.path.exists(target), "published after approval")
         with open(target, "rb") as f, open(os.path.join(bdir, "page.md"), "rb") as g:
             ck(f.read() == g.read(), "published bytes == bundle bytes")
-        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q), "already published", "no double publish")
+        refused(lambda: publish(bdir, prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "already published", "no double publish")
         ck(chain.verify().get("ok", True) is not False and any(e["event"] == "content_publish" for e in chain.tail(20)),
            "audit chain records publishes")
         # integrity: tamper with an approved bundle
@@ -441,23 +443,23 @@ def selftest() -> int:
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b2"))
         with open(os.path.join(out2["path"], "page.md"), "a", encoding="utf-8") as f:
             f.write("\nInjected: 68% of owners save $5,000.\n")
-        refused(lambda: publish(out2["path"], prof, state_dir=state, chain=chain, queue=q), "integrity", "tamper refused")
+        refused(lambda: publish(out2["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "integrity", "tamper refused")
         # existing page + new mode refused; symlink refused
         out3 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/flat-fee/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b3"))
         p3 = plan_id_for(out3["path"], prof)
         q.decide(q.request(p3, "example.com", "x")["approve_token"])
-        refused(lambda: publish(out3["path"], prof, state_dir=state, chain=chain, queue=q), "already exists",
+        refused(lambda: publish(out3["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "already exists",
                 "new bundle may not overwrite a page")
         os.makedirs(os.path.join(tmp, "elsewhere"))
         os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(site, "evil"))
         out4 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/evil/x/"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b4"))
         q.decide(q.request(plan_id_for(out4["path"], prof), "example.com", "x")["approve_token"])
-        refused(lambda: publish(out4["path"], prof, state_dir=state, chain=chain, queue=q), "symlink", "symlink refused")
+        refused(lambda: publish(out4["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "symlink", "symlink refused")
         # kill switch and HOLD
         open(state_files(state)["stop"], "w").close()
-        refused(lambda: publish(out4["path"], prof, state_dir=state, chain=chain, queue=q), "kill switch", "STOP")
+        refused(lambda: publish(out4["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "kill switch", "STOP")
         os.unlink(state_files(state)["stop"])
         # auto mode: caps + window + HOLD tripped by a failed live check
         auto = dict(prof, publish={"target": "static", "dir": "site", "mode": "auto", "verify_url": True,
@@ -482,7 +484,7 @@ def selftest() -> int:
         outx = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/ext/", mode="extend"), rv,
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="bx"))
         q.decide(q.request(plan_id_for(outx["path"], prof), "example.com", "x")["approve_token"])
-        refused(lambda: publish(outx["path"], prof, state_dir=state, chain=chain, queue=q), "extends an existing page",
+        refused(lambda: publish(outx["path"], prof, state_dir=state, chain=chain, queue=q, now=CLOCK), "extends an existing page",
                 "extend bundles are not written by the static/git publisher")
         os.rename(state_files(state)["hold"] + ".x", state_files(state)["hold"])
         out7 = bundle_mod.write(os.path.join(tmp, "bundles"), dict(draft, slug="/guides/auto-three/"), rv,
@@ -534,7 +536,7 @@ def selftest() -> int:
                                 {"ok": True, "errors": [], "warnings": []}, {}, prof, dict(meta, bundle_id="b9"))
         q.decide(q.request(plan_id_for(out9["path"], gprof), "example.com", "x")["approve_token"])
         os.unlink(state_files(state)["hold"])
-        r = publish(out9["path"], gprof, state_dir=state, chain=chain, queue=q, git_run=git_run)
+        r = publish(out9["path"], gprof, state_dir=state, chain=chain, queue=q, now=CLOCK, git_run=git_run)
         ck(r["ok"] and r["branch"].startswith("adrails/content-") and r["commit"] == "abc123", "git branch + commit")
         ck(not any("push" in a for a in calls) and any(a[1] == "checkout" for a in calls), "git never pushes")
     finally:
