@@ -412,8 +412,8 @@ def render_html(draft, profile, jsonld=None):
     """Minimal standalone page: everything escaped, markdown subset only, links limited to '/...' and https."""
     if not isinstance(draft, dict):
         raise ToolError("bundle.render_html: draft must be a dict")
-    today = _cap(draft.get("date_modified") or "2026-01-01", 20)
-    today = today if DATE_RX.match(today) else "2026-01-01"
+    today = _cap(draft.get("date_modified") or "", 20)
+    today = today if DATE_RX.match(today) else __import__("datetime").date.today().isoformat()   # no fixed year
     slug = _slug(draft)
     canonical = _canonical(profile, slug)
     data = jsonld if isinstance(jsonld, (dict, list)) else bundle_jsonld(draft, profile, today)

@@ -572,7 +572,7 @@ def selftest() -> int:
     chk(numbers_in("\uff16\uff18") == ["68"], "fullwidth digits read as ASCII")
     chk(len(trace("we cut costs 5-10% for owners")) == 2, "both ends of a percent range are statistics")
     chk(norm("com\u00adpetitor") == "competitor", "soft hyphen dropped, not turned into a dash")
-    chk(len(trace("we manage 2,026 homes")) == 1 and trace("since 2026 we have grown") == [], "comma year is a count")
+    chk(len(trace("we manage 2,026 homes")) == 1 and trace("since 2026 we have grown", years=(2024, 2027)) == [], "comma year is a count")
     chk(len(trace("repairs cost 3 million in damages")) == 1, "3 million is not a small number")
     chk(len(trace("about 1/3 of owners renew")) >= 1, "slash fraction is a statistic")
     chk(len(trace("it adds 9 dollars a month")) == 1, "9 dollars is money")
