@@ -149,6 +149,13 @@ def _find_dicts(obj, predicate):
             yield from _find_dicts(value, predicate)
 
 
+
+def _feedback_plan(*args, **kwargs):
+    """feedback_plan pinned to a day inside the 30-day window of the 2026-11-01 fixtures, so the tests do not
+    depend on the wall clock (they failed from 2026-12-02 on). A test may still pass its own today=."""
+    kwargs.setdefault("today", "2026-11-05")
+    return lsa.feedback_plan(*args, **kwargs)
+
 class LsaTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # query construction
@@ -454,7 +461,7 @@ class LsaTests(unittest.TestCase):
 
     def test_feedback_plan_satisfied_body_shape(self):
         lead = self._feedback_lead(id="1")
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [lead],
             [
                 {
@@ -477,7 +484,7 @@ class LsaTests(unittest.TestCase):
 
     def test_feedback_plan_dissatisfied_body_shape(self):
         lead = self._feedback_lead(id="1")
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [lead],
             [
                 {
@@ -497,7 +504,7 @@ class LsaTests(unittest.TestCase):
 
     def test_feedback_plan_neutral_body_has_no_reason_block(self):
         lead = self._feedback_lead(id="1")
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [lead], [{"lead_id": "1", "answer": "NEUTRAL"}]
         )
         self.assertEqual(len(plan["submit"]), 1)
@@ -509,7 +516,7 @@ class LsaTests(unittest.TestCase):
     def test_feedback_plan_other_reason_requires_comment(self):
         lead = self._feedback_lead(id="1")
 
-        refused = lsa.feedback_plan(
+        refused = _feedback_plan(
             [lead],
             [
                 {
@@ -522,7 +529,7 @@ class LsaTests(unittest.TestCase):
         self.assertEqual(refused["submit"], [])
         self.assertTrue(any(r["lead_id"] == "1" for r in refused["refused"]))
 
-        submitted = lsa.feedback_plan(
+        submitted = _feedback_plan(
             [lead],
             [
                 {
@@ -544,7 +551,7 @@ class LsaTests(unittest.TestCase):
         today = date(2026, 12, 1)
 
         # unknown lead
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [lead],
             [{"lead_id": "999", "answer": "SATISFIED", "reason": "BOOKED_CUSTOMER"}],
             today=today,
@@ -553,7 +560,7 @@ class LsaTests(unittest.TestCase):
 
         # already submitted
         rated = self._feedback_lead(id="2", feedback=True)
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [rated],
             [{"lead_id": "2", "answer": "SATISFIED", "reason": "BOOKED_CUSTOMER"}],
             today=today,
@@ -561,7 +568,7 @@ class LsaTests(unittest.TestCase):
         self.assertTrue(any(r["lead_id"] == "2" for r in plan["refused"]))
 
         # older than window
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [lead],
             [{"lead_id": "1", "answer": "SATISFIED", "reason": "BOOKED_CUSTOMER"}],
             today=today,
@@ -570,7 +577,7 @@ class LsaTests(unittest.TestCase):
 
         # invalid enum
         fresh = self._feedback_lead(id="3", created="2026-11-01 09:00:00")
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [fresh],
             [{"lead_id": "3", "answer": "MAYBE", "reason": "BOOKED_CUSTOMER"}],
             today=today,
@@ -578,7 +585,7 @@ class LsaTests(unittest.TestCase):
         self.assertTrue(any(r["lead_id"] == "3" for r in plan["refused"]))
 
         # satisfied answer with dissatisfied reason
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [fresh],
             [{"lead_id": "3", "answer": "VERY_SATISFIED", "reason": "SPAM"}],
             today=today,
@@ -586,7 +593,7 @@ class LsaTests(unittest.TestCase):
         self.assertTrue(any(r["lead_id"] == "3" for r in plan["refused"]))
 
         # over-long comment
-        plan = lsa.feedback_plan(
+        plan = _feedback_plan(
             [fresh],
             [
                 {
