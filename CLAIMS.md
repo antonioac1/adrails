@@ -225,3 +225,17 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C14 | Results at 14/28/56 days (missing days count as zero; too little data = `insufficient_data`, never a lesson); LESSONS.md lines only from 3+ distinct pieces; operator notes kept (also below the Learned header); a deleted line stays deleted while LESSONS.suppressed.json sits next to it, and if that sidecar is lost or corrupt the update is refused rather than resurrecting lines | test: content.learn.selftest; blackbox `test_results_and_lessons_loop`, `test_qa_012_regressions.Learn` |
 | C16 | One revision round after a rejected review; the revision is re-checked and reviewed anew | blackbox `test_rejected_review_gets_one_revision_and_a_new_review`; live run on baytownpm.com 2026-11-10 (Order D LOG) |
 | C15 | "83 tools; 99 with a ChatGPT Ads (openai_ads) account" | test: tools.selftest `len(names) == 83` and the eight seo_content_* names; `scripts/release_check.py` builds the server with and without an openai_ads account and reports 99 / 83 |
+
+## 0.13.0 SEO/AEO coach tools (README "New in 0.13.0")
+
+Evidence is a `python3 -m adsops --selftest` check. Nothing here is claimed from code reading alone.
+
+| # | Claim | Evidence |
+|---|---|---|
+| C1 | Four read-only coach tools: `adsops_get_started`, `adsops_setup_checklist`, `adsops_page_plan`, `adsops_cadence`; none writes (saving stays with `adsops_local_profile action=set`) and all four are in the RBAC viewer role | test: tools.selftest (87 tools incl. the four); rbac VIEWER list |
+| C2 | Interview in rounds of at most 4 questions; "ready" once business name, industry, service area and services are known, with the next unanswered round still returned | test: coach_tools.selftest (local.coach_onboard selftest) |
+| C3 | 17-item checklist with why/how/minutes/who/tool and a priority-weighted score; industry directory lists; compliance note for regulated industries only | test: coach_tools.selftest (coach_onboard: insurance vs plumber, done-list scoring) |
+| C4 | Page plan ranks service, service+city, guide, comparison, FAQ hub and about pages; never generates competitor "vs" pages; skips pages that exist; unique ascii slugs <= 60 chars | test: coach_tools.selftest (coach_pages selftest) |
+| C5 | Every result carries `next_step` naming a LOCAL tool (hosted names are mapped; the content-gap hint becomes an `aeo_page_audit` call with url + questions) | test: coach_tools.selftest (`next_step` and item tool names start with adsops_/aeo_) |
+| C6 | Hostile inputs (wrong types, 1000-item lists, 10k-character strings) do not crash the coach | test: coach_tools.selftest (coach module caps checks); hosted app fuzz of 12,000 calls, 0 crashes, 2026-11-13 |
+

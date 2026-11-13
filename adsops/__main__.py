@@ -19,7 +19,7 @@ def _selftest():
                  "seo.fetcher", "seo.extract", "seo.crawl", "seo.checks_site", "seo.checks_content", "seo.checks_links",
                  "seo.adguard", "seo.issues", "seo.runs", "seo.perf", "seo.render", "seo.gsc_join", "seo_tools",
                  "content.numbers", "content.checks", "content.sources", "content.facts", "content.topics", "content.bundle",
-                 "content.learn", "content.extend", "content.writers", "content.review", "content.publish", "content.pipeline", "content_tools",
+                 "content.learn", "content.extend", "content.writers", "content.review", "content.publish", "content.pipeline", "content_tools", "coach_tools",
                  "mail_tools", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
