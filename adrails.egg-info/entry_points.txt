@@ -1,3 +1,0 @@
-[console_scripts]
-adrails = adsops.__main__:main
-adsops-mcp = adsops.__main__:main

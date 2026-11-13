@@ -34,7 +34,8 @@ MUTATING = {"adsops_apply", "adsops_set", "adsops_guard", "adsops_rollback", "ad
             "adsops_approval_request", "adsops_auction_insights_import", "aeo_indexnow", "mail_labels",
             "adsops_openai_apply", "adsops_openai_guard", "adsops_openai_upload_image", "adsops_openai_brand_update",
             "adsops_openai_conversions_setup", "adsops_openai_send_conversions", "adsops_openai_audience",
-            "adsops_local_profile", "adsops_local_plan", "adsops_leads", "adsops_lsa_leads", "adsops_lsa_dispute"}
+            "adsops_local_profile", "adsops_local_plan", "adsops_leads", "adsops_lsa_leads", "adsops_lsa_dispute",
+            "seo_content_facts", "seo_content_draft", "seo_content_review", "seo_content_publish"}
 GATED = {"adsops_apply", "adsops_set", "adsops_openai_apply"}
 
 

@@ -38,4 +38,4 @@ version = { attr = "adsops.__version__" }
 include = ["adsops*"]
 
 [tool.setuptools.package-data]
-adsops = ["playbooks/*.md", "fixtures/*.json", "intel/fixtures/*.csv", "intel/fixtures/*.tsv", "intel/fixtures/*.txt", "intel/fixtures/*.json"]
+adsops = ["playbooks/*.md", "examples_seo/*", "fixtures/*.json", "intel/fixtures/*.csv", "intel/fixtures/*.tsv", "intel/fixtures/*.txt", "intel/fixtures/*.json"]

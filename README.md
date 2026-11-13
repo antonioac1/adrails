@@ -54,7 +54,9 @@ Three things it does differently:
 
 
 
-> **New in 0.11.0:** a technical SEO site audit. `seo_audit_run` crawls a site the way Googlebot does and returns one prioritised issue table (priority, hours, issue, recommendation, example URL, pages affected): indexability, sitemap vs crawl, canonicals and near-duplicates, internal PageRank and starved pages, template hard-coded links, internal links carrying utm_ tags, your ad landing pages, schema coverage per template, and optionally JS render parity, Lighthouse per template and Search Console URL Inspection. Runs are stored and diffed. Read-only towards every site. 91 tools.
+> **New in 0.12.0:** a guarded content pipeline. `seo_content_plan` picks topics from Search Console evidence and your last site audit, a writer model of your choice drafts (OpenRouter, any OpenAI-compatible API, or a local CLI login for subscriptions), code checks every number and claim against your approved FACTS file and verbatim source quotes, and a model from a **different family** must review it (same family, a silent model swap or no verdict = hold). Out comes an approved Markdown bundle with an `IMPLEMENT.md` for your own coding agent; publishing is a separate step behind human approval. Results are measured at 14/28/56 days into a LESSONS.md you can edit. 83 tools without a ChatGPT Ads account; with one, 99 tools.
+
+> **New in 0.11.0:** a technical SEO site audit. `seo_audit_run` crawls a site the way Googlebot does and returns one prioritised issue table (priority, hours, issue, recommendation, example URL, pages affected): indexability, sitemap vs crawl, canonicals and near-duplicates, internal PageRank and starved pages, template hard-coded links, internal links carrying utm_ tags, your ad landing pages, schema coverage per template, and optionally JS render parity, Lighthouse per template and Search Console URL Inspection. Runs are stored and diffed. Read-only towards every site.
 
 > **New in 0.10.0:** the measurement loop. `adsops_metrics_pull` keeps a daily local history of Google Ads, Google Search Console, AI-visibility panels and leads; `adsops_search_console` finds the cheapest organic wins and the search terms you pay for while already ranking top-3; `adsops_impact` answers "did that change work?" against a counterfactual with a 90% range and a placebo test. All local, all read-only towards Google. 87 tools.
 
@@ -96,7 +98,7 @@ Not yet. The adapter is in development; it will use the same plan, validate and 
 ## Testing
 
 ```bash
-python3 -m adsops --selftest           # 3,707 checks, everything mocked (the site audit runs against a loopback fixture site)
+python3 -m adsops --selftest           # 4,580 checks, everything mocked (site audit + content pipeline run against loopback fixtures)
 python3 tests/qa_invariants.py         # 200 random sequences against a simulated Google Ads account
 python3 tests/qa_inputs.py             # hostile policy/state/config inputs (NaN, Infinity, bad dates, bad UTF-8, ...)
 python3 tests/qa_secrets.py            # canary tokens injected everywhere; none may reach output or logs
@@ -320,6 +322,52 @@ process with a time limit, WebSockets and non-GET requests refused). Runs are st
 
 Limits: without `render=true` no JavaScript runs; the crawl reaches only linked or sitemap-listed pages within `max_pages`;
 near-duplicates are compared across up to 600 indexable pages; Lighthouse is one lab run per template, not field data.
+
+## Guarded content pipeline (0.12)
+
+The selling point is the guardrails, not the writing: **it refuses to hand over a page that states something it cannot back up.**
+Same promise as the ads side: your keys, your server, your caps, rules in code, approvals, an audit log. Playbook for the agent:
+`adsops_playbook` name=`seo-content`. Setup: a site profile and an approved FACTS file (`adsops-mcp seo-run --init DIR` writes example profiles, a FACTS example, systemd units and a crontab; a human approves the facts with `--approve-facts "Name"`), and
+`"seo_content": {"profiles": {"mysite": "/path/site-profile.json"}}` in the config.
+
+| Tool | What it does |
+| --- | --- |
+| `seo_content_facts` | Proposes a FACTS file from the site's own pages for a human to approve. Never approved automatically; without an approved file the pipeline refuses to draft. |
+| `seo_content_plan` | Topics from evidence: Search Console queries ranking 8-40, question queries, thin or starved pages from the last `seo_audit_run`. Prefers extending a ranking page over a new URL; refuses brand/competitor queries and doorway patterns (town or keyword swaps). |
+| `seo_content_draft` | The writer chain drafts (fallback to the next configured writer on error or truncation, recorded), then the deterministic checks run, with one fix round. |
+| `seo_content_review` | Mandatory adversarial review by a model of a different family. Sources re-fetched, quotes re-found, reviewer edits re-checked. Approve = an approved bundle. |
+| `seo_content_bundle` | Lists, reads and verifies bundles: `page.md`, `IMPLEMENT.md`, `review.json`, hashes. |
+| `seo_content_publish` | Request approval, dry-run or publish one new-page bundle: static directory or a git commit on a new branch (never pushed). Extensions of existing pages are applied from `IMPLEMENT.md`. |
+| `seo_content_results` | Impressions, clicks and position per day, 28 days before vs 14/28/56 days after each piece, and a scoreboard by content type and query class. |
+| `seo_content_lessons` | Reads LESSONS.md: the evidence-backed lines the planner and writer use, plus the operator's own notes. |
+
+**Writers and reviewers.** Three backend kinds: `openrouter` (reported cost counts toward the cap), `openai_compatible` (base URL +
+key env name: z.ai GLM, DeepSeek, OpenAI, a local server) and `command` (a local CLI you configure, for subscription logins; the
+prompt goes through a 0600 temp file or stdin, never argv, and API keys are removed from its environment). Keys are read from the
+environment by name and never logged. Per run: call, token, dollar and time caps; truncated output is an error.
+
+**Independence, enforced in code.** The tool refuses to start if any reviewer is the same model family as any configured writer.
+At run time the model that actually answered is read from the response (or the CLI's JSON) and must be the model that was asked
+for (a dated suffix is fine); a different model, a reported fallback, tool use, an unknown family or a writer-family answer is
+refused and recorded. No parseable verdict is a hold. After a rejection the writer gets one revision round with the
+reviewer's findings; the revision goes through every check and a new independent review (`revision_rounds: 0` turns it off).
+
+**The checks** (before any reviewer, and again after every reviewer edit): every number, percentage, dollar amount and year traced
+to FACTS or to a verbatim quote from a source fetched in that run (spelled-out statistics refused); banned phrases, excluded areas,
+competitor names, superlatives, URLs in text, raw HTML; near-duplicates against every sitemap page (any fetch error = hold);
+minimum substance; for page extensions, a retention floor and a maximum number of changed live sentences, each declared; JSON-LD
+(its values are traced too), author, and links (internal links must exist; external links only to allowed source domains;
+javascript:/data: targets refused).
+
+**Publishing** goes through the existing approvals queue and audit chain: human approval per bundle by default; `auto` only with
+daily and weekly caps and a time window; a failed post-publish check writes a HOLD file that stops all publishing until a person
+removes it; `state/content-STOP` stops everything. **Learning** is a visible file: lines with their evidence, capped, editable,
+and deleted lines never return. No self-modifying code, no hidden weights.
+
+One shot for cron or systemd (no ports): `adsops-mcp seo-run --profile site-profile.json --config config.json [--stage
+run|plan|results|publish|facts]`. Limits: drafts are only as good as the FACTS file and the sources you allow; the checks trace
+numbers and named things, they cannot judge every qualitative claim (that is the reviewer's job, and its findings are recorded);
+results are before/after comparisons, not controlled experiments.
 
 ## The policy file
 

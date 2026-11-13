@@ -1,0 +1,15 @@
+# systemd user unit: one guarded content run (plan -> draft -> checks -> independent review -> bundle). Never publishes
+# unless the profile's publish settings allow it AND you run the publish stage. No ports are opened.
+# Install: cp adrails-seo.{service,timer} ~/.config/systemd/user/ && systemctl --user enable --now adrails-seo.timer
+# Kill switch: touch <profile dir>/state/content-STOP
+[Unit]
+Description=AdRails guarded content pipeline (one shot)
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/adrails/writers.env
+ExecStart=%h/.local/bin/adsops-mcp seo-run --profile %h/adrails-seo/site-profile.json --config %h/adrails/config.json
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes

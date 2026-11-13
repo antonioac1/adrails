@@ -1,0 +1,9 @@
+{
+ "version": 1,
+ "proposed": true,
+ "note": "PLACEHOLDER. Replace every fact with true statements about YOUR business, delete the REPLACE markers, then a human approves it: adsops-mcp seo-run --profile site-profile.json --approve-facts \"Your Name\". The pipeline refuses this file until then.",
+ "facts": [
+  {"id": "fee", "text": "REPLACE: our management fee is $X per month per home.", "source": "https://www.example.com/pricing/"},
+  {"id": "area", "text": "REPLACE: we serve owners in <your county>.", "source": "https://www.example.com/about/"}
+ ]
+}

@@ -50,7 +50,9 @@ def register(srv, ctx, cfg):
               "business recommended by ChatGPT, Perplexity, Gemini and Google AI answers), 'local-leads' (speed-to-lead, Local Services Ads, "
               "reviews, follow-up), 'google-business-profile' (to 100% and kept there), 'google-ads' (Search ads: tracking honesty, "
               "negatives, landing pages, caps, when to stop), 'chatgpt-ads' (ChatGPT Ads: drafts, creative, attribution, the guard) "
-              "and 'seo-audit' (technical SEO site audit: run, read the table in order, Search Console, prove the fixes held). "
+              "'seo-audit' (technical SEO site audit: run, read the table in order, Search Console, prove the fixes held) "
+              "and 'seo-content' (guarded content: approved facts, evidence-picked topics, checks, independent review, "
+              "bundles, gated publishing, results and lessons). "
               "Each step names the AdRails tool that does it and a done-check. No name = list; section = one part only.",
               {"type": "object", "properties": {"name": {"type": "string"}, "section": {"type": "string"}},
                "required": [], "additionalProperties": False})
@@ -83,5 +85,5 @@ def selftest():
     except Exception as e:
         assert "sections:" in str(e); n += 1
     shipped = {p["name"] for p in available()}
-    assert {"aeo", "local-leads", "google-business-profile", "google-ads", "chatgpt-ads", "seo-audit"} <= shipped, "shipped playbooks missing: %s" % shipped; n += 1
+    assert {"aeo", "local-leads", "google-business-profile", "google-ads", "chatgpt-ads", "seo-audit", "seo-content"} <= shipped, "shipped playbooks missing: %s" % shipped; n += 1
     return n

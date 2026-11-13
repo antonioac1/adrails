@@ -94,12 +94,21 @@ VIEWER = (
     # 0.11 site audit reads (local stored runs only)
     "seo_audit_issues",
     "seo_audit_diff",
+    # 0.12 content pipeline reads (local bundles + LESSONS.md + read-only Search Console)
+    "seo_content_bundle",
+    "seo_content_lessons",
+    "seo_content_results",
 )
 
 OPERATOR_EXTRA = (
     "adsops_metrics_pull",   # calls Google APIs (quota) and writes the local store
     "seo_audit_run",         # crawls a website (outbound requests) and writes the local run store
     "seo_gsc_exclusions",    # spends Search Console URL Inspection quota
+    "seo_content_plan",      # reads Search Console + the site
+    "seo_content_facts",     # crawls the site, writes FACTS.proposed.json (never approved automatically)
+    "seo_content_draft",     # spends model tokens (caps in the site profile)
+    "seo_content_review",    # spends model tokens; writes approved bundles
+    "seo_content_publish",   # writes to the site directory / git branch, behind approvals + HOLD + caps
     "adsops_plan",
     "adsops_apply",
     "adsops_set",

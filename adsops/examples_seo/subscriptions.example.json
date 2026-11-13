@@ -1,0 +1,31 @@
+{
+  "_comment": "Subscriptions instead of pay-per-token: GLM (z.ai coding plan) writes, DeepSeek is the backup writer, and an OpenAI model reached through a LOCAL CLI login (OAuth subscription) is the adversarial reviewer. The prompt goes to the CLI through a 0600 temp file, never argv; the CLI's JSON output must say which model answered. API keys are referenced by env NAME only and are never passed to the CLI.",
+  "site": "https://www.example.com/",
+  "gsc_site": "sc-domain:example.com",
+  "facts_file": "FACTS.json",
+  "lessons_file": "LESSONS.md",
+  "author": {"name": "Jane Doe", "url": "/about/jane-doe/", "id": "https://www.example.com/about/jane-doe/#person"},
+  "rulings": {"banned_phrases": [], "excluded_areas": [], "competitors": [], "own_brand": ["Example Co"]},
+  "allowed_source_domains": ["*.gov", "www.example.com"],
+  "reference_sources": [],
+  "writers": [
+    {"name": "glm", "kind": "openai_compatible", "base_url": "https://api.z.ai/api/coding/paas/v4", "key_env": "ZAI_API_KEY",
+     "model": "glm-5.3", "max_tokens": 32000, "timeout_s": 900, "retries": 1,
+     "price_per_mtok": {"in": 0, "out": 0}},
+    {"name": "deepseek", "kind": "openai_compatible", "base_url": "https://api.deepseek.com/v1", "key_env": "DEEPSEEK_API_KEY",
+     "model": "deepseek-flash", "max_tokens": 32000, "timeout_s": 900, "retries": 1}
+  ],
+  "reviewers": [
+    {"name": "openai-cli", "kind": "command", "model": "openai/gpt-6-astra",
+     "cmd": ["openclaw", "agent", "--agent", "reviewer", "--session-id", "{nonce}", "--model", "openai/gpt-6-astra",
+             "--json", "--thinking", "medium", "--message-file", "{prompt_file}"],
+     "text_paths": ["result.payloads[].text", "result.finalAssistantVisibleText", "payloads[].text"],
+     "model_paths": ["result.meta.executionTrace.winnerModel", "result.meta.agentMeta.model"],
+     "fallback_paths": ["result.meta.executionTrace.fallbackUsed"],
+     "tools_paths": ["result.meta.agentMeta.terminalReceipt.successfulToolNames"],
+     "timeout_s": 1500}
+  ],
+  "editor": null,
+  "caps": {"max_cost_usd": 2.0, "max_tokens": 300000, "max_calls": 8, "deadline_s": 3600},
+  "publish": {"target": "none"}
+}

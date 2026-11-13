@@ -70,6 +70,28 @@ def offline():
           "README %s, tools/list %d (%d without an openai_ads account)" % (m.group(1) if m else "?", n_oai, n_plain))
     check("README keeps the MCP Registry ownership marker", "mcp-name: dev.adrails/adrails" in readme)
     check("CLAIMS.md has a section for %s" % v, ("%s " % v) in open(os.path.join(ROOT, "CLAIMS.md")).read())
+    # 0.12: the shipped example site profiles must load and pass the writer/reviewer independence rule
+    import glob as _glob
+    from adsops.content import writers as _w
+    for ex in sorted(_glob.glob(os.path.join(ROOT, "adsops", "examples_seo", "*.example.json"))):
+        if os.path.basename(ex).startswith("FACTS"):
+            continue
+        try:
+            d = json.load(open(ex))
+            _w.validate_chains(d.get("writers") or [], d.get("reviewers") or [], d.get("editor"))
+            ok_ex, why = True, ""
+        except Exception as e:                                   # noqa: BLE001 - report the reason
+            ok_ex, why = False, str(e)[:160]
+        check("example profile %s: chains valid, reviewer of another family" % os.path.basename(ex), ok_ex, why)
+    from adsops.content import facts as _f
+    try:
+        _f.load_facts(os.path.join(ROOT, "adsops", "examples_seo", "FACTS.example.json"))
+        ok_f, why_f = False, "the shipped example loads as APPROVED"
+    except Exception:                                            # noqa: BLE001 - refusal is the expected result
+        ok_f, why_f = True, ""
+    check("FACTS.example.json is an unapproved placeholder (QA N1)", ok_f, why_f)
+    from adsops import guides as _g
+    check("playbook seo-content ships", any(p["name"] == "seo-content" for p in _g.available()))
     st = os.popen("cd %s && git status --porcelain 2>/dev/null" % ROOT).read().strip()
     check("working tree clean", not st, " ".join(st.split())[:200])
     return v, n_oai
