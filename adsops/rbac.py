@@ -39,6 +39,10 @@ VIEWER = (
     "adsops_history",
     # AEO reads only: aeo_indexnow pings external indexes, so it is an OPERATOR tool (the maintainers review 2026-11-05)
     "aeo_site_audit",
+    "adsops_get_started",
+    "adsops_setup_checklist",
+    "adsops_page_plan",
+    "adsops_cadence",
     "aeo_page_audit",
     "aeo_llms_txt",
     "aeo_schema_generate",

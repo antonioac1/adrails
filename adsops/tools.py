@@ -28,7 +28,10 @@ def _schema(extra=None, required=("campaign",)):
 # Sent to every client in the MCP `initialize` handshake: how an agent should use this server (clients put it in the agent's context).
 SERVER_INSTRUCTIONS = (
     "AdRails: lead generation, Google Ads, Google Local Services Ads, ChatGPT Ads and AEO (getting recommended by AI assistants) "
-    "for a business, run by you with guardrails. Getting started for a small business: use the `start` prompt (or call "
+    "for a business, run by you with guardrails. Be proactive: for any owner who wants more leads, SEO, AEO or local visibility, call "
+    "adsops_get_started FIRST and interview them a few questions at a time (look up what you can yourself), save answers with "
+    "adsops_local_profile action=set, then adsops_setup_checklist, adsops_page_plan and adsops_cadence; every result has next_step, "
+    "follow it and end each reply with the next concrete step. Getting started also works via the `start` prompt (or call "
     "adsops_local_profile action=questions, then adsops_local_plan action=build); every morning the `morning` prompt; weekly the "
     "`weekly` prompt; monthly the `monthly` prompt (adsops_results before/after). The playbooks (adsops_playbook: aeo, local-leads, "
     "google-business-profile, google-ads, chatgpt-ads) hold the tested strategy behind the plan: read the relevant one before the work. Rails you must keep: never spend money, enable a campaign or message a customer without the "
@@ -338,6 +341,8 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     oai_tools.register(srv, ctx, cfg, oai_client_factory)   # adsops_openai_* (only when an openai_ads account exists)
     from adsops import local_tools, lsa_tools
     local_tools.register(srv, ctx, cfg)       # local business: profile, 90-day plan, lead book, schema/NAP/area pages, reviews, prompts
+    from adsops import coach_tools
+    coach_tools.register(srv, ctx, cfg)       # 0.13: the owner workflow as tools (clients without MCP prompts), next_step on every result
     lsa_tools.register(srv, ctx, cfg)         # Google Local Services Ads: leads, report, lead feedback (credits), readiness
     from adsops import guides, updates
     guides.register(srv, ctx, cfg)            # adsops_playbook: the tested AEO + local-leads strategy, shipped as markdown
@@ -441,7 +446,7 @@ def selftest():
     assert names[:12] == ["adsops_campaigns", "adsops_status", "adsops_terms", "adsops_plan", "adsops_apply",
                      "adsops_set", "adsops_guard", "adsops_usage", "adsops_negatives_suggest", "adsops_competitors_report",
                      "adsops_auction_insights_import", "adsops_lp_diagnose"], names; n += 1
-    assert len(names) == 83 and all(t in names for t in ("seo_audit_run", "seo_audit_issues", "seo_audit_diff", "seo_gsc_exclusions", "seo_content_plan", "seo_content_draft", "seo_content_review", "seo_content_bundle", "seo_content_publish", "seo_content_results", "seo_content_lessons", "seo_content_facts")) and "adsops_impact" in names and "adsops_search_console" in names and "adsops_paid" in names and "adsops_gbp" in names and "adsops_results" in names and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
+    assert len(names) == 87 and all(t in names for t in ("adsops_get_started", "adsops_setup_checklist", "adsops_page_plan", "adsops_cadence")) and all(t in names for t in ("seo_audit_run", "seo_audit_issues", "seo_audit_diff", "seo_gsc_exclusions", "seo_content_plan", "seo_content_draft", "seo_content_review", "seo_content_bundle", "seo_content_publish", "seo_content_results", "seo_content_lessons", "seo_content_facts")) and "adsops_impact" in names and "adsops_search_console" in names and "adsops_paid" in names and "adsops_gbp" in names and "adsops_results" in names and "adsops_update_check" in names and "adsops_playbook" in names and "adsops_lsa_dispute" in names and "adsops_conv_audit" in names and "aeo_site_audit" in names, names; n += 1
     assert call("adsops_campaigns")["structuredContent"]["campaigns"][0]["key"] == "c42"; n += 1
     assert call("adsops_status", {"campaign": "nope"})["isError"]; n += 1
     st = call("adsops_status", {"campaign": "c42"})["structuredContent"]
