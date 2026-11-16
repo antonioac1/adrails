@@ -188,7 +188,7 @@ def _local_day(at):
         return str(at or "")[:10]
 
 
-def zero_fill(st, source, entity_type, metrics, day_from, day_to, entity_ids=None):
+def zero_fill(st, source, entity_type, metrics, day_from, day_to, entity_ids=None, skip=None):
     """Review #2: a pulled day with no rows is a ZERO day (no clicks, no leads), not unknown. Platforms return no row for a
     zero day, so after each pull write explicit zeros for every entity already known to the store, from its first day on,
     inside the pulled window only (outside the window stays null = never pulled)."""
@@ -200,6 +200,9 @@ def zero_fill(st, source, entity_type, metrics, day_from, day_to, entity_ids=Non
     have = {(r[0], r[1], r[2]) for r in st._conn.execute(
         "SELECT entity_id, day, metric FROM facts WHERE source=? AND entity_type=? AND day BETWEEN ? AND ?",
         (source, entity_type, day_from, day_to))}
+    # skip = (entity_id, day, metric) keys the platform reported as UNKNOWN (e.g. a "--" cell): no row came back for them
+    # on purpose, and zero-filling would turn "unknown" back into a fabricated 0.
+    have |= {(str(e), d, m) for e, d, m in (skip or ())}
     out = []
     for r in rows:
         for d in mstore.days_between(max(day_from, r[1]), day_to) if max(day_from, r[1]) <= day_to else []:
@@ -280,12 +283,15 @@ def register(srv, ctx, cfg, gsc_client=None, msads_client=None):
                     try:
                         camps = mc.campaigns(a["account_id"], a["customer_id"])
                         tz = msads_tools.tz_of(camps)
-                        n = st.upsert(msads_tools.facts(mc.report("campaign", a["account_id"], a["customer_id"], *win, time_zone=tz), "campaign"))
-                        n += st.upsert(msads_tools.facts(mc.report("search_term", a["account_id"], a["customer_id"], *win, time_zone=tz), "search_term"))
+                        unk_c, unk_t = [], []      # metrics the report gave as non-numeric: not stored, not zero-filled
+                        n = st.upsert(msads_tools.facts(mc.report("campaign", a["account_id"], a["customer_id"], *win, time_zone=tz), "campaign", unk_c))
+                        n += st.upsert(msads_tools.facts(mc.report("search_term", a["account_id"], a["customer_id"], *win, time_zone=tz), "search_term", unk_t))
                         zero_fill(st, "microsoft_ads", "campaign", ["cost", "clicks", "impressions", "conversions"], *win,
-                                  entity_ids=[c["campaign_id"] for c in camps])
+                                  entity_ids=[c["campaign_id"] for c in camps], skip=unk_c)
                         st.record_pull("microsoft_ads", scope, win[0], win[1], n)
                         report[scope] = {"days": list(win), "rows": n}
+                        if unk_c or unk_t:         # explicitly flagged: those day/metric cells are unknown, not zero
+                            report[scope]["incomplete"] = len(unk_c) + len(unk_t)
                     except Exception as e:             # noqa: BLE001 - recorded as a failed pull, other sources still run
                         st.record_pull("microsoft_ads", scope, win[0], win[1], 0, ok=False, error=str(e))
                         report[scope] = {"error": scrub(str(e), 300)}
@@ -739,6 +745,26 @@ def selftest():
     again = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads"]})["pulled"]["msads:G1"]
     after = tools["adsops_metrics"]({"action": "series", "source": "microsoft_ads", "metric": "cost", "days": 60})["series"]
     assert "error" not in again and sum(p["value"] or 0 for p in after) == sum(p["value"] or 0 for p in before) > 0; n += 1   # re-pull = no double count
+
+    # 0.14.4 regression: a non-numeric report cell ("--" -> None) is neither stored as 0 nor zero-filled afterwards
+    class DashMs(FakeMs):
+        def campaigns(self, a, c):
+            return [{"campaign_id": "626", "time_zone": "EasternTimeUSCanada"}]
+
+        def report(self, level, a, c, lo, hi, time_zone=None):
+            if level == "campaign":
+                return [{"TimePeriod": "10/28/2026", "CampaignId": "626", "CampaignName": "Dash", "Spend": None, "Clicks": 3.0,
+                         "Impressions": 90.0, "Conversions": None}]
+            return []
+    register(Srv(), Ctx(), dict(cfg, microsoft_ads={"accounts": [{"number": "G8", "account_id": 8, "customer_id": 9}]}),
+             gsc_client=FakeGsc(), msads_client=DashMs())
+    r6 = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads"], "backfill_days": 30})["pulled"]["msads:G8"]
+    assert "error" not in r6 and r6["incomplete"] == 2, r6; n += 1
+    st6 = mstore.Store(db_path(cfg))
+    got = {(m, d): v for m, d, v in st6._conn.execute("SELECT metric, day, value FROM facts WHERE source='microsoft_ads' AND entity_id='626'")}
+    assert got[("clicks", "2026-10-28")] == 3.0 and ("cost", "2026-10-28") not in got and ("conversions", "2026-10-28") not in got, got; n += 1
+    assert any(m == "cost" and v == 0 for (m, d), v in got.items() if d != "2026-10-28"); n += 1   # other days still zero-filled
+    st6.close()
     return n
 
 

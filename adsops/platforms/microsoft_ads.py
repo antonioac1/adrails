@@ -23,6 +23,7 @@ No network at import time; `http=` and `sleep=` are injectable for tests.
 import csv
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -305,8 +306,10 @@ class MicrosoftAdsClient:
 
     def ad_groups(self, campaign_id, account_id, customer_id):
         r = self.post(CAMPAIGN, "AdGroups/QueryByCampaignId", {"CampaignId": _sid(campaign_id)}, account_id, customer_id)
+        # "type" = v13 AdGroup.AdGroupType (SearchStandard | SearchDynamic | ...): health needs it to tell a dynamic search
+        # ad group (no keywords by design) from a keyword-targeted one with an empty keyword list (cannot serve).
         return [{"ad_group_id": str(g.get("Id")), "name": g.get("Name"), "status": g.get("Status"), "network": g.get("Network"),
-                 "cpc_bid": (g.get("CpcBid") or {}).get("Amount")} for g in r.get("AdGroups") or []]
+                 "type": g.get("AdGroupType"), "cpc_bid": (g.get("CpcBid") or {}).get("Amount")} for g in r.get("AdGroups") or []]
 
     def keywords(self, ad_group_id, account_id, customer_id):
         r = self.post(CAMPAIGN, "Keywords/QueryByAdGroupId", {"AdGroupId": _sid(ad_group_id)}, account_id, customer_id)
@@ -314,8 +317,9 @@ class MicrosoftAdsClient:
                  "editorial_status": k.get("EditorialStatus")} for k in r.get("Keywords") or []]
 
     def ads(self, ad_group_id, account_id, customer_id):
+        # DynamicSearch included so a dynamic search ad group's ads are seen; without it health reported "no serving ad".
         r = self.post(CAMPAIGN, "Ads/QueryByAdGroupId", {"AdGroupId": _sid(ad_group_id),
-                                                         "AdTypes": ["ResponsiveSearch", "ExpandedText"]}, account_id, customer_id)
+                                                         "AdTypes": ["ResponsiveSearch", "ExpandedText", "DynamicSearch"]}, account_id, customer_id)
         out = []
         for a in r.get("Ads") or []:
             heads = [h.get("Asset", {}).get("Text") for h in ((a.get("Headlines") or []) if isinstance(a.get("Headlines"), list) else [])]
@@ -373,10 +377,23 @@ class MicrosoftAdsClient:
 
 
 def _num(v):
+    """A report cell -> float, or None when it is not a number. Microsoft writes "--" (and sometimes "N/A" or an empty
+    cell) where a value is not available; reading those as 0.0 fabricated zero spend / zero conversions, so a non-numeric
+    placeholder is None = UNKNOWN and every consumer must treat it that way (see totals, msads_tools)."""
+    if v is None:
+        return None
+    s = str(v).strip().replace(",", "").replace("%", "")
     try:
-        return float(str(v).replace(",", "").replace("%", "") or 0)
-    except ValueError:
-        return 0.0
+        f = float(s)
+    except ValueError:                                  # "", "--", "N/A", garbage -> unknown, never zero
+        return None
+    return f if math.isfinite(f) else None              # "nan"/"inf" parse as floats but are not values either
+
+
+def add_known(a, b):
+    """None-sticky addition: unknown + anything = unknown. Used wherever report values are summed, so one unknown cell
+    makes the total unknown instead of a silent partial sum that reads as the real number."""
+    return None if a is None or b is None else a + b
 
 
 def parse_report(raw):
@@ -398,10 +415,22 @@ def parse_report(raw):
 
 
 def totals(rows):
-    t = {k: round(sum(r.get(k, 0) or 0 for r in rows), 2) for k in ("Impressions", "Clicks", "Spend", "Conversions")}
-    t["CTR"] = round(t["Clicks"] / t["Impressions"], 4) if t["Impressions"] else None
-    t["AvgCPC"] = round(t["Spend"] / t["Clicks"], 2) if t["Clicks"] else None
-    t["CostPerConversion"] = round(t["Spend"] / t["Conversions"], 2) if t["Conversions"] else None
+    """Window totals + ratios. A metric with ANY unknown (None) cell totals to None and is listed under "incomplete";
+    a ratio with an unknown input is None. (An absent column still counts as 0: that level simply has no such column.)
+    No rows at all = no traffic = zeros, as documented on adsops_msads_performance."""
+    t, unknown = {}, []
+    for k in ("Impressions", "Clicks", "Spend", "Conversions"):
+        tot = 0.0
+        for r in rows:
+            tot = add_known(tot, r.get(k, 0))
+        t[k] = None if tot is None else round(tot, 2)
+        if tot is None:
+            unknown.append(k)
+    t["CTR"] = round(t["Clicks"] / t["Impressions"], 4) if t["Impressions"] and t["Clicks"] is not None else None
+    t["AvgCPC"] = round(t["Spend"] / t["Clicks"], 2) if t["Clicks"] and t["Spend"] is not None else None
+    t["CostPerConversion"] = round(t["Spend"] / t["Conversions"], 2) if t["Conversions"] and t["Spend"] is not None else None
+    if unknown:
+        t["incomplete"] = unknown
     return t
 
 
@@ -604,6 +633,32 @@ def selftest():
     assert rows[0]["Impressions"] == 1200 and rows[0]["Spend"] == 95.5; n += 1
     t = totals(rows)
     assert t["CTR"] == 0.025 and t["AvgCPC"] == 3.18 and t["CostPerConversion"] == 47.75; n += 1
+
+    # 0.14.4 regression: non-numeric placeholders are UNKNOWN (None), never a fabricated 0
+    assert [_num(x) for x in ("--", "N/A", "", " ", "garbage", None, "nan", "inf")] == [None] * 8; n += 1
+    assert _num("1,234.5") == 1234.5 and _num("12.3%") == 12.3 and _num("0") == 0.0 and _num(7) == 7.0 and _num("-2") == -2.0; n += 1
+    dash = parse_report("TimePeriod,CampaignName,Impressions,Clicks,Spend,Conversions\n2026-11-15,C,--,3,N/A,\n2026-11-16,C,10,2,4.00,1\n".encode())
+    assert dash[0]["Impressions"] is None and dash[0]["Spend"] is None and dash[0]["Conversions"] is None and dash[0]["Clicks"] == 3.0; n += 1
+    t = totals(dash)                                       # one unknown cell -> unknown total, unknown ratios; known ones still summed
+    assert t["Impressions"] is None and t["Spend"] is None and t["Conversions"] is None and t["Clicks"] == 5.0 and t["CTR"] is None \
+        and t["AvgCPC"] is None and t["CostPerConversion"] is None and t["incomplete"] == ["Impressions", "Spend", "Conversions"], t; n += 1
+    assert "incomplete" not in totals(rows) and totals([]) == {"Impressions": 0.0, "Clicks": 0.0, "Spend": 0.0, "Conversions": 0.0,
+                                                                "CTR": None, "AvgCPC": None, "CostPerConversion": None}; n += 1
+
+    # 0.14.4 regression: ad group type is read (health exempts dynamic search groups), and DSA ads are requested
+    asked = []
+
+    def types(method, url, headers, body):
+        if "oauth2" in url:
+            return 200, json.dumps({"access_token": "AT9", "expires_in": 3600}).encode()
+        asked.append((url, json.loads(body)))
+        if url.endswith("AdGroups/QueryByCampaignId"):
+            return 200, json.dumps({"AdGroups": [{"Id": "1", "Name": "g", "Status": "Active", "AdGroupType": "SearchDynamic"}]}).encode()
+        return 200, json.dumps({"Ads": []}).encode()
+    tc = MicrosoftAdsClient(Tokens("microsoft", "cid", rt, http=types), "D" * 16, http=types, sleep=lambda s: None)
+    assert tc.ad_groups("525", "187", "255")[0]["type"] == "SearchDynamic"; n += 1
+    tc.ads("1", "187", "255")
+    assert "DynamicSearch" in asked[-1][1]["AdTypes"]; n += 1
 
     def nodata(method, url, headers, body):
         if "oauth2" in url:

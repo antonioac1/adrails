@@ -58,17 +58,17 @@ def resolve_accounts(cfg, client):
 
 
 def window(args, today):
-    if args.get("day_from"):
-        lo, hi = args["day_from"], args.get("day_to") or today.isoformat()
-    else:
-        days = int(args.get("days") or 7)
-        lo, hi = (today - dt.timedelta(days=days - 1)).isoformat(), today.isoformat()
+    """-> (day_from, day_to) ISO strings. day_to defaults to today; without day_from the window is `days` days ENDING on
+    day_to (it used to end on today whatever day_to said, so {days: 7, day_to: X} silently reported the wrong week)."""
+    days = int(args.get("days") or 7)
     try:
-        if dt.date.fromisoformat(lo) > dt.date.fromisoformat(hi):
-            raise ToolError("day_from is after day_to")
+        hi = dt.date.fromisoformat(args["day_to"]) if args.get("day_to") else today
+        lo = dt.date.fromisoformat(args["day_from"]) if args.get("day_from") else hi - dt.timedelta(days=days - 1)
     except ValueError:
         raise ToolError("dates must be YYYY-MM-DD") from None
-    return lo, hi
+    if lo > hi:
+        raise ToolError("day_from is after day_to")
+    return lo.isoformat(), hi.isoformat()
 
 
 STOPPED = {"Suspended": "suspended by Microsoft (usually billing or policy): it cannot serve",
@@ -103,6 +103,10 @@ def health_findings(campaigns, tree, perf_by_campaign, today_spend, account=None
             ok_ad = [a for a in ads if a["status"] == "Active" and a.get("editorial_status") not in ("Disapproved", "Inactive")]
             if kws and not ok_kw:
                 out.append({"severity": "critical", "campaign": name, "ad_group": g["name"], "issue": "no serving keyword (all paused or disapproved)"})
+            elif not kws and not _is_dynamic(c, g):
+                # An empty keyword list used to pass silently (the guard above needs kws). A keyword-targeted group with
+                # no keywords never matches a search; dynamic search groups target the site instead, so they are exempt.
+                out.append({"severity": "warning", "campaign": name, "ad_group": g["name"], "issue": "active ad group has no keywords: it cannot serve"})
             if not ok_ad:
                 out.append({"severity": "critical", "campaign": name, "ad_group": g["name"], "issue": "no serving ad (all paused or disapproved)"})
             bad = [k["text"] for k in kws if k.get("editorial_status") == "Disapproved"]
@@ -125,7 +129,11 @@ def health_findings(campaigns, tree, perf_by_campaign, today_spend, account=None
             out.append({"severity": "warning", "campaign": name, "issue": f"{len(clash)} negative keyword(s) block your own keywords",
                         "examples": [f"-{a} blocks '{b}'" for a, b in clash[:5]]})
         p = perf_by_campaign.get(name)
-        if p is not None and p["Impressions"] == 0:
+        if p is not None and p.get("Impressions") is None:
+            # unknown (non-numeric report cells) is not zero: say so instead of claiming "0 impressions"
+            out.append({"severity": "info", "campaign": name,
+                        "issue": "impressions unknown in the window (report returned non-numeric values): delivery not confirmed"})
+        elif p is not None and p["Impressions"] == 0:
             out.append({"severity": "warning", "campaign": name,
                         "issue": "Active but 0 impressions in the window (new campaigns can take hours; check bids, budget, approvals, payment)"})
         spend = today_spend.get(name)
@@ -138,6 +146,47 @@ def health_findings(campaigns, tree, perf_by_campaign, today_spend, account=None
             out.append({"severity": "info", "campaign": name, "issue": "no final URL suffix: leads will not carry utm/campaign ids into your CRM"})
     order = {"critical": 0, "warning": 1, "info": 2}
     return sorted(out, key=lambda f: order[f["severity"]])
+
+
+def _is_dynamic(campaign, group):
+    """Dynamic search ads target the website, not keywords: v13 AdGroupType SearchDynamic, a legacy DynamicSearchAds
+    campaign, or a group whose ads are DynamicSearch ads. The last signal matters: live-checked 2026-11-16,
+    AdGroups/QueryByCampaignId does NOT return AdGroupType by default (it comes back empty), so the ad type is the
+    reliable signal for a dynamic group inside an ordinary Search campaign."""
+    return (group.get("type") == "SearchDynamic" or campaign.get("type") == "DynamicSearchAds"
+            or any((a or {}).get("type") == "DynamicSearch" for a in (group.get("ads") or [])))
+
+
+# Microsoft Advertising TimeZone enum (campaign TimeZone / ReportTimeZone) -> IANA, for the account-local "today".
+# Unlisted names fall back to the host clock (local_today), so a gap here degrades to the old behaviour, never an error.
+MS_TZ_IANA = {
+    "EasternTimeUSCanada": "America/New_York", "CentralTimeUSCanada": "America/Chicago",
+    "MountainTimeUSCanada": "America/Denver", "PacificTimeUSCanadaTijuana": "America/Los_Angeles",
+    "PacificTimeUSCanada": "America/Los_Angeles", "Arizona": "America/Phoenix", "Alaska": "America/Anchorage",
+    "Hawaii": "Pacific/Honolulu", "IndianaEast": "America/Indiana/Indianapolis", "AtlanticTimeCanada": "America/Halifax",
+    "Newfoundland": "America/St_Johns", "Saskatchewan": "America/Regina",
+    "GuadalajaraMexicoCityMonterrey": "America/Mexico_City", "BogotaLimaQuito": "America/Bogota", "Brasilia": "America/Sao_Paulo",
+    "GreenwichMeanTimeDublinEdinburghLisbonLondon": "Europe/London",
+    "AmsterdamBerlinBernRomeStockholmVienna": "Europe/Berlin", "BrusselsCopenhagenMadridParis": "Europe/Paris",
+    "AthensBuckarestIstanbul": "Europe/Athens", "HelsinkiKyivRigaSofiaTallinnVilnius": "Europe/Helsinki",
+    "ChennaiKolkataMumbaiNewDelhi": "Asia/Kolkata", "KualaLumpurSingapore": "Asia/Singapore",
+    "BeijingChongqingHongKongUrumqi": "Asia/Shanghai", "OsakaSapporoTokyo": "Asia/Tokyo",
+    "CanberraMelbourneSydney": "Australia/Sydney", "Brisbane": "Australia/Brisbane", "Perth": "Australia/Perth",
+    "AucklandWellington": "Pacific/Auckland",
+}
+
+
+def local_today(ts, ms_zone):
+    """The calendar day at epoch `ts` in the account's report time zone (the zone report rows are bucketed in), so the
+    default window's last day is the account's today, not the host's. Unknown zone / no tz database -> host-local."""
+    iana = MS_TZ_IANA.get(ms_zone or "")
+    if iana:
+        try:
+            from zoneinfo import ZoneInfo
+            return dt.datetime.fromtimestamp(ts, ZoneInfo(iana)).date()
+        except (ImportError, KeyError, ValueError):     # ZoneInfoNotFoundError is a KeyError (e.g. no tzdata on Windows)
+            pass
+    return dt.date.fromtimestamp(ts)
 
 
 def tz_of(campaigns):
@@ -157,8 +206,9 @@ def register(srv, ctx, cfg, client_factory=None):
             state["c"] = (client_factory or build_client)(cfg)
         return state["c"]
 
-    def today():
-        return dt.date.fromtimestamp(ctx.now())
+    def today(zone=None):
+        # account-local day (report time zone) when known; host-local only as a fallback (was always host-local)
+        return local_today(ctx.now(), zone)
 
     def accounts():
         if "accts" not in state:
@@ -222,7 +272,7 @@ def register(srv, ctx, cfg, client_factory=None):
                        "campaign_id": {"type": "string", "description": "optional: only this campaign"}}))
     def t_perf(args):
         a = account(args.get("account"))
-        lo, hi = window(args, today())
+        lo, hi = window(args, today(tz(a)))
         level = args.get("level") or "campaign"
         rows = client().report(level, a["account_id"], a["customer_id"], lo, hi,
                                campaign_ids=[args["campaign_id"]] if args.get("campaign_id") else None, time_zone=tz(a))
@@ -235,18 +285,28 @@ def register(srv, ctx, cfg, client_factory=None):
                        "limit": {"type": "integer", "minimum": 1, "maximum": 500}}))
     def t_terms(args):
         a = account(args.get("account"))
-        lo, hi = window({"days": 30, **args}, today())
+        lo, hi = window({"days": 30, **args}, today(tz(a)))
         rows = client().report("search_term", a["account_id"], a["customer_id"], lo, hi,
                                campaign_ids=[args["campaign_id"]] if args.get("campaign_id") else None, time_zone=tz(a))
         agg = {}
         for r in rows:
             k = (r.get("SearchQuery"), r.get("Keyword"), r.get("AdGroupName"))
             s = agg.setdefault(k, {"search_query": k[0], "keyword": k[1], "ad_group": k[2], "impressions": 0, "clicks": 0, "spend": 0.0, "conversions": 0.0})
-            s["impressions"] += r.get("Impressions", 0); s["clicks"] += r.get("Clicks", 0)
-            s["spend"] = round(s["spend"] + r.get("Spend", 0), 2); s["conversions"] += r.get("Conversions", 0)
-        terms = sorted(agg.values(), key=lambda x: (-x["spend"], -x["clicks"]))
-        return {"account": a["number"], "day_from": lo, "day_to": hi, "terms": terms[:int(args.get("limit") or 100)],
-                "terms_total": len(terms), "wasted": [t for t in terms if t["spend"] > 0 and not t["conversions"]][:25]}
+            # None-sticky sums: one unknown ("--") cell makes that term's metric unknown, never a partial number
+            for src, dst in (("Impressions", "impressions"), ("Clicks", "clicks"), ("Spend", "spend"), ("Conversions", "conversions")):
+                s[dst] = ms.add_known(s[dst], r.get(src, 0))
+        for s in agg.values():
+            s["spend"] = None if s["spend"] is None else round(s["spend"], 2)
+        # known spend first (desc), unknown spend last: sorting must not TypeError on None, nor rank unknown as $0 waste
+        terms = sorted(agg.values(), key=lambda x: (x["spend"] is None, -(x["spend"] or 0), -(x["clicks"] or 0)))
+        # "wasted" needs KNOWN spend > 0 and KNOWN zero conversions; unknown conversions are not evidence of waste
+        wasted = [t for t in terms if t["spend"] is not None and t["spend"] > 0 and t["conversions"] == 0]
+        out = {"account": a["number"], "day_from": lo, "day_to": hi, "terms": terms[:int(args.get("limit") or 100)],
+               "terms_total": len(terms), "wasted": wasted[:25]}
+        unknown = sum(1 for t in terms if None in (t["impressions"], t["clicks"], t["spend"], t["conversions"]))
+        if unknown:
+            out["incomplete_terms"] = unknown                    # flagged: these terms carry a None (unknown) metric
+        return out
 
     @srv.tool("adsops_msads_health", "Microsoft Ads monitor: everything that stops an Active campaign from serving or wastes its "
               "money, as findings with severity (critical / warning / info): no active ad group, all keywords or ads paused or "
@@ -260,12 +320,16 @@ def register(srv, ctx, cfg, client_factory=None):
         tr = {c["campaign_id"]: tree(a, c["campaign_id"]) for c in search}
         perf, spend_today = {}, {}
         if active:
-            lo, hi = window({"days": int(args.get("days") or 2)}, today())
+            lo, hi = window({"days": int(args.get("days") or 2)}, today(tz_of(cs)))
             rows = client().report("campaign", a["account_id"], a["customer_id"], lo, hi, time_zone=tz_of(cs))
             for c in active:
                 mine = [r for r in rows if r.get("CampaignName") == c["name"]]
                 perf[c["name"]] = ms.totals(mine)
-                spend_today[c["name"]] = sum(r.get("Spend", 0) for r in mine if _is_day(r.get("TimePeriod"), hi))
+                spent = 0.0
+                for r in mine:
+                    if _is_day(r.get("TimePeriod"), hi):
+                        spent = ms.add_known(spent, r.get("Spend", 0))     # unknown -> None -> budget check skipped
+                spend_today[c["name"]] = spent
         f = health_findings(cs, tr, perf, spend_today, account=a)
         return {"account": a["number"], "checked_campaigns": [c["name"] for c in search],
                 "not_structure_checked": [f"{c['name']} ({c.get('type')})" for c in active if c not in search], "window_stats": perf,
@@ -274,9 +338,11 @@ def register(srv, ctx, cfg, client_factory=None):
     return state
 
 
-def facts(rows, level):
+def facts(rows, level, unknown=None):
     """Reporting rows -> metrics-store facts (source microsoft_ads). Same metric names as google_ads (cost, clicks,
-    impressions, conversions) so the two platforms sit side by side. Duplicate (day, entity) keys are summed."""
+    impressions, conversions) so the two platforms sit side by side. Duplicate (day, entity) keys are summed.
+    A metric with an unknown (None) cell is NOT emitted (the store has no null value and 0 would be a fabricated zero);
+    its (entity_id, day, metric) key is appended to `unknown` so the caller can flag it and keep zero_fill off it."""
     acc = {}
     for r in rows or []:
         day = norm_day(r.get("TimePeriod"))
@@ -290,9 +356,11 @@ def facts(rows, level):
             continue
         s = acc.setdefault((day, eid), {"name": name, "m": {"cost": 0.0, "clicks": 0.0, "impressions": 0.0, "conversions": 0.0}})
         for src, dst in (("Spend", "cost"), ("Clicks", "clicks"), ("Impressions", "impressions"), ("Conversions", "conversions")):
-            s["m"][dst] += float(r.get(src) or 0)
+            s["m"][dst] = ms.add_known(s["m"][dst], r.get(src, 0))   # was float(x or 0): "--" became a stored 0
+    if unknown is not None:
+        unknown.extend((e, d, k) for (d, e), v in acc.items() for k, val in v["m"].items() if val is None)
     return [{"source": "microsoft_ads", "day": d, "entity_type": level, "entity_id": e, "entity_name": v["name"], "metric": k,
-             "value": round(val, 4)} for (d, e), v in acc.items() for k, val in v["m"].items()]
+             "value": round(val, 4)} for (d, e), v in acc.items() for k, val in v["m"].items() if val is not None]
 
 
 def _is_day(period, iso):
@@ -432,4 +500,99 @@ def selftest():
     assert srv2._tools["adsops_msads_campaigns"]["fn"]({})["account"] == "G7"; n += 1
     h = call("adsops_msads_health", {})
     assert h["ok"] and h["checked_campaigns"] == ["Owners"] and h["window_stats"]["Owners"]["Impressions"] == 100; n += 1
+
+    # ── 0.14.4 regressions (independent review) ──
+    # bug 1: without day_from, `days` counts back from day_to (it used to end on today and ignore day_to)
+    assert window({"days": 7, "day_to": "2026-11-10"}, today) == ("2026-11-04", "2026-11-10"); n += 1
+    assert window({"day_to": "2026-11-10"}, today) == ("2026-11-04", "2026-11-10"); n += 1               # default 7
+    assert window({"day_from": "2026-11-01", "day_to": "2026-11-03"}, today) == ("2026-11-01", "2026-11-03"); n += 1
+    for bad in ({"days": 7, "day_to": "11/10/2026"}, {"day_from": "2026-13-01"}, {"day_from": "2026-11-10", "day_to": "2026-11-09"}):
+        try:
+            window(bad, today); raise AssertionError(bad)
+        except ToolError:
+            n += 1
+    # bug 3: an Active keyword-targeted ad group with NO keywords cannot serve -> warning; dynamic search groups exempt
+    nokw = {"1": {"ad_groups": [{**tree_ok["1"]["ad_groups"][0], "keywords": []}], "negatives": []}}
+    w = [x for x in health_findings(camps, nokw, {}, {}) if "no keywords" in x["issue"]]
+    assert len(w) == 1 and w[0]["severity"] == "warning" and w[0]["ad_group"] == "g"; n += 1
+    dsa = {"1": {"ad_groups": [{**nokw["1"]["ad_groups"][0], "type": "SearchDynamic"}], "negatives": []}}
+    assert not any("no keywords" in x["issue"] for x in health_findings(camps, dsa, {}, {})); n += 1
+    assert not any("no keywords" in x["issue"] for x in health_findings([{**camps[0], "type": "DynamicSearchAds"}], nokw, {}, {})); n += 1
+    std = {"1": {"ad_groups": [{**nokw["1"]["ad_groups"][0], "type": "SearchStandard"}], "negatives": []}}
+    assert any("no keywords" in x["issue"] for x in health_findings(camps, std, {}, {})); n += 1
+    # live 2026-11-16: AdGroupType comes back empty, so a group whose ads are DynamicSearch ads must count as dynamic
+    dsa_ads = {"1": {"ad_groups": [{**nokw["1"]["ad_groups"][0], "type": None,
+                                    "ads": [{**a, "type": "DynamicSearch"} for a in nokw["1"]["ad_groups"][0].get("ads") or []]}], "negatives": []}}
+    assert dsa_ads["1"]["ad_groups"][0]["ads"], "fixture needs an ad"
+    assert not any("no keywords" in x["issue"] for x in health_findings(camps, dsa_ads, {}, {})); n += 1
+    # bug 2: unknown stats are never reported as zero
+    f = health_findings(camps, tree_ok, {"Owners": {"Impressions": None}}, {"Owners": None})
+    assert not any("0 impressions" in x["issue"] or "reached" in x["issue"] for x in f) and any("unknown" in x["issue"] for x in f); n += 1
+
+    class DashClient(FakeClient):
+        def report(self, level, a, c, lo, hi, campaign_ids=None, time_zone=None):
+            if level == "search_term":
+                return [{"SearchQuery": "q1", "Keyword": "k", "AdGroupName": "g", "Impressions": 5.0, "Clicks": 2.0, "Spend": None, "Conversions": 0.0},
+                        {"SearchQuery": "q1", "Keyword": "k", "AdGroupName": "g", "Impressions": 1.0, "Clicks": 1.0, "Spend": 3.0, "Conversions": 0.0},
+                        {"SearchQuery": "q2", "Keyword": "k", "AdGroupName": "g", "Impressions": 9.0, "Clicks": 1.0, "Spend": 4.0, "Conversions": None},
+                        {"SearchQuery": "q3", "Keyword": "k", "AdGroupName": "g", "Impressions": 2.0, "Clicks": 1.0, "Spend": 1.0, "Conversions": 0.0}]
+            return [{"TimePeriod": hi, "CampaignName": "Owners", "Impressions": None, "Clicks": 4.0, "Spend": None, "Conversions": None},
+                    {"TimePeriod": hi, "CampaignName": "Owners", "Impressions": 10.0, "Clicks": 1.0, "Spend": 5.0, "Conversions": 1.0}]
+    srv3 = Server("t3", "0")
+    register(srv3, Ctx(), {"microsoft_ads": {"accounts": []}}, client_factory=lambda c: DashClient())
+    call3 = lambda name, args: srv3._tools[name]["fn"](args)
+    pt = call3("adsops_msads_performance", {})["totals"]
+    assert pt["Impressions"] is None and pt["Spend"] is None and pt["Clicks"] == 5.0 and pt["CTR"] is None and pt["AvgCPC"] is None \
+        and pt["CostPerConversion"] is None and set(pt["incomplete"]) == {"Impressions", "Spend", "Conversions"}, pt; n += 1
+    st3 = call3("adsops_msads_search_terms", {})
+    by = {t["search_query"]: t for t in st3["terms"]}
+    assert by["q1"]["spend"] is None and by["q1"]["impressions"] == 6.0 and by["q2"]["conversions"] is None, by; n += 1   # no partial sums
+    assert [t["search_query"] for t in st3["terms"]] == ["q2", "q3", "q1"] and st3["incomplete_terms"] == 2; n += 1     # unknown spend last
+    assert [t["search_query"] for t in st3["wasted"]] == ["q3"]; n += 1                       # unknown spend/conversions != waste
+    h3 = call3("adsops_msads_health", {})                                                     # no TypeError on None spend
+    assert not any("0 impressions" in x["issue"] or "reached" in x["issue"] for x in h3["findings"]) \
+        and any("impressions unknown" in x["issue"] for x in h3["findings"]); n += 1
+    unk = []
+    fx = facts([{"TimePeriod": "2026-11-15", "CampaignId": "1", "CampaignName": "Owners", "Spend": None, "Clicks": 2.0, "Impressions": 40.0, "Conversions": 0.0},
+                {"TimePeriod": "2026-11-15", "CampaignId": "1", "CampaignName": "Owners", "Spend": 1.0, "Clicks": 1.0, "Impressions": None, "Conversions": 1.0}],
+               "campaign", unk)
+    assert {f["metric"]: f["value"] for f in fx} == {"clicks": 3.0, "conversions": 1.0} and sorted(unk) == [
+        ("1", "2026-11-15", "cost"), ("1", "2026-11-15", "impressions")], (fx, unk); n += 1    # unknown never stored as 0
+
+    # bug 4: the default day is the ACCOUNT's day (report time zone), not the host's
+    ts = dt.datetime(2026, 11, 16, 16, 0, tzinfo=dt.timezone.utc).timestamp()   # Tokyo: 11-17 01:00, Hawaii: 11-16 06:00
+    host = dt.date.fromtimestamp(ts)
+    try:
+        import zoneinfo
+        zoneinfo.ZoneInfo("Asia/Tokyo")
+        have_tzdb = True
+    except Exception:                                                   # noqa: BLE001 - no tz database: fallback path only
+        have_tzdb = False
+    if have_tzdb:
+        assert local_today(ts, "OsakaSapporoTokyo") == dt.date(2026, 11, 17) and local_today(ts, "Hawaii") == dt.date(2026, 11, 16); n += 1
+        zone, want = ("OsakaSapporoTokyo", "2026-11-17") if host != dt.date(2026, 11, 17) else ("Hawaii", "2026-11-16")
+        assert want != host.isoformat(); n += 1                         # host-local and account-local differ, whatever the host zone
+
+        class TzClient(FakeClient):
+            seen = []                                                   # fresh class per selftest run
+
+            def campaigns(self, a, c):
+                return [{**camps[0], "time_zone": zone}]
+
+            def report(self, level, a, c, lo, hi, campaign_ids=None, time_zone=None):
+                self.seen.append((level, hi, time_zone))
+                return super().report(level, a, c, lo, hi, campaign_ids, time_zone)
+
+        class TzCtx:
+            def now(self):
+                return ts
+        srv4 = Server("t4", "0")
+        register(srv4, TzCtx(), {"microsoft_ads": {"accounts": []}}, client_factory=lambda c: TzClient())
+        call4 = lambda name, args: srv4._tools[name]["fn"](args)
+        assert call4("adsops_msads_performance", {"days": 1})["day_to"] == want; n += 1
+        assert call4("adsops_msads_search_terms", {})["day_to"] == want; n += 1
+        call4("adsops_msads_health", {})
+        assert TzClient.seen[-1] == ("campaign", want, zone), TzClient.seen; n += 1
+    # (no tz database on this host: the account-zone checks cannot run and are not counted; the fallback check below still runs)
+    assert local_today(ts, "NoSuchZone") == host and local_today(ts, None) == host; n += 1     # unknown zone -> host-local
     return n
