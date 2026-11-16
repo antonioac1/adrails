@@ -30,7 +30,7 @@ GSC_DIMS = (["date"], ["date", "query"], ["date", "page"])
 LOWER_IS_BETTER = {"cost"}
 # One source stores several overlapping levels (a campaign's cost is also the sum of its search terms' cost), so a read
 # that names no entity_type must pick ONE level, or totals double. Found live 2026-11-09: Acme cost read $95 for a $50 day.
-DEFAULT_ETYPE = {"google_ads": "campaign", "search_console": "site", "aeo": "engine", "leads": "source"}
+DEFAULT_ETYPE = {"google_ads": "campaign", "microsoft_ads": "campaign", "search_console": "site", "aeo": "engine", "leads": "source"}
 # adsops_rollback only rewrites the state file (an apply follows), so it is not a change to the account (review #3).
 CHANGE_TOOLS = {"adsops_set", "adsops_apply", "adsops_openai_apply", "adsops_guard"}
 
@@ -188,12 +188,15 @@ def _local_day(at):
         return str(at or "")[:10]
 
 
-def zero_fill(st, source, entity_type, metrics, day_from, day_to):
+def zero_fill(st, source, entity_type, metrics, day_from, day_to, entity_ids=None):
     """Review #2: a pulled day with no rows is a ZERO day (no clicks, no leads), not unknown. Platforms return no row for a
     zero day, so after each pull write explicit zeros for every entity already known to the store, from its first day on,
     inside the pulled window only (outside the window stays null = never pulled)."""
     rows = st._conn.execute("SELECT entity_id, MIN(day) AS first, MAX(entity_name) AS name FROM facts WHERE source=? AND entity_type=? "
                          "GROUP BY entity_id", (source, entity_type)).fetchall()
+    if entity_ids is not None:                 # only the entities this pull actually covered (one account of several)
+        keep = {str(x) for x in entity_ids}
+        rows = [r for r in rows if str(r[0]) in keep]
     have = {(r[0], r[1], r[2]) for r in st._conn.execute(
         "SELECT entity_id, day, metric FROM facts WHERE source=? AND entity_type=? AND day BETWEEN ? AND ?",
         (source, entity_type, day_from, day_to))}
@@ -205,7 +208,7 @@ def zero_fill(st, source, entity_type, metrics, day_from, day_to):
     return st.upsert(out) if out else 0
 
 
-def register(srv, ctx, cfg, gsc_client=None):
+def register(srv, ctx, cfg, gsc_client=None, msads_client=None):
     from . import config as config_mod, engine
     path = db_path(cfg)
 
@@ -225,7 +228,7 @@ def register(srv, ctx, cfg, gsc_client=None):
     # ── pull ──
     def pull(args):
         today = _today(ctx)
-        only = set(args.get("sources") or ["google_ads", "search_console", "aeo", "leads", "changes"])
+        only = set(args.get("sources") or ["google_ads", "microsoft_ads", "search_console", "aeo", "leads", "changes"])
         backfill = int(args.get("backfill_days") or 90)
         if not 1 <= backfill <= 480:
             raise ToolError("backfill_days must be 1..480 (Search Console keeps 16 months)")
@@ -257,6 +260,34 @@ def register(srv, ctx, cfg, gsc_client=None):
                         report[scope] = {"days": list(win), "rows": n}
                     except ToolError as e:
                         st.record_pull("google_ads", scope, win[0], win[1], 0, ok=False, error=str(e))
+                        report[scope] = {"error": scrub(str(e), 300)}
+            if "microsoft_ads" in only and cfg.get("microsoft_ads"):
+                from . import msads_tools
+                try:
+                    mc = msads_client or msads_tools.build_client(cfg)
+                    accts = msads_tools.resolve_accounts(cfg, mc)
+                    if not accts:
+                        report["microsoft_ads"] = {"error": "no Microsoft Ads account matched microsoft_ads.accounts"}
+                except Exception as e:             # noqa: BLE001 - one platform failing must not stop the other sources
+                    accts, report["microsoft_ads"] = [], {"error": scrub(str(e), 300)}
+                for a in accts:
+                    scope = "msads:" + str(a["number"])
+                    last = (st.last_pull("microsoft_ads", scope) or {}).get("day_to")
+                    win = mstore.pull_window(last, today, backfill_days=backfill, settle_days=7)
+                    if not win:
+                        report[scope] = "up to date"
+                        continue
+                    try:
+                        camps = mc.campaigns(a["account_id"], a["customer_id"])
+                        tz = msads_tools.tz_of(camps)
+                        n = st.upsert(msads_tools.facts(mc.report("campaign", a["account_id"], a["customer_id"], *win, time_zone=tz), "campaign"))
+                        n += st.upsert(msads_tools.facts(mc.report("search_term", a["account_id"], a["customer_id"], *win, time_zone=tz), "search_term"))
+                        zero_fill(st, "microsoft_ads", "campaign", ["cost", "clicks", "impressions", "conversions"], *win,
+                                  entity_ids=[c["campaign_id"] for c in camps])
+                        st.record_pull("microsoft_ads", scope, win[0], win[1], n)
+                        report[scope] = {"days": list(win), "rows": n}
+                    except Exception as e:             # noqa: BLE001 - recorded as a failed pull, other sources still run
+                        st.record_pull("microsoft_ads", scope, win[0], win[1], 0, ok=False, error=str(e))
                         report[scope] = {"error": scrub(str(e), 300)}
             if "search_console" in only:
                 wanted = gsc_sites(cfg)
@@ -320,13 +351,13 @@ def register(srv, ctx, cfg, gsc_client=None):
         return {"store": path, "pulled": report,
                 "next": "adsops_impact action=changes lists what changed; adsops_search_console action=opportunities for organic wins"}
 
-    @srv.tool("adsops_metrics_pull", "Fill the LOCAL daily metrics history (one SQLite file on this machine): Google Ads campaign and "
+    @srv.tool("adsops_metrics_pull", "Fill the LOCAL daily metrics history (one SQLite file on this machine): Google Ads and Microsoft Ads campaign and "
               "search-term days, Google Search Console site/query/page days, AI-visibility panel runs, lead counts by source, and a "
               "timeline of every committed ad change from the audit log. Safe to run every day (cron or the `morning` prompt): it "
               "fetches only missing days plus the last few that Google still revises. First run backfills backfill_days (default 90). "
               "Read-only towards Google; nothing leaves this machine.",
               {"type": "object", "properties": {
-                  "sources": {"type": "array", "items": {"type": "string", "enum": ["google_ads", "search_console", "aeo", "leads", "changes"]}},
+                  "sources": {"type": "array", "items": {"type": "string", "enum": ["google_ads", "microsoft_ads", "search_console", "aeo", "leads", "changes"]}},
                   "backfill_days": {"type": "integer"}}, "required": [], "additionalProperties": False})
     def metrics_pull(args):
         return pull(args)
@@ -463,7 +494,7 @@ def register(srv, ctx, cfg, gsc_client=None):
                   "action": {"type": "string", "enum": ["changes", "measure"]},
                   "ref": {"type": "string", "description": "a change ref from action=changes (or pass day)"},
                   "day": {"type": "string", "description": "YYYY-MM-DD the change took effect"},
-                  "metric": {"type": "string"}, "source": {"type": "string", "enum": ["google_ads", "search_console", "leads", "aeo"]},
+                  "metric": {"type": "string"}, "source": {"type": "string", "enum": ["google_ads", "microsoft_ads", "search_console", "leads", "aeo"]},
                   "campaign_id": {"type": "string", "description": "measure one campaign (default: the change's campaign, else the account)"},
                   "pre_days": {"type": "integer"}, "post_days": {"type": "integer"}},
                "required": ["action"], "additionalProperties": False})
@@ -674,6 +705,40 @@ def selftest():
         raise AssertionError("unknown ref must be refused")
     except ToolError:
         n += 1
+
+    # 0.14: Microsoft Ads lands in the same store, same metric names, beside Google
+    class FakeMs:
+        def accounts(self):
+            return [{"account_id": "187", "number": "G1", "customer_id": "255"}, {"account_id": "188", "number": "G9", "customer_id": "255"}]
+
+        def campaigns(self, a, c):
+            return [{"campaign_id": "525", "time_zone": "EasternTimeUSCanada"}]
+
+        def report(self, level, a, c, lo, hi, time_zone=None):
+            if level == "campaign":
+                return [{"TimePeriod": "10/28/2026", "CampaignId": "525", "CampaignName": "Owners", "Spend": 12.5, "Clicks": 3, "Impressions": 90, "Conversions": 1}]
+            return [{"TimePeriod": "2026-10-28", "SearchQuery": "Tampa PM", "Spend": 4.0, "Clicks": 1, "Impressions": 9, "Conversions": 0}]
+    cfg2 = dict(cfg, microsoft_ads={"accounts": ["G1"]})
+    register(Srv(), Ctx(), cfg2, gsc_client=FakeGsc(), msads_client=FakeMs())
+    r3 = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads"], "backfill_days": 30})
+    assert set(k for k in r3["pulled"] if k.startswith("msads:")) == {"msads:G1"} and r3["pulled"]["msads:G1"]["rows"] == 8, r3; n += 1
+    cov = {c["source"]: c for c in tools["adsops_metrics"]({"action": "coverage"})["coverage"]}
+    assert "microsoft_ads" in cov and "google_ads" in cov; n += 1
+    cfg3 = dict(cfg, microsoft_ads={"accounts": [{"number": "G5", "account_id": 5, "customer_id": 6}]})
+    register(Srv(), Ctx(), cfg3, gsc_client=FakeGsc(), msads_client=FakeMs())
+    r4 = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads"], "backfill_days": 30})
+    assert "msads:G5" in r4["pulled"] and "error" not in r4["pulled"]["msads:G5"], r4; n += 1      # pinned ids pull (was a silent 0)
+    class BrokenMs(FakeMs):
+        def report(self, *a, **k):
+            raise OSError("socket timed out")
+    register(Srv(), Ctx(), dict(cfg2, microsoft_ads={"accounts": ["G1"]}), gsc_client=FakeGsc(), msads_client=BrokenMs())
+    r5 = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads", "changes"], "backfill_days": 30})
+    assert "error" in r5["pulled"]["msads:G1"] and "changes" in r5["pulled"], r5; n += 1      # a network failure is contained
+    register(Srv(), Ctx(), cfg2, gsc_client=FakeGsc(), msads_client=FakeMs())
+    before = tools["adsops_metrics"]({"action": "series", "source": "microsoft_ads", "metric": "cost", "days": 60})["series"]
+    again = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads"]})["pulled"]["msads:G1"]
+    after = tools["adsops_metrics"]({"action": "series", "source": "microsoft_ads", "metric": "cost", "days": 60})["series"]
+    assert "error" not in again and sum(p["value"] or 0 for p in after) == sum(p["value"] or 0 for p in before) > 0; n += 1   # re-pull = no double count
     return n
 
 

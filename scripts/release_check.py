@@ -30,7 +30,8 @@ def todo(name, detail):
 
 
 def tool_counts():
-    """tools/list size without and with an openai_ads account (the README and site state the larger number)."""
+    """tools/list size with only Google Ads, and with every optional platform configured (ChatGPT Ads account + the
+    read-only microsoft_ads block). The README and site state the larger number."""
     from adsops import tools
     out = []
     for with_oai in (False, True):
@@ -43,6 +44,9 @@ def tool_counts():
             accts.append({"key": "o", "platform": "openai_ads", "ad_account_id": "adacct_x", "campaigns": []})
         cfg = {"tenant": "t", "audit_log": os.path.join(tmp, "a.jsonl"),
                "credentials": {"google_ads": {"type": "static", "token": "x"}}, "accounts": accts}
+        if with_oai:
+            cfg["microsoft_ads"] = {"developer_token": {"kind": "env", "name": "X"},
+                                    "auth": {"provider": "microsoft", "client_id": "x", "refresh_token_file": os.path.join(tmp, "rt")}}
         srv = tools.build_server(cfg, client_factory=lambda a: None, git_runner=lambda *a, **k: None)
         out.append(len(srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]))
     return out
@@ -66,8 +70,8 @@ def offline():
     m = re.search(r"\*\*New in %s:\*\*.*?(\d+) tools\." % re.escape(v), readme)
     check("README has a 'New in %s' line" % v, bool(m))
     n_plain, n_oai = tool_counts()
-    check("README tool count == tools/list (with an openai_ads account)", bool(m) and int(m.group(1)) == n_oai,
-          "README %s, tools/list %d (%d without an openai_ads account)" % (m.group(1) if m else "?", n_oai, n_plain))
+    check("README tool count == tools/list (all platforms configured)", bool(m) and int(m.group(1)) == n_oai,
+          "README %s, tools/list %d (%d with Google Ads only)" % (m.group(1) if m else "?", n_oai, n_plain))
     check("README keeps the MCP Registry ownership marker", "mcp-name: dev.adrails/adrails" in readme)
     check("CLAIMS.md has a section for %s" % v, ("%s " % v) in open(os.path.join(ROOT, "CLAIMS.md")).read())
     # 0.12: the shipped example site profiles must load and pass the writer/reviewer independence rule

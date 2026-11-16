@@ -77,6 +77,18 @@ One browser sign-in; accounts are added read-only. Changes to a campaign always 
 desired-state file → `adsops_plan` → `adsops_apply` (validate-only) → `adsops_apply commit=true`.
 Full guide: https://adrails.dev/docs/ (service-account setup: `adsops-mcp init --help`).
 
+## 7. Optional: monitor Microsoft Ads (read-only)
+
+The user needs a Microsoft Advertising developer token and one sign-in. Add a `microsoft_ads` block to the config: see
+https://github.com/antonioac1/adrails/blob/main/docs/MICROSOFT_ADS.md (provider `google` if they log in to Microsoft Ads
+with Google, otherwise `microsoft`). Then:
+
+```bash
+adrails msads-auth --config /absolute/path/to/AdRails/config.json
+```
+
+The six `adsops_msads_*` tools only read: they cannot change or spend anything. `adsops_msads_health` is the daily check.
+
 ## Rules the agent must keep
 
 - Never spend money, enable a campaign or message a customer without the owner's explicit yes.
