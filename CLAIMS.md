@@ -226,6 +226,12 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C16 | One revision round after a rejected review; the revision is re-checked and reviewed anew | blackbox `test_rejected_review_gets_one_revision_and_a_new_review`; live run on baytownpm.com 2026-11-10 (Order D LOG) |
 | C15 | "83 tools; 99 with a ChatGPT Ads (openai_ads) account" | test: tools.selftest `len(names) == 83` and the eight seo_content_* names; `scripts/release_check.py` builds the server with and without an openai_ads account and reports 99 / 83 |
 
+## 0.14.3 ChatGPT Ads lifetime spend counts the launch day (README "New in 0.14.3")
+
+| # | Claim | Evidence |
+|---|---|---|
+| C1 | Lifetime spend ranges start at local midnight of the campaign's creation day, so the first day is never dropped by the insights API | test: platforms.openai_ads.selftest (start == local midnight); live 2026-11-16: per-campaign gap equalled day-1 spend exactly (41.47, 23.70) |
+
 ## 0.14.2 1Password reads inside an MCP server (README "New in 0.14.2")
 
 | # | Claim | Evidence |

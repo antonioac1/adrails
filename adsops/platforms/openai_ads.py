@@ -544,7 +544,11 @@ def live_tree(client, campaign_id=None, campaign_name=None, now=time.time, with_
         tz = acct.get("timezone") or "UTC"
         midnight = local_midnight(t, tz)
         for c in ([camp] if camp else []) + sib:
-            start_life = created_ts(c, t)
+            # Day-aligned on purpose (live finding 2026-11-16): an insights range that does NOT start at local midnight
+            # silently drops that WHOLE first day (a campaign created 09:13 lost its launch-day spend, $65 across two
+            # campaigns, so the guard under-read lifetime spend). Nothing can spend before created_at, so the local
+            # midnight of the creation day counts exactly the campaign's own spend.
+            start_life = local_midnight(created_ts(c, t), tz)
             t_end = insights_end(t, tz)
             life = campaign_spend(client, c["id"], start_life, t_end) if t > start_life else 0.0
             today = campaign_spend(client, c["id"], max(midnight, start_life), t_end) \
@@ -620,5 +624,25 @@ def selftest():
     n += 1
     png = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (640).to_bytes(4, "big") + (700).to_bytes(4, "big")
     assert image_info(png) == ("png", 640, 700)
+    n += 1
+
+    # lifetime spend starts at LOCAL MIDNIGHT of the creation day (an unaligned start silently drops day 1; live 2026-11-16)
+    class TreeFake:
+        def __init__(self):
+            self.starts = []
+        def ad_account(self):
+            return {"id": "adacct_x", "timezone": "America/New_York"}
+        def campaigns(self):
+            return [self.campaign("cmpn_1")]
+        def campaign(self, cid):
+            return {"id": cid, "name": "C", "status": "active", "created_at": 1793888013}   # 2026-11-05 09:13 New York
+        def ad_groups(self, cid):
+            return []
+        def insights(self, path, q):
+            self.starts.append(json.loads(q["time_ranges[]"][0])["start"])
+            return [{"campaign_id": "cmpn_1", "spend": 1.0, "impressions": 1, "clicks": 0}]
+    tf = TreeFake()
+    live_tree(tf, campaign_id="cmpn_1", now=lambda: 1794850000)
+    assert tf.starts[0] == local_midnight(1793888013, "America/New_York") == 1793854800, tf.starts   # 05:00Z: EST after the Nov 1 DST change
     n += 1
     return n
