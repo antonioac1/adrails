@@ -91,6 +91,8 @@ VIEWER = (
     "adsops_playbook",
     "adsops_results",
     "adsops_gbp",
+    # 0.14 Microsoft Ads monitor: read-only by construction (no write tool, no write method in the client)
+    "adsops_msads_*",
     # 0.10 measurement reads (local store + read-only Search Console)
     "adsops_metrics",
     "adsops_search_console",

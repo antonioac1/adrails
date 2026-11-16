@@ -385,6 +385,9 @@ def selftest():
     assert names == ["adsops_msads_accounts", "adsops_msads_campaigns", "adsops_msads_structure", "adsops_msads_performance",
                      "adsops_msads_search_terms", "adsops_msads_health"]; n += 1
     assert not any(w in t for t in names for w in ("set", "apply", "pause", "enable", "update", "create", "delete")); n += 1
+    from .rbac import Rbac
+    viewer = Rbac({"enabled": True, "principals": {"monitor": ["viewer"]}}, principal="monitor")
+    assert all(viewer.allowed(t) for t in names); n += 1                                    # a viewer-only agent can monitor
     call = lambda name, args: srv._tools[name]["fn"](args)
     assert [a["number"] for a in call("adsops_msads_accounts", {})["accounts"]] == ["G2"]; n += 1   # allow-list honoured
     try:

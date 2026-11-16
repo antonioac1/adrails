@@ -226,6 +226,12 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C16 | One revision round after a rejected review; the revision is re-checked and reviewed anew | blackbox `test_rejected_review_gets_one_revision_and_a_new_review`; live run on baytownpm.com 2026-11-10 (Order D LOG) |
 | C15 | "83 tools; 99 with a ChatGPT Ads (openai_ads) account" | test: tools.selftest `len(names) == 83` and the eight seo_content_* names; `scripts/release_check.py` builds the server with and without an openai_ads account and reports 99 / 83 |
 
+## 0.14.1 viewer role covers the Microsoft Ads monitor (README "New in 0.14.1")
+
+| # | Claim | Evidence |
+|---|---|---|
+| C1 | The built-in RBAC `viewer` role allows every `adsops_msads_*` tool | test: msads_tools.selftest (viewer principal allowed for all six) |
+
 ## 0.14.0 Microsoft Ads read-only monitor (README "New in 0.14.0")
 
 Evidence is a `python3 -m adsops --selftest` check unless it says live. Live = docs/LIVE-PROOF-MSADS-2026-11-16.md.
