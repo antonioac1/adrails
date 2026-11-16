@@ -230,7 +230,7 @@ def onepassword_loader(ref, token_file, op_bin="/opt/homebrew/bin/op", runner=su
         env = dict(os.environ)
         env["OP_SERVICE_ACCOUNT_TOKEN"] = token
         try:
-            r = runner([op_bin, "read", ref_s], capture_output=True, text=True, env=env, timeout=60)   # a hung op must not hang the server
+            r = runner([op_bin, "read", ref_s], capture_output=True, text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)   # a hung op must not hang the server
         except Exception as e:
             _fail("%s could not be executed: %s" % (op_bin, _hide(e, token)))
         rc = getattr(r, "returncode", 1)

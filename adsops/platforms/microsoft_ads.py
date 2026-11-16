@@ -96,11 +96,20 @@ def secret_loader(src, what, runner=subprocess.run):
             v = (os.environ.get(str(src.get("name") or "")) or "").strip()
         elif kind == "1password":
             env = dict(os.environ)
-            try:
-                env["OP_SERVICE_ACCOUNT_TOKEN"] = open(os.path.expanduser(src["token_file"])).read().strip()
-                r = runner([src.get("op_bin", "op"), "read", src["ref"]], capture_output=True, text=True, timeout=60, env=env)
-            except (OSError, KeyError, subprocess.SubprocessError) as e:
-                raise ToolError(f"microsoft_ads: {what} 1password read failed ({type(e).__name__})") from None
+            r, last = None, None
+            for attempt in range(2):             # a cold first `op` in a freshly spawned MCP server can stall; one retry
+                try:
+                    env["OP_SERVICE_ACCOUNT_TOKEN"] = open(os.path.expanduser(src["token_file"])).read().strip()
+                    # stdin=DEVNULL: an MCP server's stdin is the JSON-RPC pipe; a child must never read from it
+                    r = runner([src.get("op_bin", "op"), "read", src["ref"]], capture_output=True, text=True, timeout=25, env=env,
+                               stdin=subprocess.DEVNULL)
+                    break
+                except subprocess.TimeoutExpired as e:
+                    last = e
+                except (OSError, KeyError, subprocess.SubprocessError) as e:
+                    raise ToolError(f"microsoft_ads: {what} 1password read failed ({type(e).__name__})") from None
+            if r is None:
+                raise ToolError(f"microsoft_ads: {what} 1password read timed out twice ({type(last).__name__})")
             if r.returncode != 0:
                 raise ToolError(f"microsoft_ads: {what} 1password read failed (rc={r.returncode})")
             v = r.stdout.strip()
@@ -617,6 +626,25 @@ def selftest():
     ld = secret_loader({"kind": "file", "path": rt}, "x")
     orig_open = open
     assert ld() == ld() == "RTZ"; n += 1                                               # cached
+
+    # 1password: stdin never inherited, one retry after a stall
+    tok = os.path.join(tmp, "optok"); open(tok, "w").write("sa")
+    seen_kw, tries = [], []
+
+    def flaky(argv, **kw):
+        seen_kw.append(kw); tries.append(1)
+        if len(tries) == 1:
+            raise subprocess.TimeoutExpired(argv, 25)
+        return subprocess.CompletedProcess(argv, 0, "SECRETVALUE\n", "")
+    assert secret_loader({"kind": "1password", "ref": "op://v/i/f", "token_file": tok}, "x", runner=flaky)() == "SECRETVALUE"
+    assert len(tries) == 2 and all(k.get("stdin") is subprocess.DEVNULL for k in seen_kw); n += 1
+
+    def always(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 25)
+    try:
+        secret_loader({"kind": "1password", "ref": "op://v/i/f", "token_file": tok}, "x", runner=always)(); raise AssertionError
+    except ToolError as e:
+        assert "timed out twice" in str(e); n += 1
 
     # sign-in helpers
     open(rt, "w").write("")
