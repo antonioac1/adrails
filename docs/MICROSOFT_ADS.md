@@ -101,7 +101,9 @@ false alarms. Findings:
 | critical | An Active ad group has no serving keyword, or no serving ad (all paused or disapproved) |
 | warning | Keywords or ads disapproved by editorial review (with examples) |
 | warning | Negative keywords that block your own keywords |
+| warning | An Active ad group has no keywords at all, so it cannot serve (dynamic search ad groups are exempt) |
 | warning | Active but 0 impressions in the window (new campaigns can take hours; check bids, budget, approvals and payment) |
+| info | Impressions unknown in the window (the report returned non-numeric values), so delivery is not confirmed |
 | info | Today's spend reached the daily budget (Microsoft can deliver up to 2x on a single day, averaged over the month) |
 | info | No final URL suffix, so leads will not carry utm or campaign ids into your CRM |
 | info | Ad group on Bing-owned sites only (syndicated search partners off) |
@@ -117,8 +119,12 @@ post `adsops_msads_performance days=1` and the top 10 from `adsops_msads_search_
   no SDK. Ids are returned as strings, exactly as the API sends them.
 - **Report empty days:** Microsoft returns no report file when there is no traffic in the window. AdRails reports that as
   zero rows, not an error. The metrics history writes explicit zero days for known campaigns.
+- **Unknown values:** a report cell Microsoft fills with a placeholder (`--`, `N/A`, empty) is unknown, not zero. Totals
+  over it are `null` and listed under `incomplete`, ratios that need it are `null`, and the metrics history leaves that day
+  and metric empty instead of writing a zero.
 - **Report dates:** reports use the account's own time zone (its campaigns' `TimeZone`), so days line up with the Microsoft
-  Ads UI and with Google Ads' account-local days. "Today" in a tool's default window is this machine's local date.
+  Ads UI and with Google Ads' account-local days. "Today" in a tool's default window is the account's date in that time
+  zone (this machine's local date when the zone is unknown). With `day_to` and no `day_from`, `days` counts back from `day_to`.
 - **Network errors:** these are retried with backoff (429 and 5xx too). A DNS failure is named as such, with the host it
   could not resolve.
 - **Not covered yet:**

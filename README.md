@@ -54,6 +54,8 @@ Three things it does differently:
 
 
 
+> **New in 0.14.4:** the Microsoft Ads monitor never turns an unknown into a zero. Report cells Microsoft sends as "--" or "N/A" are now unknown (they were read as 0, which could fake zero spend or zero conversions); totals and ratios with an unknown input say so, and the metrics store never zero-fills them. Also: `day_to` without `day_from` is honoured (it was ignored), "today" uses the account's time zone instead of the computer's, and the health check warns about an active ad group with no keywords (dynamic search groups exempt). Found by an independent review.
+>
 > **New in 0.14.3:** ChatGPT Ads lifetime spend now counts the launch day. OpenAI's insights API silently drops the whole first day when a time range does not start at local midnight, and AdRails started lifetime ranges at the campaign's created_at, so the guard under-read lifetime spend by the first day's spend (found live: $65 across two campaigns). Lifetime ranges now start at local midnight of the creation day. Upgrade if you rely on adsops_openai_guard caps. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.
 >
 > **New in 0.14.2:** 1Password secret reads never inherit the MCP server's stdin (the JSON-RPC pipe), and the Microsoft Ads loader retries once after a stall: a cold first read inside an MCP client could time out the first Microsoft call of the day. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.

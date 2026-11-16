@@ -226,6 +226,15 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C16 | One revision round after a rejected review; the revision is re-checked and reviewed anew | blackbox `test_rejected_review_gets_one_revision_and_a_new_review`; live run on baytownpm.com 2026-11-10 (Order D LOG) |
 | C15 | "83 tools; 99 with a ChatGPT Ads (openai_ads) account" | test: tools.selftest `len(names) == 83` and the eight seo_content_* names; `scripts/release_check.py` builds the server with and without an openai_ads account and reports 99 / 83 |
 
+## 0.14.4 Microsoft Ads monitor: unknown is never zero (README "New in 0.14.4")
+
+| # | Claim | Evidence |
+|---|---|---|
+| C1 | Report cells "--", "N/A", empty or non-numeric parse as unknown (None), never 0; totals/ratios with an unknown input are None and listed as incomplete; the metrics pull never stores or zero-fills an unknown | test: platforms.microsoft_ads.selftest (_num, parse_report, totals); msads_tools.selftest DashClient; metrics_tools.selftest DashMs |
+| C2 | `day_to` without `day_from` ends the window on day_to (days counted back from it) | test: msads_tools.selftest window regressions; live 2026-11-16: days=3 day_to=2026-11-14 returned 11-12..11-14 |
+| C3 | "Today" is the account's local date (Microsoft TimeZone mapped to IANA), host clock only as fallback | test: msads_tools.selftest TzClient (account date differs from host date) |
+| C4 | Health warns on an Active keyword-targeted ad group with no keywords; dynamic search groups (AdGroupType SearchDynamic, a DynamicSearchAds campaign, or DynamicSearch ads) are exempt | test: msads_tools.selftest; live 2026-11-16: AdGroupType is not returned by default, DynamicSearch ad type accepted by Ads/QueryByAdGroupId |
+
 ## 0.14.3 ChatGPT Ads lifetime spend counts the launch day (README "New in 0.14.3")
 
 | # | Claim | Evidence |
