@@ -54,6 +54,8 @@ Three things it does differently:
 
 
 
+> **New in 0.14.2:** 1Password secret reads never inherit the MCP server's stdin (the JSON-RPC pipe), and the Microsoft Ads loader retries once after a stall: a cold first read inside an MCP client could time out the first Microsoft call of the day. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.
+>
 > **New in 0.14.1:** the built-in `viewer` RBAC role now includes the `adsops_msads_*` monitor tools, so an agent locked to read-only roles can run the Microsoft Ads monitor. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.
 >
 > **New in 0.14.0:** a read-only Microsoft Ads (Bing Ads) monitor for agents. Six `adsops_msads_*` tools read accounts, campaigns, the full build (ad groups, every keyword and ad with editorial approval, negatives), daily stats at campaign / ad group / keyword level, search terms with wasted spend, and `adsops_msads_health`: everything that stops an Active campaign from serving or wastes its money (no active ad group, all ads paused or disapproved, negatives blocking your own keywords, 0 impressions, budget reached, missing tracking). There is no write tool and the client has no write method, so you can hand it to a monitoring agent safely. Microsoft days also land in the local metrics history beside Google Ads. Sign in once with `adrails msads-auth` (works with "Sign in with Google" Microsoft Ads logins too). Verified against a live account. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.

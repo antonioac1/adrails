@@ -98,7 +98,7 @@ def key_from_1password(ref, token_file, op_bin="/opt/homebrew/bin/op", runner=su
             raise ToolError(f"1Password token file for {ref_s} is empty ({tpath})") from None
         env = dict(os.environ, OP_SERVICE_ACCOUNT_TOKEN=token)
         try:
-            r = runner([op_bin, "read", ref_s], capture_output=True, text=True, env=env, timeout=60)
+            r = runner([op_bin, "read", ref_s], capture_output=True, text=True, env=env, timeout=60, stdin=subprocess.DEVNULL)
         except Exception as e:
             raise ToolError(f"1Password read of {ref_s} could not run: {type(e).__name__}") from None
         if getattr(r, "returncode", 1) != 0:

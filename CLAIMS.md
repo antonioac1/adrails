@@ -226,6 +226,12 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C16 | One revision round after a rejected review; the revision is re-checked and reviewed anew | blackbox `test_rejected_review_gets_one_revision_and_a_new_review`; live run on baytownpm.com 2026-11-10 (Order D LOG) |
 | C15 | "83 tools; 99 with a ChatGPT Ads (openai_ads) account" | test: tools.selftest `len(names) == 83` and the eight seo_content_* names; `scripts/release_check.py` builds the server with and without an openai_ads account and reports 99 / 83 |
 
+## 0.14.2 1Password reads inside an MCP server (README "New in 0.14.2")
+
+| # | Claim | Evidence |
+|---|---|---|
+| C1 | Every 1Password `op read` runs with stdin=DEVNULL (Google Ads, ChatGPT Ads, Microsoft Ads loaders); the Microsoft loader retries once after a 25 s stall, then fails with a named error | test: platforms.microsoft_ads.selftest; auth/openai_ads selftests still pass |
+
 ## 0.14.1 viewer role covers the Microsoft Ads monitor (README "New in 0.14.1")
 
 | # | Claim | Evidence |
