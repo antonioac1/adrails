@@ -226,6 +226,21 @@ Evidence is a `python3 -m adsops --selftest` check (module and check message), t
 | C16 | One revision round after a rejected review; the revision is re-checked and reviewed anew | blackbox `test_rejected_review_gets_one_revision_and_a_new_review`; live run on baytownpm.com 2026-11-10 (Order D LOG) |
 | C15 | "83 tools; 99 with a ChatGPT Ads (openai_ads) account" | test: tools.selftest `len(names) == 83` and the eight seo_content_* names; `scripts/release_check.py` builds the server with and without an openai_ads account and reports 99 / 83 |
 
+## 0.14.0 Microsoft Ads read-only monitor (README "New in 0.14.0")
+
+Evidence is a `python3 -m adsops --selftest` check unless it says live. Live = docs/LIVE-PROOF-MSADS-2026-11-16.md.
+
+| # | Claim | Evidence |
+|---|---|---|
+| C1 | Six `adsops_msads_*` tools, registered only when the config has a `microsoft_ads` block; none writes, and `MicrosoftAdsClient` has no create/update/delete/pause/enable method | test: msads_tools.selftest (tool list, no write verbs); platforms.microsoft_ads.selftest (no write attributes) |
+| C2 | Reads campaigns, ad groups, keywords (with editorial status), ads, campaign negatives and reports through the v13 JSON REST API | live: all endpoints and the four report column sets, 2026-11-16; test: platforms.microsoft_ads.selftest (headers, string ids, CustomerAccountId/CustomerId) |
+| C3 | Sign-in with provider `google` (Sign in with Google logins) or `microsoft` (device code); rotating Microsoft refresh tokens are written back atomically with mode 0600 | live: google provider; test: platforms.microsoft_ads.selftest (rotation, 0600, device code, loopback-only redirect) |
+| C4 | Secrets (developer token, client secret, refresh/access tokens) never appear in a result or error | test: platforms.microsoft_ads.selftest (401 body echoing the token is redacted; invalid_grant hint carries no secret) |
+| C5 | `adsops_msads_health` flags: no active ad group, no serving keyword/ad, disapprovals, negatives blocking own keywords, 0 impressions, budget reached, missing final URL suffix; paused campaigns are not alarms | test: msads_tools.selftest (one case per finding); live: 0-impression warning on a campaign live under an hour |
+| C6 | No-data reports are zero rows, not errors; 429/5xx/network errors retry with backoff; DNS failures name the host | test: platforms.microsoft_ads.selftest; live: no-data Success on all four report types |
+| C7 | `adsops_metrics_pull` stores Microsoft campaign and search-term days as source `microsoft_ads` with Google's metric names; re-pulls do not double count; pinned account ids pull (regression for a silent zero found live) | test: metrics_tools.selftest; live: pull window recorded |
+| C8 | 87 tools with Google Ads only; 109 with ChatGPT Ads and Microsoft Ads configured | scripts/release_check.py tool_counts |
+
 ## 0.13.0 SEO/AEO coach tools (README "New in 0.13.0")
 
 Evidence is a `python3 -m adsops --selftest` check. Nothing here is claimed from code reading alone.

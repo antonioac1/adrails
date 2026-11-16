@@ -20,13 +20,45 @@ def _selftest():
                  "seo.adguard", "seo.issues", "seo.runs", "seo.perf", "seo.render", "seo.gsc_join", "seo_tools",
                  "content.numbers", "content.checks", "content.sources", "content.facts", "content.topics", "content.bundle",
                  "content.learn", "content.extend", "content.writers", "content.review", "content.publish", "content.pipeline", "content_tools", "coach_tools",
-                 "mail_tools", "tools"):
+                 "platforms.microsoft_ads", "msads_tools", "mail_tools", "tools"):
         mod = importlib.import_module("adsops." + name)
         n = mod.selftest()
         print(f"  {name:22s} {n} checks", file=sys.stderr)
         total += n
     print(f"ALL PASS ({total} checks)")
     return 0
+
+
+def _msads_auth(rest):
+    """adrails msads-auth [--config PATH]: sign in once so the adsops_msads_* tools can read your Microsoft Ads account.
+    provider google  -> prints a link; open it in a browser signed in to that Google account (one-shot loopback listener).
+    provider microsoft -> prints a short code to enter at microsoft.com/devicelogin on any device."""
+    ap = argparse.ArgumentParser(prog="adrails msads-auth")
+    ap.add_argument("--config", default=os.environ.get("ADSOPS_CONFIG"))
+    a = ap.parse_args(rest)
+    if not a.config:
+        print("msads-auth: pass --config or set ADSOPS_CONFIG", file=sys.stderr)
+        return 2
+    from adsops import config as config_mod, msads_tools
+    from adsops.errors import ToolError
+    from adsops.platforms import microsoft_ads as ms
+    try:
+        cfg = config_mod.load_config(a.config)
+        if not cfg.get("microsoft_ads"):
+            raise ToolError("the config has no microsoft_ads block (see docs/MICROSOFT_ADS.md)")
+        cl = msads_tools.build_client(cfg)
+        au = cfg["microsoft_ads"]["auth"]
+        if au["provider"] == "google":
+            ms.google_signin(cl.tokens, au["redirect_uri"])
+        else:
+            ms.device_code_signin(cl.tokens)
+        accts = cl.accounts()
+        print(f"Signed in. Refresh token saved to {au['refresh_token_file']} (0600). Accounts visible: "
+              + (", ".join(f"{x['number']} ({x['name']})" for x in accts) or "none"))
+        return 0
+    except ToolError as e:
+        print(f"msads-auth: {e}", file=sys.stderr)
+        return 1
 
 
 def main(argv=None):
@@ -37,6 +69,8 @@ def main(argv=None):
         if "--config" not in rest and os.environ.get("ADSOPS_CONFIG"):
             rest += ["--config", os.environ["ADSOPS_CONFIG"]]
         return content_tools.main(rest)
+    if "msads-auth" in argv[:3]:                  # one-time Microsoft Ads sign-in for the read-only monitor
+        return _msads_auth([x for x in argv if x != "msads-auth"])
     if "site-audit" in argv[:3]:                  # technical SEO site audit: its own flags (python3 -m adsops site-audit --help)
         from adsops import seo_tools
         rest = [x for x in argv if x != "site-audit"]

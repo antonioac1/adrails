@@ -94,6 +94,44 @@ def _load_openai_account(acct, akey):
         raise ToolError(f"config: account '{akey}': bulk_validate must be a boolean")
 
 
+MSADS_PROVIDERS = ("microsoft", "google")
+
+
+def _load_microsoft_ads(cfg):
+    """Optional top-level `microsoft_ads` block: the READ-ONLY Microsoft Advertising monitor (adsops_msads_*).
+    It needs no campaigns/state files because it never writes."""
+    m = cfg.get("microsoft_ads")
+    if m is None:
+        return
+    if not isinstance(m, dict):
+        raise ToolError("config: microsoft_ads must be an object")
+
+    def src(obj, where):
+        if not isinstance(obj, dict) or obj.get("kind") not in ("file", "env", "1password"):
+            raise ToolError(f"config: microsoft_ads.{where} must be a source {{\"kind\": \"file\"|\"env\"|\"1password\", ...}}")
+        for k in ("path", "token_file"):
+            if k in obj:
+                obj[k] = _expand(_need_str(obj, k, f"microsoft_ads.{where}: "))
+    src(m.get("developer_token"), "developer_token")
+    a = m.get("auth")
+    if not isinstance(a, dict):
+        raise ToolError("config: microsoft_ads.auth must be an object (provider, client_id, refresh_token_file)")
+    if a.get("provider") not in MSADS_PROVIDERS:
+        raise ToolError("config: microsoft_ads.auth.provider must be 'microsoft' or 'google' "
+                        "(use 'google' if you sign in to Microsoft Ads with a Google account)")
+    _need_str(a, "client_id", "microsoft_ads.auth: ")
+    a["refresh_token_file"] = _expand(a.get("refresh_token_file") or "~/.adsops/msads-refresh-token")
+    if a["provider"] == "google":
+        src(a.get("client_secret"), "auth.client_secret")
+        _need_str(a, "redirect_uri", "microsoft_ads.auth (google): ")
+    accts = m.get("accounts", [])
+    ok = isinstance(accts, list) and all(isinstance(x, (str, int)) or (isinstance(x, dict) and str(x.get("account_id", "")).isdigit()
+                                                                           and str(x.get("customer_id", "")).isdigit()) for x in accts)
+    if not ok:
+        raise ToolError("config: microsoft_ads.accounts must be account numbers/ids, or pinned objects "
+                        "{\"number\", \"account_id\", \"customer_id\"} (numeric ids)")
+
+
 def load_config(path):
     """Read, validate and normalise a deployment config. Returns the dict."""
     if not isinstance(path, str):
@@ -108,13 +146,15 @@ def load_config(path):
     cfg["meter_log"] = _expand(cfg.get("meter_log", DEFAULT_METER_LOG))
     cfg["audit_log"] = _expand(cfg.get("audit_log", DEFAULT_AUDIT_LOG))
     _load_credentials(cfg)
+    _load_microsoft_ads(cfg)
 
     accounts = cfg.get("accounts")
     if not isinstance(accounts, list):
         raise ToolError("config: 'accounts' must be a list")
-    if not accounts and not cfg.get("local"):
+    if not accounts and not cfg.get("local") and not cfg.get("microsoft_ads"):
         # an empty account list is fine for a local business that has no ad account yet (lead book, plan, AEO, reviews work)
-        raise ToolError("config: 'accounts' must be a non-empty list (or add a 'local' block for a business without ad accounts)")
+        raise ToolError("config: 'accounts' must be a non-empty list (or add a 'local' block for a business without ad accounts, "
+                        "or a 'microsoft_ads' block for the read-only Microsoft Ads monitor)")
     seen, seen_accounts = {}, set()
     for i, acct in enumerate(accounts):
         if not isinstance(acct, dict):

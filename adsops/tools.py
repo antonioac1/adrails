@@ -356,7 +356,9 @@ def build_server(cfg, client_factory=None, git_runner=None, now=time.time, meter
     from adsops import seo_tools
     seo_tools.register(srv, ctx, cfg)         # 0.11 technical SEO site audit: seo_audit_run/issues/diff, seo_gsc_exclusions
     from adsops import content_tools
-    content_tools.register(srv, ctx, cfg)     # 0.12 guarded content pipeline: seo_content_* (plan/draft/review/bundle/publish/...)
+    content_tools.register(srv, ctx, cfg)
+    from adsops import msads_tools
+    msads_tools.register(srv, ctx, cfg)         # 0.14 Microsoft Ads READ-ONLY monitor: adsops_msads_* (only with a microsoft_ads block)     # 0.12 guarded content pipeline: seo_content_* (plan/draft/review/bundle/publish/...)
 
     @srv.tool("adsops_update_check", "Is a newer AdRails out? Returns the running and latest versions, the release notes link and "
               "the one command that upgrades (owner's OK first). Checks PyPI at most once a day (cached); sends no account or usage "

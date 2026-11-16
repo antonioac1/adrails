@@ -1,6 +1,6 @@
 # AdRails (adrails.dev)
 
-**Guardrails for AI agents running your ads: an open-source, self-hosted Google Ads MCP server.**
+**Guardrails for AI agents running your ads: an open-source, self-hosted Google Ads MCP server, with a read-only Microsoft Ads monitor.**
 
 Website and docs: https://adrails.dev · MCP Registry: `dev.adrails/adrails` · plain-text summary for agents: https://adrails.dev/llms.txt
 
@@ -54,6 +54,8 @@ Three things it does differently:
 
 
 
+> **New in 0.14.0:** a read-only Microsoft Ads (Bing Ads) monitor for agents. Six `adsops_msads_*` tools read accounts, campaigns, the full build (ad groups, every keyword and ad with editorial approval, negatives), daily stats at campaign / ad group / keyword level, search terms with wasted spend, and `adsops_msads_health`: everything that stops an Active campaign from serving or wastes its money (no active ad group, all ads paused or disapproved, negatives blocking your own keywords, 0 impressions, budget reached, missing tracking). There is no write tool and the client has no write method, so you can hand it to a monitoring agent safely. Microsoft days also land in the local metrics history beside Google Ads. Sign in once with `adrails msads-auth` (works with "Sign in with Google" Microsoft Ads logins too). Verified against a live account. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.
+>
 > **New in 0.13.0:** a proactive SEO/AEO coach, as tools. `adsops_get_started` interviews the owner a few questions at a time and hands back the fields to save; `adsops_setup_checklist` is the 17-step setup (Google Business Profile, reviews, Bing Places, Apple Business Connect, Search Console, Bing Webmaster Tools, IndexNow, AI crawlers, llms.txt, schema, NAP, industry directories, pages) with a score; `adsops_page_plan` ranks the landing pages to build and briefs the first; `adsops_cadence` sizes a weekly and monthly routine to the owner's hours and writes the text for a scheduled task. Every result ends with `next_step`, so clients that never show MCP prompts (ChatGPT developer mode) still get walked through the work. One owner-reviewed page a week, never bulk-publishing; regulated industries get compliance notes. The same coach runs free with no login at `https://adrails.dev/chatgpt/mcp`. 87 tools without a ChatGPT Ads account; with one, 103 tools.
 >
 > **New in 0.12.0:** a guarded content pipeline. `seo_content_plan` picks topics from Search Console evidence and your last site audit, a writer model of your choice drafts (OpenRouter, any OpenAI-compatible API, or a local CLI login for subscriptions), code checks every number and claim against your approved FACTS file and verbatim source quotes, and a model from a **different family** must review it (same family, a silent model swap or no verdict = hold). Out comes an approved Markdown bundle with an `IMPLEMENT.md` for your own coding agent; publishing is a separate step behind human approval. Results are measured at 14/28/56 days into a LESSONS.md you can edit. 83 tools without a ChatGPT Ads account; with one, 99 tools.
@@ -501,6 +503,32 @@ are named `adsops_openai_*`. Full guide: [docs/OPENAI-ADS.md](docs/OPENAI-ADS.md
 in read-only mode ([live proof](docs/LIVE-PROOF-2026-11-06.md)); that run found and fixed a full-hour insights rule the mock had
 missed. Creates, image upload, activation and conversion/audience commits are tested offline (`tests/qa_openai_ads.py`,
 `tests/qa_openai_suite.py`) but have not yet run live. Section 9 of the guide lists what is still unverified.
+
+
+## Microsoft Ads (read-only monitor)
+
+AdRails reads Microsoft Advertising (Bing Ads) accounts so an agent can watch delivery and stats in detail. It **cannot
+change or spend anything there**. The `adsops_msads_*` tools only read, and the client underneath has no write method. Full
+guide: [docs/MICROSOFT_ADS.md](docs/MICROSOFT_ADS.md). Live proof: [docs/LIVE-PROOF-MSADS-2026-11-16.md](docs/LIVE-PROOF-MSADS-2026-11-16.md).
+
+- **Six tools:**
+  - `adsops_msads_accounts`: which accounts this sign-in can see.
+  - `adsops_msads_campaigns`: each campaign's status, budget, bid strategy and CPC cap.
+  - `adsops_msads_structure`: ad groups, every keyword and ad with editorial approval, and negatives.
+  - `adsops_msads_performance`: daily stats at campaign / ad group / keyword level, with CTR, CPC and CPA.
+  - `adsops_msads_search_terms`: what people typed, sorted by spend, plus spend with no conversion.
+  - `adsops_msads_health`: critical / warning / info findings for a daily monitoring agent.
+- **One config block:** a top-level `microsoft_ads` block with a developer token and one OAuth sign-in. No campaigns or
+  desired-state files are needed, because it never writes.
+- **Two sign-in providers:**
+  - `google`, for Microsoft Ads logins that use "Sign in with Google": a browser link with a one-shot loopback listener.
+  - `microsoft`: a device code you can enter on any phone.
+  - Run `adrails msads-auth` once. Microsoft's rotating refresh tokens are written back with mode 0600, and secrets never
+    appear in a result, error or log.
+- **Metrics history:** `adsops_metrics_pull` stores Microsoft campaign and search-term days beside Google Ads, with the same
+  metric names, so `adsops_metrics` and `adsops_impact` compare the platforms.
+- **Stdlib only:** it uses the Microsoft Advertising v13 JSON REST API with no SDK. Pinned account ids skip account
+  discovery during daily monitoring.
 
 
 ## Local business and Google LSA
