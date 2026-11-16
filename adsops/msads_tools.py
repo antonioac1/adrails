@@ -71,12 +71,26 @@ def window(args, today):
     return lo, hi
 
 
-def health_findings(campaigns, tree, perf_by_campaign, today_spend):
-    """Pure: everything that would stop an ACTIVE campaign from serving, or waste its money. Each finding has a severity."""
+STOPPED = {"Suspended": "suspended by Microsoft (usually billing or policy): it cannot serve",
+           "BudgetPaused": "paused because its budget ran out",
+           "BudgetAndManualPaused": "paused (budget ran out and manually paused)"}
+
+
+def health_findings(campaigns, tree, perf_by_campaign, today_spend, account=None):
+    """Pure: everything that would stop a campaign from serving, or waste its money. Each finding has a severity.
+    Structure checks run for SEARCH campaigns only (Performance Max has no ad groups; Shopping/Audience ad groups have
+    product/image ads, not text ads): checking them the same way would raise a false critical every day."""
     out = []
+    if account and account.get("status") not in (None, "Active"):
+        out.append({"severity": "critical", "campaign": None,
+                    "issue": f"account is {account.get('status')}" + (f" ({account.get('pause_reason')})" if account.get("pause_reason") else "")
+                    + ": nothing in it can serve (check billing / payment method)"})
     for c in campaigns:
         cid, name = c["campaign_id"], c["name"]
-        if c["status"] != "Active":
+        if c["status"] in STOPPED:
+            out.append({"severity": "critical", "campaign": name, "issue": "campaign is " + STOPPED[c["status"]]})
+            continue
+        if c["status"] != "Active" or (c.get("type") or "Search") != "Search":
             continue
         t = tree.get(cid) or {"ad_groups": []}
         live_groups = [g for g in t["ad_groups"] if g["status"] == "Active"]
@@ -126,6 +140,12 @@ def health_findings(campaigns, tree, perf_by_campaign, today_spend):
     return sorted(out, key=lambda f: order[f["severity"]])
 
 
+def tz_of(campaigns):
+    """The account's report time zone = its campaigns' TimeZone (same enum as ReportTimeZone); None -> Microsoft's default."""
+    zones = {c.get("time_zone") for c in campaigns if c.get("time_zone")}
+    return zones.pop() if len(zones) == 1 else None
+
+
 def register(srv, ctx, cfg, client_factory=None):
     if not cfg.get("microsoft_ads"):
         return None
@@ -156,6 +176,12 @@ def register(srv, ctx, cfg, client_factory=None):
             if str(a["number"]).upper() == k or a["account_id"] == str(key):
                 return a
         raise ToolError(f"microsoft_ads: account {key!r} not found (have: {', '.join(str(a['number']) for a in acc)})")
+
+    def tz(a):
+        k = "tz:" + a["account_id"]
+        if k not in state:
+            state[k] = tz_of(client().campaigns(a["account_id"], a["customer_id"]))
+        return state[k]
 
     def tree(a, cid):
         ags = client().ad_groups(cid, a["account_id"], a["customer_id"])
@@ -199,7 +225,7 @@ def register(srv, ctx, cfg, client_factory=None):
         lo, hi = window(args, today())
         level = args.get("level") or "campaign"
         rows = client().report(level, a["account_id"], a["customer_id"], lo, hi,
-                               campaign_ids=[args["campaign_id"]] if args.get("campaign_id") else None)
+                               campaign_ids=[args["campaign_id"]] if args.get("campaign_id") else None, time_zone=tz(a))
         return {"account": a["number"], "level": level, "day_from": lo, "day_to": hi, "totals": ms.totals(rows),
                 "rows": rows[:500], "rows_total": len(rows)}
 
@@ -211,7 +237,7 @@ def register(srv, ctx, cfg, client_factory=None):
         a = account(args.get("account"))
         lo, hi = window({"days": 30, **args}, today())
         rows = client().report("search_term", a["account_id"], a["customer_id"], lo, hi,
-                               campaign_ids=[args["campaign_id"]] if args.get("campaign_id") else None)
+                               campaign_ids=[args["campaign_id"]] if args.get("campaign_id") else None, time_zone=tz(a))
         agg = {}
         for r in rows:
             k = (r.get("SearchQuery"), r.get("Keyword"), r.get("AdGroupName"))
@@ -230,17 +256,19 @@ def register(srv, ctx, cfg, client_factory=None):
         a = account(args.get("account"))
         cs = client().campaigns(a["account_id"], a["customer_id"])
         active = [c for c in cs if c["status"] == "Active"]
-        tr = {c["campaign_id"]: tree(a, c["campaign_id"]) for c in active}
+        search = [c for c in active if (c.get("type") or "Search") == "Search"]
+        tr = {c["campaign_id"]: tree(a, c["campaign_id"]) for c in search}
         perf, spend_today = {}, {}
         if active:
             lo, hi = window({"days": int(args.get("days") or 2)}, today())
-            rows = client().report("campaign", a["account_id"], a["customer_id"], lo, hi)
+            rows = client().report("campaign", a["account_id"], a["customer_id"], lo, hi, time_zone=tz_of(cs))
             for c in active:
                 mine = [r for r in rows if r.get("CampaignName") == c["name"]]
                 perf[c["name"]] = ms.totals(mine)
                 spend_today[c["name"]] = sum(r.get("Spend", 0) for r in mine if _is_day(r.get("TimePeriod"), hi))
-        f = health_findings(cs, tr, perf, spend_today)
-        return {"account": a["number"], "checked_campaigns": [c["name"] for c in active], "window_stats": perf,
+        f = health_findings(cs, tr, perf, spend_today, account=a)
+        return {"account": a["number"], "checked_campaigns": [c["name"] for c in search],
+                "not_structure_checked": [f"{c['name']} ({c.get('type')})" for c in active if c not in search], "window_stats": perf,
                 "ok": not any(x["severity"] == "critical" for x in f), "findings": f}
 
     return state
@@ -288,14 +316,14 @@ def selftest():
     n = 0
     camps = [{"campaign_id": "1", "name": "Owners", "status": "Active", "daily_budget": 20, "final_url_suffix": None}]
     tree_ok = {"1": {"ad_groups": [{"name": "g", "status": "Active", "network": "OwnedAndOperatedAndSyndicatedSearch",
-                                    "keywords": [{"text": "property management tampa", "status": "Active", "editorial_status": "Active"}],
+                                    "keywords": [{"text": "plumber denver", "status": "Active", "editorial_status": "Active"}],
                                     "ads": [{"ad_id": "9", "status": "Active", "editorial_status": "Active"}]}],
                      "negatives": [{"text": "jobs", "match_type": "Phrase"}]}}
     f = health_findings(camps, tree_ok, {"Owners": {"Impressions": 10}}, {"Owners": 3.0})
     assert [x["severity"] for x in f] == ["info"] and "suffix" in f[0]["issue"]; n += 1
     paused = {"1": {"ad_groups": [{"name": "g", "status": "Paused", "keywords": [], "ads": []}], "negatives": []}}
-    assert health_findings(camps, paused, {}, {})[0]["severity"] == "critical"; n += 1          # the BayTown 11-16 trap
-    clash = {"1": {**tree_ok["1"], "negatives": [{"text": "tampa", "match_type": "Phrase"}]}}
+    assert health_findings(camps, paused, {}, {})[0]["severity"] == "critical"; n += 1          # built in drafts, only the campaign enabled
+    clash = {"1": {**tree_ok["1"], "negatives": [{"text": "denver", "match_type": "Phrase"}]}}
     assert any("block your own" in x["issue"] for x in health_findings(camps, clash, {}, {})); n += 1
     dis = {"1": {"ad_groups": [{**tree_ok["1"]["ad_groups"][0], "ads": [{"ad_id": "9", "status": "Active", "editorial_status": "Disapproved"}]}], "negatives": []}}
     sev = {x["issue"]: x["severity"] for x in health_findings(camps, dis, {}, {})}
@@ -303,6 +331,11 @@ def selftest():
     assert any("0 impressions" in x["issue"] for x in health_findings(camps, tree_ok, {"Owners": {"Impressions": 0}}, {})); n += 1
     assert any("reached" in x["issue"] for x in health_findings(camps, tree_ok, {}, {"Owners": 21.0})); n += 1
     assert health_findings([{**camps[0], "status": "Paused"}], paused, {}, {}) == []; n += 1   # paused campaigns are not alarms
+    assert health_findings([{**camps[0], "status": "Suspended"}], {}, {}, {})[0]["severity"] == "critical"; n += 1
+    assert health_findings([{**camps[0], "type": "PerformanceMax"}], {}, {}, {}) == [] or all(
+        x["severity"] != "critical" for x in health_findings([{**camps[0], "type": "PerformanceMax"}], {}, {}, {})); n += 1
+    assert health_findings(camps, tree_ok, {}, {}, account={"status": "Paused", "pause_reason": 2})[0]["severity"] == "critical"; n += 1
+    assert tz_of([{"time_zone": "MountainTimeUSCanada"}, {"time_zone": "MountainTimeUSCanada"}]) == "MountainTimeUSCanada" and tz_of([]) is None; n += 1
     assert norm_day("11/6/2026") == "2026-11-06" and norm_day("2026-11-06") == "2026-11-06"; n += 1
     today = dt.date(2026, 11, 16)
     assert window({"days": 7}, today) == ("2026-11-10", "2026-11-16"); n += 1
@@ -326,7 +359,7 @@ def selftest():
             return [{"ad_group_id": "5", "name": "g", "status": "Active", "network": "OwnedAndOperatedAndSyndicatedSearch"}]
 
         def keywords(self, g, a, c):
-            return [{"text": "property management tampa", "match_type": "Exact", "status": "Active", "editorial_status": "Active"}]
+            return [{"text": "plumber denver", "match_type": "Exact", "status": "Active", "editorial_status": "Active"}]
 
         def ads(self, g, a, c):
             return [{"ad_id": "9", "status": "Active", "editorial_status": "Active", "final_urls": ["https://x/"]}]
@@ -334,7 +367,7 @@ def selftest():
         def campaign_negatives(self, cid, a, c):
             return []
 
-        def report(self, level, a, c, lo, hi, campaign_ids=None):
+        def report(self, level, a, c, lo, hi, campaign_ids=None, time_zone=None):
             if level == "search_term":
                 return [{"SearchQuery": "pm jobs", "Keyword": "pm", "AdGroupName": "g", "Impressions": 5, "Clicks": 2, "Spend": 9.5, "Conversions": 0},
                         {"SearchQuery": "pm jobs", "Keyword": "pm", "AdGroupName": "g", "Impressions": 1, "Clicks": 1, "Spend": 2.0, "Conversions": 0},
@@ -374,7 +407,10 @@ def selftest():
     assert good["microsoft_ads"]["auth"]["refresh_token_file"].endswith("msads-refresh-token"); n += 1
     for bad in ({"developer_token": {"kind": "env", "name": "X"}, "auth": {"provider": "msn", "client_id": "i"}},
                 {"developer_token": {"kind": "plain"}, "auth": {"provider": "microsoft", "client_id": "i"}},
-                {"developer_token": {"kind": "env", "name": "X"}, "auth": {"provider": "google", "client_id": "i"}}):
+                {"developer_token": {"kind": "env", "name": "X"}, "auth": {"provider": "google", "client_id": "i"}},
+                {"developer_token": {"kind": "env", "name": "X"}, "auth": {"provider": "microsoft", "client_id": "i"}, "accounts": [True]},
+                {"developer_token": {"kind": "env", "name": "X"}, "auth": {"provider": "microsoft", "client_id": "i"},
+                 "accounts": ["G1", {"account_id": 1, "customer_id": 2}]}):
         try:
             config_mod._load_microsoft_ads({"microsoft_ads": bad}); raise AssertionError(bad)
         except ToolError:

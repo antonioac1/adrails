@@ -77,7 +77,15 @@ def secret_loader(src, what, runner=subprocess.run):
         raise ToolError(f"microsoft_ads: {what} must be a source object {{\"kind\": ...}}")
     kind = src.get("kind")
 
+    cache = {}
+
     def load():
+        if "v" in cache:                       # read once per process (1Password lookups are slow subprocesses)
+            return cache["v"]
+        cache["v"] = _load()
+        return cache["v"]
+
+    def _load():
         if kind == "file":
             p = os.path.expanduser(str(src.get("path") or ""))
             try:
@@ -116,8 +124,19 @@ def urllib_http(method, url, headers, body, timeout=60):
         return e.code, e.read()
 
 
+def _net_reason(e, url):
+    reason = str(getattr(e, "reason", e))
+    host = urllib.parse.urlparse(url).hostname
+    if "nodename" in reason or "Name or service" in reason:
+        return f"DNS lookup failed for {host}"
+    return f"{type(e).__name__} talking to {host}: {scrub(reason, 120)}"
+
+
 def form(http, url, data):
-    st, raw = http("POST", url, {"Content-Type": "application/x-www-form-urlencoded"}, urllib.parse.urlencode(data).encode())
+    try:
+        st, raw = http("POST", url, {"Content-Type": "application/x-www-form-urlencoded"}, urllib.parse.urlencode(data).encode())
+    except (OSError, urllib.error.URLError) as e:            # timeouts are OSError too: never escape as a non-ToolError
+        raise ToolError("microsoft_ads: sign-in server unreachable: " + _net_reason(e, url)) from None
     try:
         return st, json.loads(raw or b"{}")
     except ValueError:
@@ -151,9 +170,11 @@ class Tokens:
         return [x for x in out + [self._tok] if x]
 
     def save(self, rt):
-        os.makedirs(os.path.dirname(self.rt_file) or ".", exist_ok=True)
-        tmp = self.rt_file + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        import tempfile
+        d = os.path.dirname(self.rt_file) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".msads-rt-", dir=d)   # unique per writer: a cron pull and the server can't interleave
+        os.chmod(tmp, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(rt)
         os.replace(tmp, self.rt_file)
@@ -218,11 +239,7 @@ class MicrosoftAdsClient:
             try:
                 st, raw = self.http("POST", base + path, hdr, data)
             except (OSError, urllib.error.URLError) as e:
-                reason = getattr(e, "reason", e)
-                host = urllib.parse.urlparse(base).hostname
-                st, raw = None, b""
-                last = (f"DNS lookup failed for {host}" if "nodename" in str(reason) or "Name or service" in str(reason)
-                        else f"{type(e).__name__}: {scrub(str(reason), 120)}")
+                st, raw, last = None, b"", _net_reason(e, base)
             if st == 200:
                 try:
                     return json.loads(raw or b"{}")
@@ -305,7 +322,7 @@ class MicrosoftAdsClient:
         return [{"text": n.get("Text"), "match_type": n.get("MatchType")} for e in ents for n in (e.get("NegativeKeywords") or [])]
 
     # ── reporting ──
-    def report(self, level, account_id, customer_id, day_from, day_to, campaign_ids=None, poll_s=3, max_polls=60):
+    def report(self, level, account_id, customer_id, day_from, day_to, campaign_ids=None, poll_s=3, max_polls=60, time_zone=None):
         """Rows as dicts (CSV header names). Microsoft returns NO file when there is no data: that is [] (zero), not an error."""
         if level not in REPORT_COLUMNS:
             raise ToolError(f"microsoft_ads: level must be one of {', '.join(REPORT_COLUMNS)}")
@@ -320,8 +337,9 @@ class MicrosoftAdsClient:
         req = {"ReportRequest": {"Type": rtype, "ExcludeColumnHeaders": False, "ExcludeReportFooter": True,
                                  "ExcludeReportHeader": True, "Format": "Csv", "ReturnOnlyCompleteData": False,
                                  "ReportName": "adrails-" + level, "Aggregation": "Daily", "Columns": cols, "Scope": scope,
-                                 "Time": {"CustomDateRangeStart": d(day_from), "CustomDateRangeEnd": d(day_to),
-                                          "ReportTimeZone": "EasternTimeUSCanada"}}}
+                                 "Time": {"CustomDateRangeStart": d(day_from), "CustomDateRangeEnd": d(day_to)}}}
+        if time_zone:                          # the account's own day boundaries (campaign TimeZone), like Google's account-local days
+            req["ReportRequest"]["Time"]["ReportTimeZone"] = time_zone
         rid = self.post(REPORTING, "GenerateReport/Submit", req, account_id, customer_id).get("ReportRequestId")
         if not rid:
             raise ToolError("microsoft_ads: report submit returned no id")
@@ -332,7 +350,10 @@ class MicrosoftAdsClient:
                 url = st.get("ReportDownloadUrl")
                 if not url:
                     return []
-                code, raw = self.http("GET", url, {}, None)
+                try:
+                    code, raw = self.http("GET", url, {}, None)
+                except (OSError, urllib.error.URLError) as e:
+                    raise ToolError("microsoft_ads: report download failed: " + _net_reason(e, url)) from None
                 if code != 200:
                     raise ToolError(f"microsoft_ads: report download HTTP {code}")
                 return parse_report(raw)
@@ -428,6 +449,8 @@ def _loopback_code(port, path, state, timeout=900):
     got = {}
 
     class H(http.server.BaseHTTPRequestHandler):
+        timeout = 10                           # a browser preconnect that never sends cannot block the listener
+
         def do_GET(self):
             p = urllib.parse.urlparse(self.path)
             q = urllib.parse.parse_qs(p.query)
@@ -441,7 +464,12 @@ def _loopback_code(port, path, state, timeout=900):
         def log_message(self, *a):
             pass
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", port), H) as srv:
+    try:
+        srv = socketserver.TCPServer(("127.0.0.1", port), H)
+    except OSError as e:
+        raise ToolError(f"microsoft_ads: cannot listen on 127.0.0.1:{port} ({e.strerror or e}); free the port or change "
+                        "redirect_uri (and the Google client) to another localhost port") from None
+    with srv:
         srv.timeout = 5
         end = time.time() + timeout
         while time.time() < end and not got:
@@ -554,6 +582,7 @@ def selftest():
         if url.endswith("Submit"):
             b = json.loads(body)["ReportRequest"]
             assert b["Type"] == "CampaignPerformanceReportRequest" and b["Time"]["CustomDateRangeStart"] == {"Year": 2026, "Month": 11, "Day": 1}
+            assert b["Time"].get("ReportTimeZone") == "MountainTimeUSCanada"
             return 200, b'{"ReportRequestId": "r1"}'
         if url.endswith("Poll"):
             s = next(polls)
@@ -562,7 +591,7 @@ def selftest():
             return 200, buf.getvalue()
         return 404, b""
     rows = MicrosoftAdsClient(Tokens("microsoft", "cid", rt, http=rep), "D" * 16, http=rep, sleep=lambda s: None).report(
-        "campaign", "187", "255", "2026-11-01", "2026-11-16")
+        "campaign", "187", "255", "2026-11-01", "2026-11-16", time_zone="MountainTimeUSCanada")
     assert rows[0]["Impressions"] == 1200 and rows[0]["Spend"] == 95.5; n += 1
     t = totals(rows)
     assert t["CTR"] == 0.025 and t["AvgCPC"] == 3.18 and t["CostPerConversion"] == 47.75; n += 1
@@ -575,6 +604,19 @@ def selftest():
         return 200, json.dumps({"ReportRequestStatus": {"Status": "Success", "ReportDownloadUrl": None}}).encode()
     assert MicrosoftAdsClient(Tokens("microsoft", "cid", rt, http=nodata), "D" * 16, http=nodata, sleep=lambda s: None).report(
         "search_term", "187", "255", "2026-11-01", "2026-11-02") == []; n += 1
+
+    # network failures always surface as ToolError (never escape and abort a whole metrics pull)
+    def down(method, url, headers, body):
+        raise urllib.error.URLError(OSError(8, "nodename nor servname provided, or not known"))
+    open(rt, "w").write("RTZ")
+    try:
+        Tokens("microsoft", "cid", rt, http=down).access_token(); raise AssertionError
+    except ToolError as e:
+        assert "DNS lookup failed for login.microsoftonline.com" in str(e); n += 1
+    calls_n = []
+    ld = secret_loader({"kind": "file", "path": rt}, "x")
+    orig_open = open
+    assert ld() == ld() == "RTZ"; n += 1                                               # cached
 
     # sign-in helpers
     open(rt, "w").write("")

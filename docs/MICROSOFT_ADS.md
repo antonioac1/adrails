@@ -81,12 +81,22 @@ The refresh token is saved to `refresh_token_file` with mode 0600. It never appe
 
 If the token is ever rejected, run `msads-auth` again.
 
+**Guard the token file like a password.** The tools are read-only, but the token is not. Microsoft only offers the
+`msads.manage` scope, and a Google sign-in token is accepted by the Microsoft Ads API the same way, so anyone who copies
+that file plus your developer token could make changes with their own software. Keep it on a machine you control, with
+its 0600 mode.
+
 ## 5. The health check (built for a daily monitoring agent)
 
-`adsops_msads_health` reads every Active campaign: its structure, the last 2 days of stats and today's spend. Findings:
+`adsops_msads_health` reads the account and every campaign, then checks the structure of Active **Search** campaigns, the
+last 2 days of stats and today's spend. Other campaign types (Performance Max, Shopping, Audience) are listed as
+`not_structure_checked`, because their ad groups and ads work differently and checking them the same way would raise
+false alarms. Findings:
 
 | Severity | Finding |
 |---|---|
+| critical | The account is not Active (for example paused for billing), so nothing in it can serve |
+| critical | A campaign is Suspended (usually billing or policy) or paused because its budget ran out |
 | critical | The campaign is Active but has no Active ad group, so nothing can serve |
 | critical | An Active ad group has no serving keyword, or no serving ad (all paused or disapproved) |
 | warning | Keywords or ads disapproved by editorial review (with examples) |
@@ -96,7 +106,7 @@ If the token is ever rejected, run `msads-auth` again.
 | info | No final URL suffix, so leads will not carry utm or campaign ids into your CRM |
 | info | Ad group on Bing-owned sites only (syndicated search partners off) |
 
-Paused campaigns are not alarms. `ok` is false only when there is a critical finding.
+Campaigns you paused yourself are not alarms. `ok` is false only when there is a critical finding.
 
 A simple agent recipe: once a day, call `adsops_msads_health`. If `ok` is false, alert a human with the findings. Otherwise
 post `adsops_msads_performance days=1` and the top 10 from `adsops_msads_search_terms days=7`.
@@ -107,7 +117,8 @@ post `adsops_msads_performance days=1` and the top 10 from `adsops_msads_search_
   no SDK. Ids are returned as strings, exactly as the API sends them.
 - **Report empty days:** Microsoft returns no report file when there is no traffic in the window. AdRails reports that as
   zero rows, not an error. The metrics history writes explicit zero days for known campaigns.
-- **Report dates:** reports use the Eastern US time zone for day boundaries (`EasternTimeUSCanada`).
+- **Report dates:** reports use the account's own time zone (its campaigns' `TimeZone`), so days line up with the Microsoft
+  Ads UI and with Google Ads' account-local days. "Today" in a tool's default window is this machine's local date.
 - **Network errors:** these are retried with backoff (429 and 5xx too). A DNS failure is named as such, with the host it
   could not resolve.
 - **Not covered yet:**

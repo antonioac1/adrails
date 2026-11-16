@@ -188,12 +188,15 @@ def _local_day(at):
         return str(at or "")[:10]
 
 
-def zero_fill(st, source, entity_type, metrics, day_from, day_to):
+def zero_fill(st, source, entity_type, metrics, day_from, day_to, entity_ids=None):
     """Review #2: a pulled day with no rows is a ZERO day (no clicks, no leads), not unknown. Platforms return no row for a
     zero day, so after each pull write explicit zeros for every entity already known to the store, from its first day on,
     inside the pulled window only (outside the window stays null = never pulled)."""
     rows = st._conn.execute("SELECT entity_id, MIN(day) AS first, MAX(entity_name) AS name FROM facts WHERE source=? AND entity_type=? "
                          "GROUP BY entity_id", (source, entity_type)).fetchall()
+    if entity_ids is not None:                 # only the entities this pull actually covered (one account of several)
+        keep = {str(x) for x in entity_ids}
+        rows = [r for r in rows if str(r[0]) in keep]
     have = {(r[0], r[1], r[2]) for r in st._conn.execute(
         "SELECT entity_id, day, metric FROM facts WHERE source=? AND entity_type=? AND day BETWEEN ? AND ?",
         (source, entity_type, day_from, day_to))}
@@ -265,7 +268,7 @@ def register(srv, ctx, cfg, gsc_client=None, msads_client=None):
                     accts = msads_tools.resolve_accounts(cfg, mc)
                     if not accts:
                         report["microsoft_ads"] = {"error": "no Microsoft Ads account matched microsoft_ads.accounts"}
-                except ToolError as e:
+                except Exception as e:             # noqa: BLE001 - one platform failing must not stop the other sources
                     accts, report["microsoft_ads"] = [], {"error": scrub(str(e), 300)}
                 for a in accts:
                     scope = "msads:" + str(a["number"])
@@ -275,12 +278,15 @@ def register(srv, ctx, cfg, gsc_client=None, msads_client=None):
                         report[scope] = "up to date"
                         continue
                     try:
-                        n = st.upsert(msads_tools.facts(mc.report("campaign", a["account_id"], a["customer_id"], *win), "campaign"))
-                        n += st.upsert(msads_tools.facts(mc.report("search_term", a["account_id"], a["customer_id"], *win), "search_term"))
-                        zero_fill(st, "microsoft_ads", "campaign", ["cost", "clicks", "impressions", "conversions"], *win)
+                        camps = mc.campaigns(a["account_id"], a["customer_id"])
+                        tz = msads_tools.tz_of(camps)
+                        n = st.upsert(msads_tools.facts(mc.report("campaign", a["account_id"], a["customer_id"], *win, time_zone=tz), "campaign"))
+                        n += st.upsert(msads_tools.facts(mc.report("search_term", a["account_id"], a["customer_id"], *win, time_zone=tz), "search_term"))
+                        zero_fill(st, "microsoft_ads", "campaign", ["cost", "clicks", "impressions", "conversions"], *win,
+                                  entity_ids=[c["campaign_id"] for c in camps])
                         st.record_pull("microsoft_ads", scope, win[0], win[1], n)
                         report[scope] = {"days": list(win), "rows": n}
-                    except ToolError as e:
+                    except Exception as e:             # noqa: BLE001 - recorded as a failed pull, other sources still run
                         st.record_pull("microsoft_ads", scope, win[0], win[1], 0, ok=False, error=str(e))
                         report[scope] = {"error": scrub(str(e), 300)}
             if "search_console" in only:
@@ -705,7 +711,10 @@ def selftest():
         def accounts(self):
             return [{"account_id": "187", "number": "G1", "customer_id": "255"}, {"account_id": "188", "number": "G9", "customer_id": "255"}]
 
-        def report(self, level, a, c, lo, hi):
+        def campaigns(self, a, c):
+            return [{"campaign_id": "525", "time_zone": "EasternTimeUSCanada"}]
+
+        def report(self, level, a, c, lo, hi, time_zone=None):
             if level == "campaign":
                 return [{"TimePeriod": "10/28/2026", "CampaignId": "525", "CampaignName": "Owners", "Spend": 12.5, "Clicks": 3, "Impressions": 90, "Conversions": 1}]
             return [{"TimePeriod": "2026-10-28", "SearchQuery": "Tampa PM", "Spend": 4.0, "Clicks": 1, "Impressions": 9, "Conversions": 0}]
@@ -719,6 +728,12 @@ def selftest():
     register(Srv(), Ctx(), cfg3, gsc_client=FakeGsc(), msads_client=FakeMs())
     r4 = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads"], "backfill_days": 30})
     assert "msads:G5" in r4["pulled"] and "error" not in r4["pulled"]["msads:G5"], r4; n += 1      # pinned ids pull (was a silent 0)
+    class BrokenMs(FakeMs):
+        def report(self, *a, **k):
+            raise OSError("socket timed out")
+    register(Srv(), Ctx(), dict(cfg2, microsoft_ads={"accounts": ["G1"]}), gsc_client=FakeGsc(), msads_client=BrokenMs())
+    r5 = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads", "changes"], "backfill_days": 30})
+    assert "error" in r5["pulled"]["msads:G1"] and "changes" in r5["pulled"], r5; n += 1      # a network failure is contained
     register(Srv(), Ctx(), cfg2, gsc_client=FakeGsc(), msads_client=FakeMs())
     before = tools["adsops_metrics"]({"action": "series", "source": "microsoft_ads", "metric": "cost", "days": 60})["series"]
     again = tools["adsops_metrics_pull"]({"sources": ["microsoft_ads"]})["pulled"]["msads:G1"]

@@ -125,11 +125,13 @@ def _load_microsoft_ads(cfg):
         src(a.get("client_secret"), "auth.client_secret")
         _need_str(a, "redirect_uri", "microsoft_ads.auth (google): ")
     accts = m.get("accounts", [])
-    ok = isinstance(accts, list) and all(isinstance(x, (str, int)) or (isinstance(x, dict) and str(x.get("account_id", "")).isdigit()
-                                                                           and str(x.get("customer_id", "")).isdigit()) for x in accts)
+    plain = [x for x in accts if isinstance(x, (str, int)) and not isinstance(x, bool)] if isinstance(accts, list) else []
+    pinned = [x for x in accts if isinstance(x, dict) and str(x.get("account_id", "")).isdigit()
+              and str(x.get("customer_id", "")).isdigit()] if isinstance(accts, list) else []
+    ok = isinstance(accts, list) and len(plain) + len(pinned) == len(accts) and not (plain and pinned)
     if not ok:
         raise ToolError("config: microsoft_ads.accounts must be account numbers/ids, or pinned objects "
-                        "{\"number\", \"account_id\", \"customer_id\"} (numeric ids)")
+                        "{\"number\", \"account_id\", \"customer_id\"} (numeric ids), not both kinds")
 
 
 def load_config(path):
