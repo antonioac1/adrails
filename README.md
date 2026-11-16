@@ -54,6 +54,8 @@ Three things it does differently:
 
 
 
+> **New in 0.14.3:** ChatGPT Ads lifetime spend now counts the launch day. OpenAI's insights API silently drops the whole first day when a time range does not start at local midnight, and AdRails started lifetime ranges at the campaign's created_at, so the guard under-read lifetime spend by the first day's spend (found live: $65 across two campaigns). Lifetime ranges now start at local midnight of the creation day. Upgrade if you rely on adsops_openai_guard caps. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.
+>
 > **New in 0.14.2:** 1Password secret reads never inherit the MCP server's stdin (the JSON-RPC pipe), and the Microsoft Ads loader retries once after a stall: a cold first read inside an MCP client could time out the first Microsoft call of the day. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.
 >
 > **New in 0.14.1:** the built-in `viewer` RBAC role now includes the `adsops_msads_*` monitor tools, so an agent locked to read-only roles can run the Microsoft Ads monitor. 87 tools with Google Ads only; with ChatGPT Ads and Microsoft Ads configured, 109 tools.
